@@ -1,5 +1,4 @@
 import os
-import urllib.parse as urlparse
 from urllib.parse import urlencode
 
 import streamlit as st
@@ -55,6 +54,12 @@ def full_current_url():
     qs = get_current_query_string()
     return REDIRECT_URI + (f"?{qs}" if qs else "")
 
+def _get_param(q: dict, key: str):
+    v = q.get(key)
+    if isinstance(v, list):
+        return v[0] if v else None
+    return v
+
 # --- Estado de sesión ---
 if "google_user" not in st.session_state:
     st.session_state["google_user"] = None  # dict con info del usuario
@@ -62,14 +67,16 @@ if "oauth_state" not in st.session_state:
     st.session_state["oauth_state"] = None
 
 # --- Manejo del callback OAuth ---
-query_params = dict(st.query_params)  # ahora es un mapping; lo convertimos a dict simple
-has_code_and_state = "code" in query_params and "state" in query_params
+query_params = dict(st.query_params)  # mapping → dict
+code = _get_param(query_params, "code")
+state = _get_param(query_params, "state")
+has_code_and_state = bool(code and state)
 
 if has_code_and_state and st.session_state.get("oauth_state"):
     try:
         flow = build_flow()
         # Verificar que el state coincida
-        if query_params["state"] != st.session_state["oauth_state"]:
+        if state != st.session_state["oauth_state"]:
             st.warning("El parámetro 'state' no coincide. Volvé a intentar el login.")
         else:
             # Intercambiar el código por tokens
@@ -97,17 +104,9 @@ if has_code_and_state and st.session_state.get("oauth_state"):
                     "given_name": given_name,
                     "family_name": family_name,
                 }
-# Validar que sea @gmail.com (o permitir dominios Workspace si querés)
-if not email or not email.lower().endswith("@gmail.com"):
-    st.error("Necesitás iniciar sesión con una cuenta @gmail.com.")
-else:
-    st.session_state["google_user"] = {
-        "email": email,
-        "picture": picture,
-        "given_name": given_name,
-        "family_name": family_name,
-    }
-    st.success(f"✅ Login exitoso. ¡Bienvenido/a {given_name}!")
+                # --- Mensaje de login exitoso ---
+                st.success(f"✅ Login exitoso. ¡Bienvenido/a {given_name or '👤'}!")
+                # st.balloons()  # opcional: animación
 
             # Limpiar la query para no dejar ?code=... en la URL
             st.query_params.clear()
