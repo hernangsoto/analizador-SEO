@@ -25,7 +25,7 @@ CLIENT_SECRET = st.secrets["oauth"]["client_secret"]
 REDIRECT_URI = st.secrets["oauth"]["redirect_uri"]  # debe coincidir EXACTAMENTE con lo configurado en Google
 SCOPES = ["openid", "email", "profile"]
 
-# Opcional: lista de dominios permitidos (si no se define, se acepta cualquiera)
+# Opcional: dominios permitidos. Si no está, se acepta cualquier cuenta de Google
 ALLOWED_DOMAINS = st.secrets.get("oauth", {}).get("allowed_domains", None)  # ej: ["gmail.com","tudominio.com"]
 
 # --- Helpers ---
@@ -66,7 +66,7 @@ def email_allowed(address: str) -> bool:
     if not address:
         return False
     if not ALLOWED_DOMAINS:
-        return True  # sin restricción → cualquier cuenta de Google
+        return True
     domain = address.split("@")[-1].lower()
     return domain in {d.lower() for d in ALLOWED_DOMAINS}
 
@@ -91,8 +91,9 @@ if has_code_and_state and st.session_state.get("oauth_state"):
             flow.fetch_token(authorization_response=full_current_url())
             creds = flow.credentials
 
-            # usar el id_token público (no el atributo privado)
-            raw_id_token = getattr(creds, "id_token", None)
+            # Nota: credentials.id_token puede ser None según flujo/versión; si lo es, usamos _id_token.
+            raw_id_token = getattr(creds, "id_token", None) or getattr(creds, "_id_token", None)
+
             idinfo = id_token.verify_oauth2_token(
                 raw_id_token,
                 grequests.Request(),
@@ -103,7 +104,6 @@ if has_code_and_state and st.session_state.get("oauth_state"):
             given_name = idinfo.get("given_name") or ""
             family_name = idinfo.get("family_name") or ""
 
-            # Validación flexible por dominio
             if not email_allowed(email):
                 allowed_list = ", ".join(ALLOWED_DOMAINS) if ALLOWED_DOMAINS else "cualquier cuenta de Google"
                 st.error(f"No autorizado. Dominios permitidos: {allowed_list}.")
@@ -138,8 +138,18 @@ if st.session_state["google_user"] is None:
         )
         st.session_state["oauth_state"] = state
         st.query_params.clear()
+
+        # 🔑 Redirigir en la MISMA pestaña (evita perder session_state)
         st.write("Redirigiendo a Google…")
-        st.markdown(f"[➡️ Continuar con Google]({auth_url})")
+        st.markdown(
+            f"""
+            <script>
+              window.location.href = "{auth_url}";
+            </script>
+            <a href="{auth_url}" target="_self">➡️ Continuar con Google</a>
+            """,
+            unsafe_allow_html=True,
+        )
 
 else:
     user = st.session_state["google_user"]
