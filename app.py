@@ -14,7 +14,11 @@ st.title("🔐 Demo: Tu nombre + Login con Google")
 if "nombre" not in st.session_state:
     st.session_state["nombre"] = ""
 
-st.session_state["nombre"] = st.text_input("Tu nombre", value=st.session_state["nombre"], placeholder="Ej: Hernán Soto")
+st.session_state["nombre"] = st.text_input(
+    "Tu nombre",
+    value=st.session_state["nombre"],
+    placeholder="Ej: Hernán Soto"
+)
 
 # --- Config de OAuth (desde secrets.toml) ---
 CLIENT_ID = st.secrets["oauth"]["client_id"]
@@ -32,45 +36,43 @@ def build_flow():
             "token_uri": "https://oauth2.googleapis.com/token",
             "client_secret": CLIENT_SECRET,
             "redirect_uris": [REDIRECT_URI],
-            "javascript_origins": [REDIRECT_URI.rsplit("/", 1)[0]]
+            "javascript_origins": [REDIRECT_URI.rsplit("/", 1)[0]],
         }
     }
     flow = Flow.from_client_config(client_config, scopes=SCOPES)
     flow.redirect_uri = REDIRECT_URI
     return flow
 
+def _as_doseq_dict(q: dict) -> dict:
+    # Asegura listas para urlencode(..., doseq=True)
+    return {k: (v if isinstance(v, list) else [v]) for k, v in q.items()}
+
 def get_current_query_string():
-    # Reconstruye la query actual de Streamlit
-    q = st.experimental_get_query_params()  # dict[str, list[str]]
-    # Pasar doseq=True para listas
-    return urlencode(q, doseq=True)
+    q = dict(st.query_params)  # Mapping → dict
+    return urlencode(_as_doseq_dict(q), doseq=True)
 
 def full_current_url():
-    # En Streamlit Cloud, REDIRECT_URI debe ser la URL pública (https://xxxx.streamlit.app)
-    # Google redirige a esa URL con ?code=...&state=...
     qs = get_current_query_string()
     return REDIRECT_URI + (f"?{qs}" if qs else "")
 
 # --- Estado de sesión ---
 if "google_user" not in st.session_state:
     st.session_state["google_user"] = None  # dict con info del usuario
-
-# --- Manejo del callback OAuth ---
-query_params = st.experimental_get_query_params()
-has_code_and_state = "code" in query_params and "state" in query_params
-
-# Guardamos/recuperamos el "state" para mitigar CSRF
 if "oauth_state" not in st.session_state:
     st.session_state["oauth_state"] = None
+
+# --- Manejo del callback OAuth ---
+query_params = dict(st.query_params)  # ahora es un mapping; lo convertimos a dict simple
+has_code_and_state = "code" in query_params and "state" in query_params
 
 if has_code_and_state and st.session_state.get("oauth_state"):
     try:
         flow = build_flow()
         # Verificar que el state coincida
-        if query_params["state"][0] != st.session_state["oauth_state"]:
+        if query_params["state"] != st.session_state["oauth_state"]:
             st.warning("El parámetro 'state' no coincide. Volvé a intentar el login.")
         else:
-            # Intercambiamos el código por tokens
+            # Intercambiar el código por tokens
             flow.fetch_token(authorization_response=full_current_url())
             creds = flow.credentials
 
@@ -78,15 +80,14 @@ if has_code_and_state and st.session_state.get("oauth_state"):
             idinfo = id_token.verify_oauth2_token(
                 creds._id_token,
                 grequests.Request(),
-                CLIENT_ID
+                CLIENT_ID,
             )
             email = idinfo.get("email")
             picture = idinfo.get("picture")
             given_name = idinfo.get("given_name") or ""
             family_name = idinfo.get("family_name") or ""
-            hd = idinfo.get("hd")  # dominio de Google Workspace (si aplica)
 
-            # Validar que sea @gmail.com (o podés permitir dominios de Workspace)
+            # Validar que sea @gmail.com (o permitir dominios Workspace si querés)
             if not email or not email.lower().endswith("@gmail.com"):
                 st.error("Necesitás iniciar sesión con una cuenta @gmail.com.")
             else:
@@ -97,18 +98,17 @@ if has_code_and_state and st.session_state.get("oauth_state"):
                     "family_name": family_name,
                 }
 
-            # Limpiar la query para no dejar el code en la URL
-            st.experimental_set_query_params()
+            # Limpiar la query para no dejar ?code=... en la URL
+            st.query_params.clear()
 
     except Exception as e:
         st.error(f"Falló el intercambio de token: {e}")
-        st.experimental_set_query_params()  # limpiar
+        st.query_params.clear()  # limpiar la query si algo falló
 
 # --- Botón de Login ---
 if st.session_state["google_user"] is None:
     st.write("Primero completá tu nombre y después hacé login con Google.")
 
-    # Deshabilitar el botón si no hay nombre
     disabled = len(st.session_state["nombre"].strip()) == 0
 
     if st.button("Iniciar sesión con Google", disabled=disabled):
@@ -116,10 +116,10 @@ if st.session_state["google_user"] is None:
         auth_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
-            prompt="consent"  # fuerza pantalla de consentimiento la primera vez
+            prompt="consent",  # fuerza pantalla de consentimiento la primera vez
         )
         st.session_state["oauth_state"] = state
-        st.experimental_set_query_params()  # limpiamos antes de redirigir
+        st.query_params.clear()  # limpiamos antes de redirigir
         st.write("Redirigiendo a Google…")
         st.markdown(f"[➡️ Continuar con Google]({auth_url})")
 
@@ -139,5 +139,5 @@ else:
     if st.button("Cerrar sesión"):
         st.session_state["google_user"] = None
         st.session_state["oauth_state"] = None
-        st.experimental_set_query_params()
+        st.query_params.clear()
         st.rerun()
