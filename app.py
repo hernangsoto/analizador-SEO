@@ -8,6 +8,8 @@ import gspread
 from gspread_dataframe import set_with_dataframe
 import time
 import json
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
 
 # -------------------------------------------------------------
 # 🔐 Autenticación (Service Account desde .streamlit/secrets.toml)
@@ -140,31 +142,122 @@ def copy_template_sheet(drive_service, template_id: str, new_title: str) -> str:
 
 st.set_page_config(page_title="Analizador de Medios — Streamlit", layout="wide")
 st.title("Analizador de Medios (Streamlit)")
-st.caption("Autenticación con Service Account. Exporta datos diarios a un Google Sheet basado en un template.")
+st.caption("Autenticación con OAuth (usuario) o Service Account. Exporta datos diarios a un Google Sheet basado en un template.")
 
 with st.sidebar:
     st.subheader("Autenticación")
-    sa_info = None
-    if "gcp_service_account" in st.secrets:
-        sa_info = dict(st.secrets["gcp_service_account"])
-        st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
-    else:
-        st.warning("No encontré gcp_service_account en secrets. Subí el JSON o pegalo abajo.")
-        uploaded = st.file_uploader("Subí el JSON de la Service Account", type=["json"])
-        pasted = st.text_area("…o pegá el JSON aquí")
-        if uploaded:
-            try:
-                sa_info = json.load(uploaded)
-                st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
-            except Exception as e:
-                st.error(f"JSON inválido: {e}")
-        elif pasted.strip():
-            try:
-                sa_info = json.loads(pasted)
-                st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
-            except Exception as e:
-                st.error(f"JSON inválido: {e}")
+    auth_method = st.radio("Método", ["OAuth (usuario)", "Service Account"], index=0)
 
+    oauth_creds = None
+    sa_info = None
+
+    if auth_method == "OAuth (usuario)":
+        # Intentar cargar config desde secrets anidado: [gcp_oauth_client] -> [web]
+        oauth_cfg = None
+        try:
+            oauth_cfg = dict(st.secrets["gcp_oauth_client"]["web"])  # TOML anidado correcto
+        except Exception:
+            pass
+        # Fallback manual si no hay secrets
+        if not oauth_cfg:
+            st.warning("No encontré gcp_oauth_client → web en Secrets. Pegá los datos para probar.")
+            col1, col2 = st.columns(2)
+            with col1:
+                cid = st.text_input("client_id")
+                csecret = st.text_input("client_secret", type="password")
+            with col2:
+                redirect_uri = st.text_input("redirect_uri", value="https://hernangsoto.streamlit.app/")
+            if cid and csecret and redirect_uri:
+                oauth_cfg = {
+                    "client_id": cid,
+                    "client_secret": csecret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri],
+                }
+        if oauth_cfg:
+            st.success("Config OAuth cargada.")
+            redirect_uri = oauth_cfg["redirect_uris"][0]
+            # Si ya está logueado
+            if st.session_state.get("oauth_creds"):
+                oauth_creds = st.session_state.get("oauth_creds")
+                st.info("Sesión iniciada con Google.")
+                if st.button("Cerrar sesión"):
+                    st.session_state["oauth_creds"] = None
+                    st.rerun()
+            else:
+                # Generar URL de login
+                flow = Flow.from_client_config(
+                    oauth_cfg if "web" in oauth_cfg else {"web": oauth_cfg},
+                    scopes=[
+                        "https://www.googleapis.com/auth/webmasters.readonly",
+                        "https://www.googleapis.com/auth/spreadsheets",
+                        "https://www.googleapis.com/auth/drive",
+                    ],
+                )
+                flow.redirect_uri = redirect_uri
+                if st.button("🔐 Iniciar sesión con Google"):
+                    auth_url, state = flow.authorization_url(
+                        access_type="offline", include_granted_scopes="true", prompt="consent"
+                    )
+                    st.session_state["_oauth_cfg"] = oauth_cfg
+                    st.session_state["_redirect_uri"] = redirect_uri
+                    st.session_state["_oauth_state"] = state
+                    st.session_state["_auth_url"] = auth_url
+                if st.session_state.get("_auth_url"):
+                    st.link_button("Abrir Google Login", st.session_state["_auth_url"]) 
+
+        # Manejar callback
+        qp = {}
+        try:
+            qp = dict(st.query_params)
+        except Exception:
+            pass
+        if (not oauth_creds) and qp.get("code") and st.session_state.get("_oauth_cfg"):
+            code = qp["code"][0] if isinstance(qp.get("code"), list) else qp.get("code")
+            flow2 = Flow.from_client_config(
+                st.session_state["_oauth_cfg"] if "web" in st.session_state["_oauth_cfg"] else {"web": st.session_state["_oauth_cfg"]},
+                scopes=[
+                    "https://www.googleapis.com/auth/webmasters.readonly",
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive",
+                ],
+            )
+            flow2.redirect_uri = st.session_state["_redirect_uri"]
+            # Validar state opcionalmente
+            if st.session_state.get("_oauth_state") and qp.get("state"):
+                state_back = qp["state"][0] if isinstance(qp.get("state"), list) else qp.get("state")
+                if state_back != st.session_state.get("_oauth_state"):
+                    st.error("Estado OAuth inválido. Reintentá.")
+                    st.stop()
+            try:
+                flow2.fetch_token(code=code)
+                oauth_creds = flow2.credentials
+                st.session_state["oauth_creds"] = oauth_creds
+                st.success("Login correcto ✅")
+            except Exception as e:
+                st.error(f"No pude completar el login OAuth: {e}")
+    else:
+        # Service Account (fallback)
+        if "gcp_service_account" in st.secrets:
+            sa_info = dict(st.secrets["gcp_service_account"])
+            st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
+        else:
+            st.warning("No encontré gcp_service_account en secrets. Subí el JSON o pegalo abajo.")
+            uploaded = st.file_uploader("Subí el JSON de la Service Account", type=["json"])
+            pasted = st.text_area("…o pegá el JSON aquí")
+            if uploaded:
+                try:
+                    sa_info = json.load(uploaded)
+                    st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
+                except Exception as e:
+                    st.error(f"JSON inválido: {e}")
+            elif pasted.strip():
+                try:
+                    sa_info = json.loads(pasted)
+                    st.success(f"Service Account: {sa_info.get('client_email', '(sin email)')}")
+                except Exception as e:
+                    st.error(f"JSON inválido: {e}")
 # Servicios
 # Determinar credenciales a usar
 creds = None
