@@ -34,7 +34,6 @@ def init_flow(client_config, redirect_uri):
     return Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
 
 def get_auth_url(flow):
-    # refresh token + consentimiento explícito
     auth_url, _ = flow.authorization_url(
         prompt="consent",
         access_type="offline",
@@ -42,12 +41,19 @@ def get_auth_url(flow):
     )
     return auth_url
 
+def clear_qp():
+    # Usar SOLO la API nueva
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
 # -----------------
 # App
 # -----------------
 def main():
     st.title("🔐 Login con Google")
-    st.caption("Primero ingresá tu nombre y después iniciá sesión con Google.")
+    st.caption("Ingresá tu nombre y luego iniciá sesión con Google.")
 
     # 1) Nombre
     nombre = st.text_input("Tu nombre")
@@ -62,22 +68,13 @@ def main():
         st.session_state.auth_url = get_auth_url(st.session_state.auth_flow)
 
     # 3) Si volvemos de Google con ?code=... canjeamos el token
-    qp = getattr(st, "query_params", None) or st.experimental_get_query_params()
-    code = None
-    if qp and "code" in qp and not st.session_state.get("credentials"):
-        code = qp["code"][0] if isinstance(qp["code"], list) else qp["code"]
-
+    code = st.query_params.get("code")  # ✅ solo API nueva
     if code and not st.session_state.get("credentials"):
         with st.spinner("Autenticando..."):
             try:
-                # Usamos el MISMO flow guardado en sesión para validar 'state'
                 st.session_state.auth_flow.fetch_token(code=code)
                 st.session_state.credentials = st.session_state.auth_flow.credentials
-                # Limpiar query params
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    st.experimental_set_query_params()
+                clear_qp()
                 st.rerun()
             except Exception as e:
                 st.error(f"Error al autenticar: {e}")
@@ -89,7 +86,7 @@ def main():
         else:
             st.write(f"¡Hola **{nombre}**! Iniciá sesión con Google:")
             if st.button("🔓 Sign in with Google", type="primary", use_container_width=True):
-                # Redirige en la MISMA pestaña (evita perder el state del Flow)
+                # Redirige en la MISMA pestaña para preservar session_state/state
                 st.markdown(
                     f'<script>window.location.href="{st.session_state.auth_url}";</script>',
                     unsafe_allow_html=True,
@@ -104,7 +101,7 @@ def main():
     creds = st.session_state.credentials
     st.success(f"¡Hola {st.session_state.get('nombre','')}! Sesión iniciada correctamente.")
 
-    # Traer perfil con la API OAuth2
+    # Perfil básico
     try:
         oauth2 = build("oauth2", "v2", credentials=creds)
         me = oauth2.userinfo().get().execute()
@@ -122,10 +119,7 @@ def main():
     if st.button("Cerrar sesión"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
-        try:
-            st.query_params.clear()
-        except Exception:
-            st.experimental_set_query_params()
+        clear_qp()
         st.rerun()
 
 if __name__ == "__main__":
