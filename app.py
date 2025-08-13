@@ -6,25 +6,24 @@ from googleapiclient.discovery import build
 
 st.set_page_config(page_title="Login con Google", page_icon="🔐")
 
-# -----------------
-# Configuración
-# -----------------
+# ----------------- Config -----------------
 def load_config():
     client_id = st.secrets.get("CLIENT_ID") or os.getenv("CLIENT_ID")
     client_secret = st.secrets.get("CLIENT_SECRET") or os.getenv("CLIENT_SECRET")
     redirect_uri = st.secrets.get("REDIRECT_URI") or os.getenv("REDIRECT_URI")
+
     if not (client_id and client_secret and redirect_uri):
         st.error("Faltan CLIENT_ID / CLIENT_SECRET / REDIRECT_URI en Secrets.")
         st.stop()
 
+    # Tipo 'web' para despliegues en Streamlit Cloud
     client_config = {
-        # Usamos tipo 'web' para apps deployadas
         "web": {
             "client_id": client_id,
             "client_secret": client_secret,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [redirect_uri],
+            "redirect_uris": [redirect_uri],            # debe coincidir EXACTO con secrets y GCP
             "javascript_origins": ["https://hernangsoto.streamlit.app"],
         }
     }
@@ -36,36 +35,33 @@ def new_flow(client_config, redirect_uri):
 
 def build_auth_url(flow):
     url, _ = flow.authorization_url(
-        prompt="consent",
-        access_type="offline",
+        prompt="consent",               # fuerza pantalla de consentimiento
+        access_type="offline",          # pide refresh_token
         include_granted_scopes="true",
     )
     return url
 
 def clear_qp():
     try:
-        st.query_params.clear()
+        st.query_params.clear()         # usar SOLO la API nueva de query params
     except Exception:
         pass
 
-# -----------------
-# App
-# -----------------
+# ----------------- App -----------------
 def main():
     st.title("🔐 Login con Google")
     st.caption("Ingresá tu nombre y luego iniciá sesión con Google.")
 
-    # 1) Nombre
+    # 1) Pedir nombre
     nombre = st.text_input("Tu nombre")
     if nombre:
         st.session_state["nombre"] = nombre
 
     client_config, redirect_uri = load_config()
 
-    # 2) Preparamos la URL de auth cuando el usuario lo pida
+    # 2) Generar la URL de login (unica vez)
     if "auth_url" not in st.session_state:
-        # Creamos un flow SOLO para generar la URL (no lo necesitamos conservar)
-        tmp_flow = new_flow(client_config, redirect_uri)
+        tmp_flow = new_flow(client_config, redirect_uri)   # flow temporal solo para generar URL
         st.session_state.auth_url = build_auth_url(tmp_flow)
 
     # 3) ¿Volvimos de Google con ?code=... ?
@@ -77,9 +73,9 @@ def main():
         clear_qp()
 
     if code and not st.session_state.get("credentials"):
-        # ⚠️ Creamos un Flow NUEVO y canjeamos el código (no dependemos del flow previo)
         with st.spinner("Autenticando..."):
             try:
+                # ⚠️ Re-crear un Flow NUEVO para canjear el code (no dependemos de session_state)
                 flow = new_flow(client_config, redirect_uri)
                 flow.fetch_token(code=code)
                 st.session_state.credentials = flow.credentials
@@ -95,13 +91,9 @@ def main():
         try:
             oauth2 = build("oauth2", "v2", credentials=st.session_state.credentials)
             me = oauth2.userinfo().get().execute()
-            st.toast("Inicio de sesión exitoso ✅", icon="✅")
-            st.success(
-                f"✅ ¡Hola {st.session_state.get('nombre','')}! "
-                f"Se inició sesión correctamente como **{me.get('email','tu cuenta de Google')}**."
-            )
+            st.success(f"✅ ¡Hola {st.session_state.get('nombre','')}! "
+                       f"Se inició sesión correctamente como **{me.get('email','tu cuenta de Google')}**.")
         except Exception:
-            st.toast("Inicio de sesión exitoso ✅", icon="✅")
             st.success(f"✅ ¡Hola {st.session_state.get('nombre','')}! Sesión iniciada correctamente.")
         del st.session_state["just_logged_in"]
 
@@ -112,7 +104,7 @@ def main():
         else:
             st.write(f"¡Hola **{nombre}**! Iniciá sesión con Google:")
             if st.button("🔓 Sign in with Google", type="primary", use_container_width=True):
-                # Redirigir en la MISMA pestaña
+                # Redirige en la misma pestaña para conservar estado del navegador
                 st.markdown(
                     f'<script>window.location.href="{st.session_state.auth_url}";</script>',
                     unsafe_allow_html=True,
