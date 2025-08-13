@@ -1,229 +1,334 @@
 # app.py
 import streamlit as st
-import time
-import base64
-import hashlib
-import os
-import json
-import requests
-from urllib.parse import urlencode, urlunparse
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+import datetime, time, os
+from datetime import date, timedelta
+from dateutil.relativedelta import relativedelta
+import pandas as pd
+import base64, re, traceback
+import gscwrapper, logging
+import numpy as np
+import warnings
+warnings.simplefilter("ignore", category=FutureWarning)
 
-st.set_page_config(page_title="Login con Google", page_icon="🔐")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# ========= Config =========
-CLIENT_ID = st.secrets.get("client_id", "828947627584-2gb6qjlqtci802716dhbk1aa499nbom9.apps.googleusercontent.com")
-CLIENT_SECRET = st.secrets.get("client_secret", "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")
+# ------------- Constantes -------------
+DATE_RANGE_OPTIONS = {
+    'Últimos 3 meses': 3,
+    'Últimos 6 meses': 6,
+    'Últimos 12 meses': 12,
+}
+DF_PREVIEW_ROWS = 100
+MAX_ROWS = 1_000_000
 
-# URL de tu app en Streamlit (con barra final)
-PRODUCTION_REDIRECT_URI = "https://hernangsoto.streamlit.app/"
-LOCAL_REDIRECT_URI = "http://localhost:8501/"
-REDIRECT_URI = PRODUCTION_REDIRECT_URI  # Cambia a LOCAL_REDIRECT_URI para pruebas locales
+# ------------- UI base -------------
+def setup_streamlit():
+    st.set_page_config(page_title="GSC | Evergreen Queries y Pages", page_icon="🟩")
+    st.title("🟩 GSC | Evergreen Queries y Pages")
+    st.write("Esta app permite ver páginas o queries que se mantienen con clicks e impresiones a lo largo del tiempo.")
+    st.write("Toma rangos a mes cerrado de 3, 6 o 12 meses.")
+    st.write("""La tabla final muestra clicks e impresiones por mes, los totales, 
+             la cantidad de meses con data (clicks e impresiones para cada mes) y la cantidad de días con data.""")
+    st.caption("[Creado por Damián Taubaso](https://www.linkedin.com/in/dtaubaso/)")
+    st.divider()
 
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
-USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-SCOPES = ["openid", "email", "profile"]
+def init_session_state():
+    if 'selected_property' not in st.session_state:
+        st.session_state.selected_property = None
+    if 'selected_date_range' not in st.session_state:
+        st.session_state.selected_date_range = 'Últimos 3 meses'
+    if 'start_date' not in st.session_state:
+        st.session_state.start_date = datetime.date.today() - datetime.timedelta(days=90)
+    if 'end_date' not in st.session_state:
+        st.session_state.end_date = datetime.date.today()
+    if 'selected_search_type' not in st.session_state:
+        st.session_state.selected_search_type = 'web'
+    if 'selected_dimension' not in st.session_state:
+        st.session_state.selected_dimension = 'query'
+    if 'brand_term' not in st.session_state:
+        st.session_state.brand_term = None
 
-# ========= Helpers =========
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+# ------------- Auth Google -------------
+def load_config():
+    """Lee credenciales desde secrets y arma el client_config para Flow."""
+    client_id = st.secrets.get('CLIENT_ID') or os.getenv('CLIENT_ID')
+    client_secret = st.secrets.get('CLIENT_SECRET') or os.getenv('CLIENT_SECRET')
+    redirect_uri = st.secrets.get('REDIRECT_URI') or os.getenv('REDIRECT_URI')
 
-def new_code_verifier() -> str:
-    return b64url(os.urandom(64))
+    if not (client_id and client_secret and redirect_uri):
+        st.stop()
+        raise RuntimeError("Faltan CLIENT_ID / CLIENT_SECRET / REDIRECT_URI en secrets.")
 
-def code_challenge_from(verifier: str) -> str:
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    return b64url(digest)
-
-def current_url_base() -> str:
-    # Devuelve la base de la URL actual, por si querés detectarla dinámicamente
-    # Nota: en Streamlit Cloud suele ser tu dominio de la app
-    # Usamos el REDIRECT_URI fijo para evitar sorpresas.
-    return REDIRECT_URI
-
-def get_query_params():
-    try:
-        return st.query_params  # Streamlit >= 1.30
-    except Exception:
-        return st.experimental_get_query_params()  # fallback
-
-def set_query_params(**kwargs):
-    try:
-        st.query_params.clear()
-        for k, v in kwargs.items():
-            st.query_params[k] = v
-    except Exception:
-        st.experimental_set_query_params(**kwargs)
-
-def start_oauth_flow():
-    # Genera state, PKCE y arma URL de autorización
-    verifier = new_code_verifier()
-    challenge = code_challenge_from(verifier)
-    state = b64url(os.urandom(32))
-
-    st.session_state["oauth_verifier"] = verifier
-    st.session_state["oauth_state"] = state
-    st.session_state["redirect_uri"] = current_url_base()
-
-    params = {
-        "client_id": CLIENT_ID,
-        "response_type": "code",
-        "scope": " ".join(SCOPES),
-        "redirect_uri": st.session_state["redirect_uri"],
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "access_type": "offline",
-        "include_granted_scopes": "true",
-        "prompt": "consent",
+    # Flow.from_client_config permite 'installed' o 'web'. Usamos 'installed' con redirect_uris como lista.
+    client_config = {
+        "installed": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://accounts.google.com/o/oauth2/token",
+            "redirect_uris": [redirect_uri],
+        }
     }
-    return f"{AUTH_URL}?{urlencode(params)}"
+    return client_config, redirect_uri
 
-def exchange_code_for_tokens(auth_code: str, state: str):
-    # Valida state y canjea code por tokens
-    if "oauth_state" not in st.session_state or state != st.session_state["oauth_state"]:
-        raise RuntimeError("State inválido o sesión expirada. Volvé a iniciar sesión.")
+def init_oauth_flow(client_config, redirect_uri):
+    scopes = ["https://www.googleapis.com/auth/webmasters"]
+    return Flow.from_client_config(
+        client_config,
+        scopes=scopes,
+        redirect_uri=redirect_uri,
+    )
 
-    verifier = st.session_state.get("oauth_verifier")
-    if not verifier:
-        raise RuntimeError("Falta PKCE verifier en la sesión. Volvé a iniciar sesión.")
+def google_auth(client_config, redirect_uri):
+    """Crea (una sola vez) el Flow y la URL de autorización."""
+    if "auth_flow" not in st.session_state:
+        st.session_state.auth_flow = init_oauth_flow(client_config, redirect_uri)
+        # prompt=consent y access_type=offline para refresh_token
+        auth_url, _ = st.session_state.auth_flow.authorization_url(
+            prompt="consent",
+            access_type="offline",
+            include_granted_scopes="true"
+        )
+        st.session_state.auth_url = auth_url
+    return st.session_state.auth_flow, st.session_state.auth_url
 
-    data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "code": auth_code,
-        "grant_type": "authorization_code",
-        "redirect_uri": st.session_state.get("redirect_uri", REDIRECT_URI),
-        "code_verifier": verifier,
+def auth_search_console(client_config, credentials):
+    token = {
+        "token": credentials.token,
+        "refresh_token": credentials.refresh_token,
+        "token_uri": credentials.token_uri,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "scopes": credentials.scopes,
+        "id_token": getattr(credentials, "id_token", None),
     }
-    resp = requests.post(TOKEN_URL, data=data, timeout=20)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Error al obtener tokens: {resp.text}")
-    return resp.json()
+    return gscwrapper.generate_auth(client_config=client_config, credentials=token)
 
-def fetch_userinfo(access_token: str):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    resp = requests.get(USERINFO_URL, headers=headers, timeout=20)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Error al traer userinfo: {resp.text}")
-    return resp.json()
+# ------------- Data -------------
+def list_gsc_properties(credentials):
+    service = build('webmasters', 'v3', credentials=credentials)
+    site_list = service.sites().list().execute()
+    return [site['siteUrl'] for site in site_list.get('siteEntry', [])] or ["No se encontraron propiedades"]
 
-def logout():
-    for k in [
-        "tokens", "user", "oauth_verifier", "oauth_state", "redirect_uri", "nombre"
-    ]:
-        if k in st.session_state:
-            del st.session_state[k]
-    # Limpia query params (por si quedó ?code=...)
-    set_query_params()
-    st.success("Sesión cerrada.")
-    st.rerun()
-
-# ========= UI =========
-st.title("🔐 Login con Google (Streamlit)")
-st.caption("Primero ingresá tu nombre, después hacé Sign in with Google.")
-
-# 1) Pedir nombre
-nombre = st.text_input("Tu nombre", value=st.session_state.get("nombre", ""))
-if nombre:
-    st.session_state["nombre"] = nombre
-
-# 2) Manejo de retorno OAuth (code + state)
-qp = get_query_params()
-auth_code = None
-auth_state = None
-# soporta listas (experimental_get_query_params) o valores simples (st.query_params)
-if qp:
-    code_val = qp.get("code")
-    state_val = qp.get("state")
-    if isinstance(code_val, list):
-        auth_code = code_val[0] if code_val else None
-    else:
-        auth_code = code_val
-    if isinstance(state_val, list):
-        auth_state = state_val[0] if state_val else None
-    else:
-        auth_state = state_val
-
-if auth_code and auth_state and "tokens" not in st.session_state:
-    with st.spinner("Intercambiando código por tokens..."):
-        try:
-            tokens = exchange_code_for_tokens(auth_code, auth_state)
-            st.session_state["tokens"] = tokens
-            # Limpia code/state de la URL para que no molesten en recargas
-            set_query_params()
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
-
-# 3) Estado autenticado
-if "tokens" in st.session_state:
-    tokens = st.session_state["tokens"]
-    access_token = tokens.get("access_token")
+def fetch_query_page(webproperty, start_date, end_date, selected_search_type, selected_dimension):
     try:
-        userinfo = fetch_userinfo(access_token)
-        st.session_state["user"] = userinfo
+        query = webproperty.query.range(start_date, end_date).dimensions([selected_dimension, "date"]).search_type(selected_search_type)
+        df = (query.limit(MAX_ROWS).get()).df
+        if df.empty:
+            raise Exception("No hay Dataframe. Revise sus datos.")
+        return df
     except Exception as e:
-        st.error(str(e))
+        logging.error(traceback.format_exc())
+        st.error(e)
+        return pd.DataFrame()
 
-    user = st.session_state.get("user", {})
-    st.success(f"¡Hola {st.session_state.get('nombre','')}! Te logueaste como {user.get('email','(email desconocido)')}")
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        if user.get("picture"):
-            st.image(user["picture"], caption=user.get("name", ""))
-    with col2:
-        st.write("**Datos de la cuenta:**")
-        st.json(
-            {
-                "name": user.get("name"),
-                "email": user.get("email"),
-                "given_name": user.get("given_name"),
-                "family_name": user.get("family_name"),
-                "sub": user.get("sub"),
-                "hd": user.get("hd"),
-            }
-        )
-        st.write("**Tokens (parcial):**")
-        st.json(
-            {
-                "expires_in": tokens.get("expires_in"),
-                "token_type": tokens.get("token_type"),
-                "id_token_present": bool(tokens.get("id_token")),
-                "refresh_token_present": bool(tokens.get("refresh_token")),
-            }
-        )
+def get_evergreen(webproperty, start_date, end_date, selected_search_type, selected_dimension, brand_term=None):
+    if selected_search_type == 'discover':
+        selected_dimension = 'page'
+    df = fetch_query_page(webproperty, start_date, end_date, selected_search_type, selected_dimension)
+    if df.empty:
+        raise Exception("No hay Dataframe")
 
-    st.button("Cerrar sesión", on_click=logout)
+    if brand_term and selected_dimension=='query':
+        brand_term = "|".join(list(map(str.strip, brand_term.split(','))))
+        df = df[~df['query'].str.contains(brand_term)]
 
-# ... deja todo igual arriba
+    df = df.sort_values('date').reset_index(drop=True)
+    df['q_days'] = df.groupby(selected_dimension)[selected_dimension].transform('count')
+    df['mes_anio'] = df['date'].apply(lambda x: re.findall('(.*-.*)-', x)[0])
+    df = df.groupby([selected_dimension, 'mes_anio', 'q_days']).sum(numeric_only=True).reset_index()
+    df_mes = pd.pivot_table(df, values=['clicks', 'impressions'], index=[selected_dimension],
+                            columns=['mes_anio'], aggfunc=np.sum, margins=True, margins_name='total', fill_value=0)
+    df_mes = df_mes.stack(0).unstack().sort_index(axis=1, level=0)
+    df_mes.columns = ['_'.join(col) for col in df_mes.columns]
+    mes_cols = [col for col in df_mes.columns if re.search(r'\d{4}-\d{2}', col) and not col.startswith('total')]
+    df_mes['count'] = df_mes[mes_cols].astype(bool).sum(axis=1)
+    q_days_series = df[[selected_dimension, 'q_days']].drop_duplicates().set_index(selected_dimension)
+    df_mes = df_mes.join(q_days_series)
+    df_mes = df_mes.sort_values(by=['q_days', 'count', 'total_clicks', 'total_impressions'],
+                                 ascending=[False, False, False, False])
+    df_mes = df_mes.reset_index()
+    if 0 in df_mes.index:
+        df_mes.drop(0, inplace=True)
+    df_mes.dropna(inplace=True)
+    return df_mes
 
-# 4) Estado no autenticado
-else:
-    if not nombre:
-        st.info("Ingresá tu nombre para continuar.")
+# ------------- Utilidades -------------
+def property_change():
+    st.session_state.selected_property = st.session_state['selected_property_selector']
+
+def get_dates(meses = 3):
+    hoy = date.today()
+    fecha_fin = date(hoy.year, hoy.month, 1) - timedelta(days=1)
+    fecha_inicio = fecha_fin - relativedelta(months=meses-1)
+    fecha_inicio = date(fecha_inicio.year, fecha_inicio.month, 1)
+    return fecha_inicio.strftime("%Y-%m-%d"), fecha_fin.strftime("%Y-%m-%d")
+
+def elapsed_time_text(elapsed_time):
+    if elapsed_time >= 60:
+        minutes = int(elapsed_time // 60)
+        seconds = int(elapsed_time % 60)
+        return f"{minutes} minutos y {seconds} segundos"
     else:
-        st.write(f"¡Hola **{nombre}**! Ahora iniciá sesión con Google:")
+        return f"{elapsed_time:.2f} segundos"
 
-        # 👉 Reemplazo del botón: redirige en la MISMA pestaña
-        if st.button("🔓 Sign in with Google", type="primary", use_container_width=True):
-            auth_link = start_oauth_flow()
-            # Redirigir en la misma pestaña evita perder st.session_state
-            st.markdown(
-                f"""
-                <script>
-                window.location.href = "{auth_link}";
-                </script>
-                """,
-                unsafe_allow_html=True,
+def show_date_range_selector():
+    selected_text = st.selectbox("Selecciona el rango de fechas:", 
+                                 list(DATE_RANGE_OPTIONS.keys()), 
+                                 key='date_range_selector')
+    return DATE_RANGE_OPTIONS[selected_text]
+
+def show_brand_term_input():
+    brand_term = st.text_input("Ingrese los términos de marca separados por coma (recomendado):")
+    st.session_state.brand_term = brand_term
+    return brand_term
+
+def show_dimensions_selector():
+    selected_dimension = st.radio("Elegir la dimensión ('query' no funciona en Discover):",
+                                  ["query", "page"], horizontal=True, index=1)
+    st.session_state.selected_dimension = selected_dimension
+    return selected_dimension
+
+def show_search_type_selector():
+    selected_search_type = st.radio("Elegir Web o Discover:",
+                                    ["web", "discover"], horizontal=True, index=1)
+    st.session_state.selected_search_type = selected_search_type
+    return selected_search_type
+
+def show_dataframe(report):
+    with st.expander(f"Mostrar las primeras {DF_PREVIEW_ROWS} filas"):
+        st.dataframe(report.head(DF_PREVIEW_ROWS))
+
+def show_property_selector(properties, account):
+    selected_property = st.selectbox(
+        "Seleccione una propiedad de Search Console:",
+        properties,
+        index=properties.index(st.session_state.selected_property) if st.session_state.selected_property in properties else 0,
+        key='selected_property_selector',
+        on_change=property_change
+    )
+    return account[selected_property]
+
+def show_fetch_data_button(webproperty, start_date, end_date, selected_search_type, selected_dimension, brand_term):
+    report = None
+    if st.button("Obtener Evergreen"):
+        start_time = time.time()
+        with st.spinner("Procesando datos (esto puede tardar unos minutos)..."):
+            report = get_evergreen(webproperty, start_date, end_date, selected_search_type, selected_dimension, brand_term)
+        if report is not None:
+            show_dataframe(report)
+            with st.spinner("Generando CSV..."):
+                download_csv(report, webproperty)
+            st.write("")
+            elapsed_time = time.time() - start_time
+            st.caption(f"Proceso completado en {elapsed_time_text(elapsed_time)} ✅")
+
+def extract_full_domain(input_string):
+    match = re.search(r"(?:https?://(?:www\.)?|sc-domain:)([\w\-\.]+)\.([\w\-]+)", input_string)
+    if match:
+        full_domain = match.group(1) + match.group(2)
+        return full_domain.replace('.', '_')
+    return ""
+
+def download_csv(report, webproperty):
+    csv = report.to_csv(index=False, encoding='utf-8')
+    property_name = extract_full_domain(webproperty.url)
+    b64_csv = base64.b64encode(csv.encode()).decode()
+    href = f"""<a href="data:file/csv;base64,{b64_csv}" download="evergreen_report_{property_name}_{int(time.time())}.csv">Descargar como CSV</a>"""
+    st.markdown(href, unsafe_allow_html=True)
+
+# ------------- MAIN -------------
+def main():
+    setup_streamlit()
+
+    # 1) Pide nombre primero
+    nombre = st.text_input("Tu nombre")
+    if nombre:
+        st.session_state["nombre"] = nombre
+
+    client_config, redirect_uri = load_config()
+
+    # 2) Crea el Flow una sola vez y arma la URL
+    auth_flow, auth_url = google_auth(client_config, redirect_uri)
+
+    # 3) Si volvemos de Google con ?code=..., terminamos el intercambio
+    code = None
+    qp = getattr(st, "query_params", None) or st.experimental_get_query_params()
+    if qp and "code" in qp and not st.session_state.get('credentials'):
+        code_val = qp["code"][0] if isinstance(qp["code"], list) else qp["code"]
+        code = code_val
+
+    if code and not st.session_state.get('credentials'):
+        with st.spinner("Intercambiando código por tokens..."):
+            try:
+                # Usamos el MISMO flow que creamos antes del redirect; así el 'state' coincide.
+                st.session_state.auth_flow.fetch_token(code=code)
+                st.session_state.credentials = st.session_state.auth_flow.credentials
+
+                # Limpia los query params para evitar reintentos repetidos
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    st.experimental_set_query_params()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al autenticar: {e}")
+
+    # 4) UI según estado
+    if not st.session_state.get('credentials'):
+        if not nombre:
+            st.info("Ingresá tu nombre para continuar.")
+        else:
+            st.write(f"¡Hola **{nombre}**! Iniciá sesión con Google para continuar.")
+            # Redirige en la MISMA pestaña para no perder la sesión (evita 'state inválido')
+            if st.button("🔓 Autentificarse con Google", type="primary", use_container_width=True):
+                st.markdown(
+                    f"""
+                    <script>
+                        window.location.href = "{auth_url}";
+                    </script>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.stop()
+
+        with st.expander("Detalles técnicos (ayuda)"):
+            st.code(
+                f"REDIRECT_URI: {redirect_uri}\nCLIENT_ID: {client_config['installed']['client_id']}\nScopes: https://www.googleapis.com/auth/webmasters"
             )
-            st.stop()
 
-    with st.expander("Detalles técnicos (ayuda)"):
-        st.code(
-            f"""
-CLIENT_ID: {'(desde secrets)' if 'client_id' in st.secrets else CLIENT_ID}
-REDIRECT_URI: {REDIRECT_URI}
-SCOPES: {SCOPES}
-            """.strip()
-        )
+    else:
+        st.success(f"¡Hola {st.session_state.get('nombre','')}! Estás autenticado.")
+        init_session_state()
+        account = auth_search_console(client_config, st.session_state.credentials)
+        properties = list_gsc_properties(st.session_state.credentials)
+
+        if properties:
+            webproperty = show_property_selector(properties, account)
+            date_range_selection = show_date_range_selector()
+            start_date, end_date = get_dates(date_range_selection)
+            brand_term = show_brand_term_input()
+            selected_search_type = show_search_type_selector()
+            selected_dimension = show_dimensions_selector()
+            show_fetch_data_button(webproperty, start_date, end_date, selected_search_type, selected_dimension, brand_term)
+
+        # Botón para cerrar sesión (opcional)
+        if st.button("Cerrar sesión"):
+            for k in list(st.session_state.keys()):
+                if k not in []:
+                    del st.session_state[k]
+            try:
+                st.query_params.clear()
+            except Exception:
+                st.experimental_set_query_params()
+            st.success("Sesión cerrada.")
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
