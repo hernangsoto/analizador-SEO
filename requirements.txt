@@ -1,3 +1,4 @@
-gscwrapper @ git+https://github.com/antoineeripret/gsc_wrapper
-pandas
 streamlit
+google-auth
+google-auth-oauthlib
+requests
