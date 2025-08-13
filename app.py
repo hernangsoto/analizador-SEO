@@ -7,10 +7,19 @@ from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import base64, re, traceback
-import gscwrapper, logging
+import logging
 import numpy as np
 import warnings
 warnings.simplefilter("ignore", category=FutureWarning)
+
+# 👇 reemplazo de gscwrapper
+try:
+    import searchconsole  # pip install searchconsole
+except ModuleNotFoundError as e:
+    st.stop()
+    raise RuntimeError(
+        "Falta el paquete 'searchconsole'. Añadilo a requirements.txt (searchconsole==0.1.12) y vuelve a desplegar."
+    )
 
 try:
     from dotenv import load_dotenv
@@ -19,11 +28,7 @@ except ImportError:
     pass
 
 # ------------- Constantes -------------
-DATE_RANGE_OPTIONS = {
-    'Últimos 3 meses': 3,
-    'Últimos 6 meses': 6,
-    'Últimos 12 meses': 12,
-}
+DATE_RANGE_OPTIONS = {'Últimos 3 meses': 3, 'Últimos 6 meses': 6, 'Últimos 12 meses': 12}
 DF_PREVIEW_ROWS = 100
 MAX_ROWS = 1_000_000
 
@@ -56,16 +61,13 @@ def init_session_state():
 
 # ------------- Auth Google -------------
 def load_config():
-    """Lee credenciales desde secrets y arma el client_config para Flow."""
     client_id = st.secrets.get('CLIENT_ID') or os.getenv('CLIENT_ID')
     client_secret = st.secrets.get('CLIENT_SECRET') or os.getenv('CLIENT_SECRET')
     redirect_uri = st.secrets.get('REDIRECT_URI') or os.getenv('REDIRECT_URI')
-
     if not (client_id and client_secret and redirect_uri):
         st.stop()
         raise RuntimeError("Faltan CLIENT_ID / CLIENT_SECRET / REDIRECT_URI en secrets.")
 
-    # Flow.from_client_config permite 'installed' o 'web'. Usamos 'installed' con redirect_uris como lista.
     client_config = {
         "installed": {
             "client_id": client_id,
@@ -79,25 +81,18 @@ def load_config():
 
 def init_oauth_flow(client_config, redirect_uri):
     scopes = ["https://www.googleapis.com/auth/webmasters"]
-    return Flow.from_client_config(
-        client_config,
-        scopes=scopes,
-        redirect_uri=redirect_uri,
-    )
+    return Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
 
 def google_auth(client_config, redirect_uri):
-    """Crea (una sola vez) el Flow y la URL de autorización."""
     if "auth_flow" not in st.session_state:
         st.session_state.auth_flow = init_oauth_flow(client_config, redirect_uri)
-        # prompt=consent y access_type=offline para refresh_token
         auth_url, _ = st.session_state.auth_flow.authorization_url(
-            prompt="consent",
-            access_type="offline",
-            include_granted_scopes="true"
+            prompt="consent", access_type="offline", include_granted_scopes="true"
         )
         st.session_state.auth_url = auth_url
     return st.session_state.auth_flow, st.session_state.auth_url
 
+# 🔁 Reemplazo: autenticación con 'searchconsole'
 def auth_search_console(client_config, credentials):
     token = {
         "token": credentials.token,
@@ -108,7 +103,8 @@ def auth_search_console(client_config, credentials):
         "scopes": credentials.scopes,
         "id_token": getattr(credentials, "id_token", None),
     }
-    return gscwrapper.generate_auth(client_config=client_config, credentials=token)
+    # devuelve un 'account' que permite account[site_url] y .query...
+    return searchconsole.authenticate(client_config=client_config, credentials=token)
 
 # ------------- Data -------------
 def list_gsc_properties(credentials):
@@ -118,7 +114,13 @@ def list_gsc_properties(credentials):
 
 def fetch_query_page(webproperty, start_date, end_date, selected_search_type, selected_dimension):
     try:
-        query = webproperty.query.range(start_date, end_date).dimensions([selected_dimension, "date"]).search_type(selected_search_type)
+        query = (
+            webproperty
+            .query
+            .range(start_date, end_date)
+            .dimensions([selected_dimension, "date"])
+            .search_type(selected_search_type)
+        )
         df = (query.limit(MAX_ROWS).get()).df
         if df.empty:
             raise Exception("No hay Dataframe. Revise sus datos.")
@@ -163,7 +165,7 @@ def get_evergreen(webproperty, start_date, end_date, selected_search_type, selec
 def property_change():
     st.session_state.selected_property = st.session_state['selected_property_selector']
 
-def get_dates(meses = 3):
+def get_dates(meses=3):
     hoy = date.today()
     fecha_fin = date(hoy.year, hoy.month, 1) - timedelta(days=1)
     fecha_inicio = fecha_fin - relativedelta(months=meses-1)
@@ -172,16 +174,12 @@ def get_dates(meses = 3):
 
 def elapsed_time_text(elapsed_time):
     if elapsed_time >= 60:
-        minutes = int(elapsed_time // 60)
-        seconds = int(elapsed_time % 60)
+        minutes = int(elapsed_time // 60); seconds = int(elapsed_time % 60)
         return f"{minutes} minutos y {seconds} segundos"
-    else:
-        return f"{elapsed_time:.2f} segundos"
+    return f"{elapsed_time:.2f} segundos"
 
 def show_date_range_selector():
-    selected_text = st.selectbox("Selecciona el rango de fechas:", 
-                                 list(DATE_RANGE_OPTIONS.keys()), 
-                                 key='date_range_selector')
+    selected_text = st.selectbox("Selecciona el rango de fechas:", list(DATE_RANGE_OPTIONS.keys()), key='date_range_selector')
     return DATE_RANGE_OPTIONS[selected_text]
 
 def show_brand_term_input():
@@ -196,8 +194,7 @@ def show_dimensions_selector():
     return selected_dimension
 
 def show_search_type_selector():
-    selected_search_type = st.radio("Elegir Web o Discover:",
-                                    ["web", "discover"], horizontal=True, index=1)
+    selected_search_type = st.radio("Elegir Web o Discover:", ["web", "discover"], horizontal=True, index=1)
     st.session_state.selected_search_type = selected_search_type
     return selected_search_type
 
@@ -247,31 +244,25 @@ def download_csv(report, webproperty):
 def main():
     setup_streamlit()
 
-    # 1) Pide nombre primero
+    # Pide nombre primero
     nombre = st.text_input("Tu nombre")
     if nombre:
         st.session_state["nombre"] = nombre
 
     client_config, redirect_uri = load_config()
-
-    # 2) Crea el Flow una sola vez y arma la URL
     auth_flow, auth_url = google_auth(client_config, redirect_uri)
 
-    # 3) Si volvemos de Google con ?code=..., terminamos el intercambio
-    code = None
+    # Si volvemos de Google con ?code=...
     qp = getattr(st, "query_params", None) or st.experimental_get_query_params()
+    code = None
     if qp and "code" in qp and not st.session_state.get('credentials'):
-        code_val = qp["code"][0] if isinstance(qp["code"], list) else qp["code"]
-        code = code_val
+        code = qp["code"][0] if isinstance(qp["code"], list) else qp["code"]
 
     if code and not st.session_state.get('credentials'):
         with st.spinner("Intercambiando código por tokens..."):
             try:
-                # Usamos el MISMO flow que creamos antes del redirect; así el 'state' coincide.
                 st.session_state.auth_flow.fetch_token(code=code)
                 st.session_state.credentials = st.session_state.auth_flow.credentials
-
-                # Limpia los query params para evitar reintentos repetidos
                 try:
                     st.query_params.clear()
                 except Exception:
@@ -280,28 +271,18 @@ def main():
             except Exception as e:
                 st.error(f"Error al autenticar: {e}")
 
-    # 4) UI según estado
     if not st.session_state.get('credentials'):
         if not nombre:
             st.info("Ingresá tu nombre para continuar.")
         else:
             st.write(f"¡Hola **{nombre}**! Iniciá sesión con Google para continuar.")
-            # Redirige en la MISMA pestaña para no perder la sesión (evita 'state inválido')
             if st.button("🔓 Autentificarse con Google", type="primary", use_container_width=True):
-                st.markdown(
-                    f"""
-                    <script>
-                        window.location.href = "{auth_url}";
-                    </script>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                # Redirige en la misma pestaña para preservar session_state (state PKCE del Flow)
+                st.markdown(f"""<script>window.location.href = "{auth_url}";</script>""", unsafe_allow_html=True)
                 st.stop()
 
         with st.expander("Detalles técnicos (ayuda)"):
-            st.code(
-                f"REDIRECT_URI: {redirect_uri}\nCLIENT_ID: {client_config['installed']['client_id']}\nScopes: https://www.googleapis.com/auth/webmasters"
-            )
+            st.code(f"REDIRECT_URI: {redirect_uri}\nCLIENT_ID: {client_config['installed']['client_id']}\nScopes: https://www.googleapis.com/auth/webmasters")
 
     else:
         st.success(f"¡Hola {st.session_state.get('nombre','')}! Estás autenticado.")
@@ -318,11 +299,9 @@ def main():
             selected_dimension = show_dimensions_selector()
             show_fetch_data_button(webproperty, start_date, end_date, selected_search_type, selected_dimension, brand_term)
 
-        # Botón para cerrar sesión (opcional)
         if st.button("Cerrar sesión"):
             for k in list(st.session_state.keys()):
-                if k not in []:
-                    del st.session_state[k]
+                del st.session_state[k]
             try:
                 st.query_params.clear()
             except Exception:
