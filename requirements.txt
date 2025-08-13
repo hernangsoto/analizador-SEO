@@ -1,10 +1,3 @@
 streamlit
-pandas
-numpy
-matplotlib
-google-api-python-client
-google-auth
 google-auth-oauthlib
-gspread
-gspread-dataframe
-gspread-formatting
+google-api-python-client
