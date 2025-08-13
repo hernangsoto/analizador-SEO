@@ -196,16 +196,27 @@ if "tokens" in st.session_state:
 
     st.button("Cerrar sesión", on_click=logout)
 
+# ... deja todo igual arriba
+
 # 4) Estado no autenticado
 else:
     if not nombre:
         st.info("Ingresá tu nombre para continuar.")
     else:
         st.write(f"¡Hola **{nombre}**! Ahora iniciá sesión con Google:")
-        if st.button("🔓 Sign in with Google"):
+
+        # 👉 Reemplazo del botón: redirige en la MISMA pestaña
+        if st.button("🔓 Sign in with Google", type="primary", use_container_width=True):
             auth_link = start_oauth_flow()
-            # Mostramos un botón de enlace para ir a Google
-            st.link_button("Continuar con Google →", auth_link)
+            # Redirigir en la misma pestaña evita perder st.session_state
+            st.markdown(
+                f"""
+                <script>
+                window.location.href = "{auth_link}";
+                </script>
+                """,
+                unsafe_allow_html=True,
+            )
             st.stop()
 
     with st.expander("Detalles técnicos (ayuda)"):
