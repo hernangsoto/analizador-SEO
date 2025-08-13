@@ -1,3 +1,4 @@
+# app.py
 import os
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
@@ -16,8 +17,8 @@ def load_config():
         st.error("Faltan CLIENT_ID / CLIENT_SECRET / REDIRECT_URI en Secrets.")
         st.stop()
 
-    # Usamos formato 'web' para apps deployadas
     client_config = {
+        # Usamos tipo 'web' para apps deployadas
         "web": {
             "client_id": client_id,
             "client_secret": client_secret,
@@ -29,11 +30,11 @@ def load_config():
     }
     return client_config, redirect_uri
 
-def init_flow(client_config, redirect_uri):
+def new_flow(client_config, redirect_uri):
     scopes = ["openid", "email", "profile"]
     return Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
 
-def get_auth_url(flow):
+def build_auth_url(flow):
     url, _ = flow.authorization_url(
         prompt="consent",
         access_type="offline",
@@ -54,27 +55,34 @@ def main():
     st.title("🔐 Login con Google")
     st.caption("Ingresá tu nombre y luego iniciá sesión con Google.")
 
-    # Nombre
+    # 1) Nombre
     nombre = st.text_input("Tu nombre")
     if nombre:
         st.session_state["nombre"] = nombre
 
     client_config, redirect_uri = load_config()
 
-    # Crear Flow y URL una sola vez
-    if "auth_flow" not in st.session_state:
-        st.session_state.auth_flow = init_flow(client_config, redirect_uri)
-        st.session_state.auth_url = get_auth_url(st.session_state.auth_flow)
+    # 2) Preparamos la URL de auth cuando el usuario lo pida
+    if "auth_url" not in st.session_state:
+        # Creamos un flow SOLO para generar la URL (no lo necesitamos conservar)
+        tmp_flow = new_flow(client_config, redirect_uri)
+        st.session_state.auth_url = build_auth_url(tmp_flow)
 
-    # Si volvemos de Google con ?code=...
+    # 3) ¿Volvimos de Google con ?code=... ?
     code = st.query_params.get("code")
+    error = st.query_params.get("error")
+
+    if error:
+        st.error(f"Error de Google OAuth: {error}")
+        clear_qp()
+
     if code and not st.session_state.get("credentials"):
+        # ⚠️ Creamos un Flow NUEVO y canjeamos el código (no dependemos del flow previo)
         with st.spinner("Autenticando..."):
             try:
-                # Usar el MISMO flow para validar 'state'
-                st.session_state.auth_flow.fetch_token(code=code)
-                st.session_state.credentials = st.session_state.auth_flow.credentials
-                # Marcamos que el login se completó recién ahora
+                flow = new_flow(client_config, redirect_uri)
+                flow.fetch_token(code=code)
+                st.session_state.credentials = flow.credentials
                 st.session_state.just_logged_in = True
                 clear_qp()
                 st.rerun()
@@ -82,37 +90,43 @@ def main():
                 st.error(f"Error al autenticar: {e}")
                 st.stop()
 
-    # Si acabamos de loguearnos, mostramos éxito
+    # 4) Mensaje de éxito si acaba de loguear
     if st.session_state.get("just_logged_in"):
         try:
             oauth2 = build("oauth2", "v2", credentials=st.session_state.credentials)
             me = oauth2.userinfo().get().execute()
-            st.success(f"✅ ¡Hola {st.session_state.get('nombre','')}! "
-                       f"Se inició sesión correctamente como **{me.get('email','tu cuenta de Google')}**.")
+            st.toast("Inicio de sesión exitoso ✅", icon="✅")
+            st.success(
+                f"✅ ¡Hola {st.session_state.get('nombre','')}! "
+                f"Se inició sesión correctamente como **{me.get('email','tu cuenta de Google')}**."
+            )
         except Exception:
+            st.toast("Inicio de sesión exitoso ✅", icon="✅")
             st.success(f"✅ ¡Hola {st.session_state.get('nombre','')}! Sesión iniciada correctamente.")
-        # La mostramos solo una vez
         del st.session_state["just_logged_in"]
 
-    # UI según estado
+    # 5) UI según estado
     if not st.session_state.get("credentials"):
         if not nombre:
             st.info("Ingresá tu nombre para continuar.")
         else:
             st.write(f"¡Hola **{nombre}**! Iniciá sesión con Google:")
             if st.button("🔓 Sign in with Google", type="primary", use_container_width=True):
-                # Redirigir en la misma pestaña para no perder session_state
+                # Redirigir en la MISMA pestaña
                 st.markdown(
                     f'<script>window.location.href="{st.session_state.auth_url}";</script>',
                     unsafe_allow_html=True,
                 )
                 st.stop()
 
-        with st.expander("Detalles técnicos"):
-            st.code(f"REDIRECT_URI: {redirect_uri}\nScopes: openid email profile")
+        with st.expander("Debug (opcional)"):
+            st.code(
+                f"REDIRECT_URI: {redirect_uri}\n"
+                f"Auth URL:\n{st.session_state.get('auth_url','')}"
+            )
         return
 
-    # Autenticado: opcional, mostrar perfil
+    # 6) Ya autenticado: mostrar perfil (opcional)
     try:
         oauth2 = build("oauth2", "v2", credentials=st.session_state.credentials)
         me = oauth2.userinfo().get().execute()
@@ -126,7 +140,7 @@ def main():
     except Exception:
         st.info("No se pudo obtener el perfil, pero el login está OK.")
 
-    # Botón Cerrar sesión
+    # 7) Cerrar sesión
     if st.button("Cerrar sesión"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
