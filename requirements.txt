@@ -1,9 +1,10 @@
-streamlit>=1.32
-pandas>=2.2
-requests>=2.31
-
-google-api-python-client>=2.120
+streamlit>=1.43,<1.49
+pandas>=2.2.0,<2.3
+numpy>=1.26.0,<3
+google-api-python-client>=2.164.0
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 httplib2>=0.22
+
+gscwrapper @ git+https://github.com/antoineeripret/gsc_wrapper@029777564f31b62c9827a2aac7adb47e38cd101c
