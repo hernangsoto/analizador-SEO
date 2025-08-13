@@ -97,6 +97,17 @@ if has_code_and_state and st.session_state.get("oauth_state"):
                     "given_name": given_name,
                     "family_name": family_name,
                 }
+# Validar que sea @gmail.com (o permitir dominios Workspace si querés)
+if not email or not email.lower().endswith("@gmail.com"):
+    st.error("Necesitás iniciar sesión con una cuenta @gmail.com.")
+else:
+    st.session_state["google_user"] = {
+        "email": email,
+        "picture": picture,
+        "given_name": given_name,
+        "family_name": family_name,
+    }
+    st.success(f"✅ Login exitoso. ¡Bienvenido/a {given_name}!")
 
             # Limpiar la query para no dejar ?code=... en la URL
             st.query_params.clear()
