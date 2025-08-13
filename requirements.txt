@@ -1,3 +1,6 @@
 google-auth-oauthlib
-google-api-python-client
-gscwrapper
+google-api-python-client==2.164.0
+gscwrapper @ git+https://github.com/antoineeripret/gsc_wrapper@029777564f31b62c9827a2aac7adb47e38cd101c
+numpy==1.26.3
+pandas==2.2.0
+streamlit==1.43.2
