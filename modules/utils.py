@@ -1,3 +1,4 @@
+# modules/utils.py
 import streamlit as st
 import json
 
@@ -10,3 +11,7 @@ def debug_log(msg: str, data=None):
             except Exception:
                 st.code(str(data))
 
+# ✅ Store en memoria del servidor (sobrevive a recargas mientras viva el worker)
+@st.cache_resource(show_spinner=False)
+def token_store():
+    return {"dest": {}, "src": {}}
