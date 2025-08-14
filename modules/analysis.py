@@ -18,7 +18,6 @@ from .gsc import (
     fetch_gsc_daily_by_page,  # diario por URL genérico (web/discover)
 )
 
-
 # ========= Helpers comunes =========
 
 def get_template_id(kind: str, account_key: str | None = None) -> str | None:
@@ -52,31 +51,48 @@ def _site_display_name(site_url: str) -> str:
     return site_url.replace("sc-domain:", "")
 
 
-def _spanish_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega columnas en español que suelen usar los templates:
-    fecha, url, clics, impresiones, posición (mantiene ctr).
-    No elimina las originales.
-    """
+def _extract_section_from_url(u: str) -> str:
+    """Devuelve la sección principal del path: '/deportes/' si la URL es https://dominio/deportes/algo/..."""
+    try:
+        p = urlparse(u)
+        parts = [seg for seg in (p.path or "/").split("/") if seg]
+        return f"/{parts[0]}/" if parts else "/"
+    except Exception:
+        return "/"
+
+
+def _spanish_columns_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte columnas diarias a: fecha, clics, impresiones, ctr (agregando si es necesario)."""
     if df.empty:
         return df
     out = df.copy()
-    # Normalizaciones seguras
+    # Esperamos columnas 'date', 'clicks', 'impressions'; ctr se recalcula
     if "date" in out.columns:
-        out["fecha"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
-    if "page" in out.columns:
-        out["url"] = out["page"]
-    if "clicks" in out.columns:
-        out["clics"] = out["clicks"]
-    if "impressions" in out.columns:
-        out["impresiones"] = out["impressions"]
-    if "position" in out.columns:
-        out["posición"] = out["position"]
+        out["fecha"] = pd.to_datetime(out["date"]).dt.date
+    g = out.groupby("fecha", as_index=False)[["clicks", "impressions"]].sum()
+    g["ctr"] = (g["clicks"] / g["impressions"]).fillna(0)
+    # Orden requerido
+    return g[["fecha", "clicks", "impressions", "ctr"]].rename(
+        columns={"clicks": "clics", "impressions": "impresiones"}
+    )
 
-    # Orden sugerido: primero ES, luego originales
-    desired = ["fecha", "url", "clics", "impresiones", "ctr", "posición", "period",
-               "date", "page", "clicks", "impressions", "position"]
-    cols = [c for c in desired if c in out.columns] + [c for c in out.columns if c not in desired]
+
+def _spanish_columns_prepost(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte PRE/POST por página a: url, clics, impresiones, ctr, posición, sección."""
+    if df.empty:
+        return df
+    out = df.rename(columns={"position": "posición", "impressions": "impresiones", "clicks": "clics"}).copy()
+    # Asegurar 'url'
+    if "url" not in out.columns and "page" in out.columns:
+        out["url"] = out["page"]
+    # Agregar sección (primer nivel del path)
+    out["sección"] = out["url"].map(_extract_section_from_url)
+    # Orden exacto
+    cols = ["url", "clics", "impresiones", "ctr", "posición", "sección"]
+    # Si alguna faltara, las agregamos vacías para no romper el set_with_dataframe
+    for c in cols:
+        if c not in out.columns:
+            out[c] = "" if c in ("sección",) else 0
     return out[cols]
 
 
@@ -106,29 +122,29 @@ def run_core_update(sc_service, drive, gsclient, site_url, params, dest_folder_i
     wrote_any = False
 
     for tipo_nombre, tipo_val in tipos:
-        # -------- PRE/POST por página (para Resumen) --------
+        # -------- PRE/POST por página (con columnas y nombres pedidos) --------
         df_pre = consultar_datos(sc_service, site_url, pre_ini, pre_fin, tipo_val, pais=pais, seccion_filtro=seccion)
         df_post = consultar_datos(sc_service, site_url, post_ini, post_fin, tipo_val, pais=pais, seccion_filtro=seccion)
         debug_log(f"[{tipo_nombre}] filas PRE", len(df_pre))
         debug_log(f"[{tipo_nombre}] filas POST", len(df_post))
 
         if not df_pre.empty:
-            df_pre_es = df_pre.rename(columns={"position": "posición", "impressions": "impresiones", "clicks": "clics"})
-            ws_pre = _ensure_ws(sh, f"{tipo_nombre} | Pre")  # nombre esperado por template
-            safe_set_df(ws_pre, df_pre_es)
+            df_pre_fmt = _spanish_columns_prepost(df_pre)
+            ws_pre = _ensure_ws(sh, f"{tipo_nombre} | Pre Core Update")
+            safe_set_df(ws_pre, df_pre_fmt)
             wrote_any = True
         else:
             st.info(f"Sin datos PRE para {tipo_nombre} con esos filtros.")
 
         if not df_post.empty:
-            df_post_es = df_post.rename(columns={"position": "posición", "impressions": "impresiones", "clicks": "clics"})
-            ws_post = _ensure_ws(sh, f"{tipo_nombre} | Post")  # nombre esperado por template
-            safe_set_df(ws_post, df_post_es)
+            df_post_fmt = _spanish_columns_prepost(df_post)
+            ws_post = _ensure_ws(sh, f"{tipo_nombre} | Post Core Update")
+            safe_set_df(ws_post, df_post_fmt)
             wrote_any = True
         else:
             st.info(f"Sin datos POST para {tipo_nombre} con esos filtros.")
 
-        # -------- Tráfico por país (apoyo) --------
+        # -------- Tráfico por país (se mantiene igual) --------
         df_pre_p = consultar_por_pais(sc_service, site_url, pre_ini, pre_fin, tipo_val, seccion_filtro=seccion)
         df_post_p = consultar_por_pais(sc_service, site_url, post_ini, post_fin, tipo_val, seccion_filtro=seccion)
         debug_log(f"[{tipo_nombre}] por país PRE", len(df_pre_p))
@@ -139,7 +155,7 @@ def run_core_update(sc_service, drive, gsclient, site_url, params, dest_folder_i
             ws_tp = _ensure_ws(sh, f"{tipo_nombre} | Tráfico por país")
             safe_set_df(ws_tp, dfp)
 
-        # -------- NUEVO: Datos Diarios (por URL) PRE+POST --------
+        # -------- Datos Diarios agregados por fecha (PRE+POST juntos) --------
         df_daily_pre = fetch_gsc_daily_by_page(
             sc_service, site_url, pre_ini, pre_fin, tipo=tipo_val, country_iso3=pais, section_path=seccion
         )
@@ -147,20 +163,18 @@ def run_core_update(sc_service, drive, gsclient, site_url, params, dest_folder_i
             sc_service, site_url, post_ini, post_fin, tipo=tipo_val, country_iso3=pais, section_path=seccion
         )
 
-        if not df_daily_pre.empty:
-            df_daily_pre.insert(0, "period", "Pre")
-        if not df_daily_post.empty:
-            df_daily_post.insert(0, "period", "Post")
+        df_daily_all = pd.concat(
+            [df_daily_pre, df_daily_post], ignore_index=True
+        ) if (not df_daily_pre.empty or not df_daily_post.empty) else pd.DataFrame()
 
-        if not df_daily_pre.empty or not df_daily_post.empty:
-            df_daily_all = pd.concat([df_daily_pre, df_daily_post], ignore_index=True)
-            # Agregar columnas en español que suelen consumir las hojas Resumen
-            df_daily_all = _spanish_columns(df_daily_all)
-            debug_log(f"[{tipo_nombre}] Datos Diarios PRE+POST (filas)", len(df_daily_all))
-            debug_log(f"[{tipo_nombre}] Datos Diarios columnas", list(df_daily_all.columns))
+        debug_log(f"[{tipo_nombre}] Datos Diarios concatenado (filas)", len(df_daily_all))
 
-            ws_daily = _ensure_ws(sh, f"{tipo_nombre} | Datos Diarios")  # nombre exacto del template
-            safe_set_df(ws_daily, df_daily_all)
+        if not df_daily_all.empty:
+            df_daily_out = _spanish_columns_daily(df_daily_all)  # -> fecha, clics, impresiones, ctr
+            debug_log(f"[{tipo_nombre}] Datos Diarios agregado (filas)", len(df_daily_out))
+            debug_log(f"[{tipo_nombre}] Datos Diarios columnas", list(df_daily_out.columns))
+            ws_daily = _ensure_ws(sh, f"{tipo_nombre} | Datos Diarios")
+            safe_set_df(ws_daily, df_daily_out)
             wrote_any = True
         else:
             st.info(f"Sin datos DIARIOS para {tipo_nombre} con esos filtros.")
@@ -189,7 +203,7 @@ def run_core_update(sc_service, drive, gsclient, site_url, params, dest_folder_i
     return sid
 
 
-# ========= Evergreen (sin cambios funcionales respecto a la última versión) =========
+# ========= Evergreen (se mantiene como en la versión anterior) =========
 
 def run_evergreen(sc_service, drive, gsclient, site_url, params, dest_folder_id=None):
     lag_days, pais, seccion, incluir_diario, start_date, end_date = params
@@ -236,8 +250,8 @@ def run_evergreen(sc_service, drive, gsclient, site_url, params, dest_folder_id=
         if df_daily.empty:
             st.info("Sin datos diarios por URL (Search) en ese período/filtros.")
         else:
-            df_daily = _spanish_columns(df_daily)
-            ws_daily = _ensure_ws(sh, "Search | Datos Diarios")   # mayúscula D
+            # Para Evergreen mantenemos por-URL (la agregación diaria la pide solo el caso Core Update)
+            ws_daily = _ensure_ws(sh, "Search | Datos Diarios")
             safe_set_df(ws_daily, df_daily)
 
     # Configuración
