@@ -363,8 +363,12 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str, dest_f
         debug_log("Excepción al copiar template", str(e))
         raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
 
-def safe_set_df(ws, df: pd.DataFrame, include_header=True):
-    df = (df or pd.DataFrame()).copy()
+def safe_set_df(ws, df: pd.DataFrame | None, include_header=True):
+    # Evitar 'df or pd.DataFrame()' porque la verdad de un DataFrame es ambigua en pandas
+    if df is None:
+        df = pd.DataFrame()
+    else:
+        df = df.copy()
     df = df.astype(object).where(pd.notnull(df), "")
     ws.clear()
     set_with_dataframe(ws, df, include_column_header=include_header)
@@ -806,13 +810,13 @@ analisis = pick_analysis()
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params)
+        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params)
+        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 else:
