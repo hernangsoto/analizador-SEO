@@ -3,7 +3,7 @@ import os
 import sys
 import streamlit as st
 
-# --- Permitir http://localhost en el redirect de OAuth (necesario en Streamlit Cloud) ---
+# --- Permitir http://localhost en el redirect de OAuth (útil en Streamlit Cloud) ---
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
@@ -29,7 +29,7 @@ from modules.drive import (
 )
 from modules.gsc import ensure_sc_client
 from modules.analysis import run_core_update, run_evergreen
-from modules.utils import token_store  # para botón "Cambiar cuenta PERSONAL"
+from modules.utils import token_store  # para "Cambiar cuenta PERSONAL"
 
 # --- Debug switch (opcional) ---
 st.session_state.setdefault("DEBUG", bool(st.secrets.get("debug", False)))
