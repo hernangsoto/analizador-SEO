@@ -5,8 +5,44 @@ import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 
-from .utils import debug_log, token_store
+# ===== Import seguro desde utils (con fallback) =====
+try:
+    from .utils import debug_log, token_store
+except Exception as _utils_err:
+    # Fallback: no frenar si utils no carga
+    st.warning(f"[auth] No pude importar modules.utils: {_utils_err}")
 
+    def debug_log(msg: str, data=None):
+        if st.session_state.get("DEBUG"):
+            st.info(str(msg))
+            if data is not None:
+                try:
+                    import json
+                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+                except Exception:
+                    st.code(str(data))
+
+    class _TokenStore:
+        KEY = "__TOKENS__"
+        def _ensure(self):
+            st.session_state.setdefault(self.KEY, {})
+        def get(self, name: str, default=None):
+            self._ensure()
+            return st.session_state[self.KEY].get(name, default)
+        def set(self, name: str, value):
+            self._ensure()
+            st.session_state[self.KEY][name] = value
+        def has(self, name: str) -> bool:
+            self._ensure()
+            return name in st.session_state[self.KEY]
+        def clear(self, name: str):
+            self._ensure()
+            st.session_state[self.KEY].pop(name, None)
+        def all(self) -> dict:
+            self._ensure()
+            return dict(st.session_state[self.KEY])
+
+    token_store = _TokenStore()
 
 # =============================
 # Scopes
@@ -18,7 +54,6 @@ SCOPES_DRIVE = [
 SCOPES_GSC = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
-
 
 # =============================
 # Helpers internos
@@ -37,7 +72,6 @@ def _account_config(account_key: str) -> dict:
         )
         st.stop()
 
-
 def _build_flow(account_key: str, scopes: list[str]) -> Flow:
     acc = _account_config(account_key)
     client_secrets = {
@@ -54,7 +88,6 @@ def _build_flow(account_key: str, scopes: list[str]) -> Flow:
     flow.redirect_uri = "http://localhost"
     return flow
 
-
 def _creds_to_dict(creds: Credentials) -> dict:
     return {
         "token": creds.token,
@@ -64,7 +97,6 @@ def _creds_to_dict(creds: Credentials) -> dict:
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes) if getattr(creds, "scopes", None) else None,
     }
-
 
 # =============================
 # API pública
@@ -80,7 +112,6 @@ def get_cached_personal_creds() -> Credentials | None:
         debug_log("No pude reconstruir creds_dest desde cache", str(e))
         token_store.clear("creds_dest")
         return None
-
 
 def pick_destination_oauth() -> Credentials | None:
     """
@@ -154,7 +185,6 @@ def pick_destination_oauth() -> Credentials | None:
             st.session_state.pop("oauth_dest", None)
 
     return None
-
 
 def pick_source_oauth() -> Credentials | None:
     """
