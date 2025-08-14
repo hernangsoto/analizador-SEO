@@ -202,18 +202,14 @@ def pick_account_and_oauth():
         horizontal=True,
         key="acct_choice",
     )
-
-    # Si cambia la cuenta, reiniciamos flujo previo
     if "oauth" in st.session_state and st.session_state["oauth"].get("account") != acct:
         st.session_state.pop("oauth")
-
-    # Crear o reutilizar el Flow y la auth_url
     if "oauth" not in st.session_state:
         flow = build_flow(acct)
         auth_url, state = flow.authorization_url(
             prompt="consent",
             access_type="offline",
-            include_granted_scopes="true",
+            include_granted_scopes="true"
         )
         st.session_state["oauth"] = {
             "account": acct,
@@ -221,37 +217,42 @@ def pick_account_and_oauth():
             "auth_url": auth_url,
             "state": state,
         }
-
     oauth = st.session_state["oauth"]
     st.markdown(f"🔗 **Paso A:** [Autorizar acceso en Google]({oauth['auth_url']})")
-
-    # Importante: pedir la **URL completa** de redirección
     auth_response_url = st.text_input(
-        "🔑 Paso B: Pegá aquí la **URL completa** que ves en la barra del navegador después de autorizar (empieza con http://localhost/…):",
+        "🔑 Paso B: Pegá aquí la URL completa después de autorizar (http://localhost/…)",
         placeholder="http://localhost/?code=...&scope=...&state=...",
-        key="auth_response_url",
     )
-
     creds = None
     if st.button("Conectar Google", type="primary"):
         if not auth_response_url.strip():
-            st.error("Pegá la URL completa de redirección (incluye code y state).")
+            st.error("Pegá la URL completa.")
             st.stop()
         try:
-            # Usar el mismo Flow almacenado (con state + code_verifier intactos)
+            from urllib.parse import urlparse, parse_qs
+            code = parse_qs(urlparse(auth_response_url.strip()).query).get("code", [None])[0]
+            if not code:
+                st.error("No se encontró el parámetro 'code' en la URL.")
+                st.stop()
             flow: Flow = oauth["flow"]
-            flow.fetch_token(authorization_response=auth_response_url.strip())
+            flow.fetch_token(code=code)
             creds = flow.credentials
-            st.session_state["creds"] = creds_to_dict(creds)
+            st.session_state["creds"] = {
+                "token": creds.token,
+                "refresh_token": getattr(creds, "refresh_token", None),
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
             st.success("Autenticación exitosa.")
         except Exception as e:
-            st.error("No se pudo intercambiar el código por tokens. Verificá que pegaste la URL completa y reintentá autorizar.")
-            st.caption(f"Detalle técnico (debug local): {e}")
-
-    # Si ya hay credenciales, reconstruimos Credentials
+            st.error("No se pudo intercambiar el código por tokens. Verificá que pegaste la URL completa.")
+            st.caption(f"Detalle técnico: {e}")
     if not creds and st.session_state.get("creds"):
         creds = Credentials(**st.session_state["creds"])
     return creds
+
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 def creds_to_dict(creds: Credentials):
