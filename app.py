@@ -29,7 +29,6 @@ def get_first_name(full_name: str | None) -> str:
         return "👋"
     return full_name.split()[0]
 
-
 def sidebar_user_info(user):
     with st.sidebar:
         with st.container():
@@ -53,17 +52,15 @@ def sidebar_user_info(user):
         st.divider()
         st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
 
-
 # ---------------------------
 # OAuth y clientes
 # ---------------------------
 
 SCOPES = [
-    'https://www.googleapis.com/auth/webmasters.readonly',
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
+    "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
-
 
 def build_flow(account_key: str) -> Flow:
     """Crea un flujo OAuth2 a partir de st.secrets para la cuenta elegida."""
@@ -79,21 +76,19 @@ def build_flow(account_key: str) -> Flow:
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "client_secret": acc["client_secret"],
-            "redirect_uris": ["http://localhost"]  # Copia/pega el code
+            "redirect_uris": ["http://localhost"],  # Copia/pega la URL completa luego
         }
     }
     flow = Flow.from_client_config(client_secrets, scopes=SCOPES)
-    flow.redirect_uri = 'http://localhost'
+    flow.redirect_uri = "http://localhost"
     return flow
-
 
 def ensure_google_clients(creds: Credentials):
     """Construye clientes con credenciales ya validadas."""
-    sc = build('searchconsole', 'v1', credentials=creds)
-    drive = build('drive', 'v3', credentials=creds)
+    sc = build("searchconsole", "v1", credentials=creds)
+    drive = build("drive", "v3", credentials=creds)
     gs = gspread.authorize(creds)
     return sc, drive, gs
-
 
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
@@ -116,7 +111,6 @@ def _fetch_all_rows(service, site_url, body, page_size=25000):
         start += page_size
     return all_rows
 
-
 def consultar_datos(service, site_url, fecha_inicio, fecha_fin, tipo_dato, pais=None, seccion_filtro=None):
     seccion_frag = seccion_filtro.strip("/") if seccion_filtro else None
     body = {"startDate": str(fecha_inicio), "endDate": str(fecha_fin), "dimensions": ["page"]}
@@ -133,18 +127,19 @@ def consultar_datos(service, site_url, fecha_inicio, fecha_fin, tipo_dato, pais=
     rows = _fetch_all_rows(service, site_url, body)
     if not rows:
         return pd.DataFrame(columns=["url", "clicks", "impressions", "ctr", "position"])
-    df = pd.DataFrame([
-        {
-            "url": r["keys"][0],
-            "clicks": r.get("clicks", 0),
-            "impressions": r.get("impressions", 0),
-            "ctr": r.get("ctr", 0.0),
-            "position": r.get("position", 0.0),
-        }
-        for r in rows
-    ])
+    df = pd.DataFrame(
+        [
+            {
+                "url": r["keys"][0],
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "ctr": r.get("ctr", 0.0),
+                "position": r.get("position", 0.0),
+            }
+            for r in rows
+        ]
+    )
     return df
-
 
 def consultar_por_pais(service, site_url, fecha_inicio, fecha_fin, tipo_dato, seccion_filtro=None):
     seccion_frag = seccion_filtro.strip("/") if seccion_filtro else None
@@ -160,12 +155,13 @@ def consultar_por_pais(service, site_url, fecha_inicio, fecha_fin, tipo_dato, se
     rows = _fetch_all_rows(service, site_url, body, page_size=250)
     if not rows:
         return pd.DataFrame(columns=["country", "clicks", "impressions"])
-    df = pd.DataFrame([
-        {"country": r.get("keys", [None])[0], "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)}
-        for r in rows
-    ])
+    df = pd.DataFrame(
+        [
+            {"country": r.get("keys", [None])[0], "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)}
+            for r in rows
+        ]
+    )
     return df.groupby("country", as_index=False)[["clicks", "impressions"]].sum().sort_values("clicks", ascending=False)
-
 
 # ---------------------------
 # Exportar a Google Sheets
@@ -177,13 +173,11 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
     sheet = gsclient.open_by_key(sid)
     return sheet, sid
 
-
 def safe_set_df(ws, df: pd.DataFrame, include_header=True):
     df = (df or pd.DataFrame()).copy()
     df = df.astype(object).where(pd.notnull(df), "")
     ws.clear()
     set_with_dataframe(ws, df, include_column_header=include_header)
-
 
 # ---------------------------
 # Vistas / UI principal
@@ -191,13 +185,14 @@ def safe_set_df(ws, df: pd.DataFrame, include_header=True):
 
 LAG_DAYS_DEFAULT = 3
 
-
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
     st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
 
-
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# PATCH: OAuth con Flow persistido + authorization_response (URL completa)
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 def pick_account_and_oauth():
     st.subheader("1) Elegí con qué cuenta autenticarte (GSC/Sheets/Drive)")
     acct = st.radio(
@@ -205,25 +200,59 @@ def pick_account_and_oauth():
         options=["ACCESO", "ACCESO_MEDIOS"],
         captions=["Credenciales de la cuenta Acceso", "Credenciales de la cuenta Acceso Medios"],
         horizontal=True,
+        key="acct_choice",
     )
-    flow = build_flow(acct)
-    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline', include_granted_scopes='true')
-    st.markdown(f"🔗 **Paso A:** [Autorizar acceso en Google]({auth_url})")
-    code = st.text_input("🔑 Paso B: Pegá aquí el `code` que aparece en la URL después de autorizar:")
+
+    # Si cambia la cuenta, reiniciamos flujo previo
+    if "oauth" in st.session_state and st.session_state["oauth"].get("account") != acct:
+        st.session_state.pop("oauth")
+
+    # Crear o reutilizar el Flow y la auth_url
+    if "oauth" not in st.session_state:
+        flow = build_flow(acct)
+        auth_url, state = flow.authorization_url(
+            prompt="consent",
+            access_type="offline",
+            include_granted_scopes="true",
+        )
+        st.session_state["oauth"] = {
+            "account": acct,
+            "flow": flow,
+            "auth_url": auth_url,
+            "state": state,
+        }
+
+    oauth = st.session_state["oauth"]
+    st.markdown(f"🔗 **Paso A:** [Autorizar acceso en Google]({oauth['auth_url']})")
+
+    # Importante: pedir la **URL completa** de redirección
+    auth_response_url = st.text_input(
+        "🔑 Paso B: Pegá aquí la **URL completa** que ves en la barra del navegador después de autorizar (empieza con http://localhost/…):",
+        placeholder="http://localhost/?code=...&scope=...&state=...",
+        key="auth_response_url",
+    )
+
     creds = None
     if st.button("Conectar Google", type="primary"):
-        if not code:
-            st.error("Pegá el código de autorización.")
+        if not auth_response_url.strip():
+            st.error("Pegá la URL completa de redirección (incluye code y state).")
             st.stop()
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        st.session_state["creds"] = creds_to_dict(creds)
-        st.success("Autenticación exitosa.")
-    # Si ya hay credenciales guardadas en sesión
+        try:
+            # Usar el mismo Flow almacenado (con state + code_verifier intactos)
+            flow: Flow = oauth["flow"]
+            flow.fetch_token(authorization_response=auth_response_url.strip())
+            creds = flow.credentials
+            st.session_state["creds"] = creds_to_dict(creds)
+            st.success("Autenticación exitosa.")
+        except Exception as e:
+            st.error("No se pudo intercambiar el código por tokens. Verificá que pegaste la URL completa y reintentá autorizar.")
+            st.caption(f"Detalle técnico (debug local): {e}")
+
+    # Si ya hay credenciales, reconstruimos Credentials
     if not creds and st.session_state.get("creds"):
         creds = Credentials(**st.session_state["creds"])
     return creds
-
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 def creds_to_dict(creds: Credentials):
     return {
@@ -235,23 +264,21 @@ def creds_to_dict(creds: Credentials):
         "scopes": creds.scopes,
     }
 
-
 def pick_site(sc_service):
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
     try:
         site_list = sc_service.sites().list().execute()
-        sites = site_list.get('siteEntry', [])
+        sites = site_list.get("siteEntry", [])
     except Exception as e:
         st.error(f"Error al obtener sitios: {e}")
         st.stop()
-    verified = [s for s in sites if s.get('permissionLevel') != 'siteUnverifiedUser']
+    verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
     if not verified:
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
-    site_map = {s['siteUrl']: s['siteUrl'] for s in verified}
+    site_map = {s["siteUrl"]: s["siteUrl"] for s in verified}
     site_url = st.selectbox("Sitio verificado:", list(site_map.keys()))
     return site_url
-
 
 def pick_analysis():
     st.subheader("3) Elegí el tipo de análisis")
@@ -265,7 +292,6 @@ def pick_analysis():
     key = st.radio("Tipos disponibles:", list(opciones.keys()), index=3)
     return opciones[key]
 
-
 def params_for_core_update():
     st.markdown("#### Parámetros (Core Update)")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT)
@@ -275,11 +301,14 @@ def params_for_core_update():
     if termino == "sí":
         fecha_fin = st.date_input("¿Cuándo finalizó el Core Update? (YYYY-MM-DD)")
     tipo = st.selectbox("Datos a analizar", ["Search", "Discover", "Ambos"], index=2)
-    pais_choice = st.selectbox("¿Filtrar por país? (ISO-3)", ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"], index=0)
+    pais_choice = st.selectbox(
+        "¿Filtrar por país? (ISO-3)",
+        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
+        index=0,
+    )
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="") or None
     return lag_days, fecha_inicio, termino, fecha_fin, tipo, pais, seccion
-
 
 def compute_core_windows(lag_days, fecha_inicio: date, termino: str, fecha_fin: date | None):
     hoy_util = date.today() - timedelta(days=lag_days)
@@ -297,12 +326,15 @@ def compute_core_windows(lag_days, fecha_inicio: date, termino: str, fecha_fin: 
         post_fin = hoy_util
     return pre_ini, pre_fin, post_ini, post_fin
 
-
 def params_for_evergreen():
     st.markdown("#### Parámetros (Evergreen)")
     st.caption("Se usa el período más amplio posible de **meses completos** (hasta 16) en Search.")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT)
-    pais_choice = st.selectbox("¿Filtrar por país? (ISO-3)", ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"], index=0)
+    pais_choice = st.selectbox(
+        "¿Filtrar por país? (ISO-3)",
+        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
+        index=0,
+    )
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="") or None
     incluir_diario = st.checkbox("Incluir análisis diario por URL (lento)", value=False)
@@ -315,7 +347,6 @@ def params_for_evergreen():
     end_date = end_month_last_day.date()
     st.info(f"Ventana mensual: {start_date} → {end_date}")
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
-
 
 # ---------------------------
 # Ejecución de análisis
@@ -359,20 +390,22 @@ def run_core_update(sc_service, drive, gsclient, site_url, params):
             safe_set_df(ws_tp, dfp)
 
     # Configuración
-    cfg = pd.DataFrame([
-        ("Sitio Analizado", site_url),
-        ("Tipo de análisis", ", ".join([t[0] for t in tipos])),
-        ("Periodo Core Update", f"{f_ini} a {f_fin or ''}".strip()),
-        ("Periodo Pre Core Update", f"{pre_ini} a {pre_fin}"),
-        ("Periodo Post Core Update", f"{post_ini} a {post_fin}"),
-        ("Sección", seccion or "Todo el sitio"),
-        ("País", pais or "Todos"),
-    ], columns=["Configuración", "Valor"])
+    cfg = pd.DataFrame(
+        [
+            ("Sitio Analizado", site_url),
+            ("Tipo de análisis", ", ".join([t[0] for t in tipos])),
+            ("Periodo Core Update", f"{f_ini} a {f_fin or ''}".strip()),
+            ("Periodo Pre Core Update", f"{pre_ini} a {pre_fin}"),
+            ("Periodo Post Core Update", f"{post_ini} a {post_fin}"),
+            ("Sección", seccion or "Todo el sitio"),
+            ("País", pais or "Todos"),
+        ],
+        columns=["Configuración", "Valor"],
+    )
     ws_cfg = _ensure_ws(sh, "Configuracion")
     safe_set_df(ws_cfg, cfg)
 
     return sid
-
 
 def run_evergreen(sc_service, drive, gsclient, site_url, params):
     lag_days, pais, seccion, incluir_diario, start_date, end_date = params
@@ -395,27 +428,29 @@ def run_evergreen(sc_service, drive, gsclient, site_url, params):
     ws_total = _ensure_ws(sh, "Search | Diario total")
     safe_set_df(ws_total, daily_tot)
 
-    # (Opcional) Diario por URL – puede ser muy pesado, se deja fuera por defecto
+    # (Opcional) Diario por URL – puede ser muy pesado
     if incluir_diario:
         df_daily = fetch_gsc_daily_evergreen(sc_service, site_url, start_date, end_date, country_iso3=pais, section_path=seccion)
         ws_daily = _ensure_ws(sh, "Search | Datos diarios")
         safe_set_df(ws_daily, df_daily)
 
     # Configuración
-    cfg = pd.DataFrame([
-        ("Sitio Analizado", site_url),
-        ("Ventana mensual", f"{start_date} a {end_date}"),
-        ("Sección", seccion or "Todo el sitio"),
-        ("País", pais or "Todos"),
-        ("Incluye diario por URL", "Sí" if incluir_diario else "No"),
-    ], columns=["Configuración", "Valor"])
+    cfg = pd.DataFrame(
+        [
+            ("Sitio Analizado", site_url),
+            ("Ventana mensual", f"{start_date} a {end_date}"),
+            ("Sección", seccion or "Todo el sitio"),
+            ("País", pais or "Todos"),
+            ("Incluye diario por URL", "Sí" if incluir_diario else "No"),
+        ],
+        columns=["Configuración", "Valor"],
+    )
     ws_cfg = _ensure_ws(sh, "Configuracion")
     safe_set_df(ws_cfg, cfg)
 
     return sid
 
-
-# ====== Funciones Evergreen auxiliares (portadas) ======
+# ====== Funciones Evergreen auxiliares ======
 
 def month_range(start_date, end_date):
     cur = pd.Timestamp(start_date).replace(day=1)
@@ -423,7 +458,6 @@ def month_range(start_date, end_date):
     while cur <= endm:
         yield cur.date(), (cur + pd.offsets.MonthEnd(0)).date()
         cur = (cur + pd.offsets.MonthBegin(1))
-
 
 def fetch_gsc_monthly_by_page(service, site_url, start_dt, end_dt, country_iso3=None, section_path=None):
     frames = []
@@ -444,18 +478,19 @@ def fetch_gsc_monthly_by_page(service, site_url, start_dt, end_dt, country_iso3=
             body["dimensionFilterGroups"] = [{"filters": filters}]
         rows = _fetch_all_rows(service, site_url, body)
         if rows:
-            df = pd.DataFrame([
-                {
-                    "page": r["keys"][0],
-                    "month": pd.to_datetime(m_start),
-                    "clicks": r.get("clicks", 0),
-                    "impressions": r.get("impressions", 0),
-                }
-                for r in rows
-            ])
+            df = pd.DataFrame(
+                [
+                    {
+                        "page": r["keys"][0],
+                        "month": pd.to_datetime(m_start),
+                        "clicks": r.get("clicks", 0),
+                        "impressions": r.get("impressions", 0),
+                    }
+                    for r in rows
+                ]
+            )
             frames.append(df)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["page", "month", "clicks", "impressions"]) 
-
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["page", "month", "clicks", "impressions"])
 
 def fetch_site_daily_totals(service, site_url, start_dt, end_dt, country_iso3=None, section_path=None):
     body = {"startDate": str(start_dt), "endDate": str(end_dt), "dimensions": ["date"], "type": "web"}
@@ -467,14 +502,19 @@ def fetch_site_daily_totals(service, site_url, start_dt, end_dt, country_iso3=No
     if filters:
         body["dimensionFilterGroups"] = [{"filters": filters}]
     rows = _fetch_all_rows(service, site_url, body, page_size=5000)
-    df = pd.DataFrame([
-        {"date": pd.to_datetime(r["keys"][0]).date(), "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)}
-        for r in rows
-    ]) if rows else pd.DataFrame(columns=["date", "clicks", "impressions"])
+    df = (
+        pd.DataFrame(
+            [
+                {"date": pd.to_datetime(r["keys"][0]).date(), "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)}
+                for r in rows
+            ]
+        )
+        if rows
+        else pd.DataFrame(columns=["date", "clicks", "impressions"])
+    )
     if not df.empty:
         df["ctr"] = (df["clicks"] / df["impressions"]).fillna(0)
     return df
-
 
 def fetch_gsc_daily_evergreen(service, site_url, start_dt, end_dt, country_iso3=None, section_path=None, page_size=25000):
     rows_all, start_row = [], 0
@@ -500,14 +540,16 @@ def fetch_gsc_daily_evergreen(service, site_url, start_dt, end_dt, country_iso3=
         if not rows:
             break
         for r in rows:
-            rows_all.append({
-                "page": r["keys"][0],
-                "date": pd.to_datetime(r["keys"][1]),
-                "clicks": r.get("clicks", 0),
-                "impressions": r.get("impressions", 0),
-                "ctr": r.get("ctr", 0.0),
-                "position": r.get("position", 0.0),
-            })
+            rows_all.append(
+                {
+                    "page": r["keys"][0],
+                    "date": pd.to_datetime(r["keys"][1]),
+                    "clicks": r.get("clicks", 0),
+                    "impressions": r.get("impressions", 0),
+                    "ctr": r.get("ctr", 0.0),
+                    "position": r.get("position", 0.0),
+                }
+            )
         if len(rows) < page_size:
             break
         start_row += page_size
@@ -515,7 +557,6 @@ def fetch_gsc_daily_evergreen(service, site_url, start_dt, end_dt, country_iso3=
     if not df.empty:
         df["date"] = df["date"].dt.date
     return df
-
 
 # ---------------------------
 # Utilidad: asegurar hoja
@@ -526,7 +567,6 @@ def _ensure_ws(sheet, title):
         return sheet.worksheet(title)
     except Exception:
         return sheet.add_worksheet(title=title, rows=2000, cols=26)
-
 
 # ---------------------------
 # App
