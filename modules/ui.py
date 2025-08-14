@@ -29,8 +29,7 @@ def get_first_name(full_name: Optional[str]) -> str:
     return full_name.split()[0]
 
 
-def sidebar_user_info(user) -> None:
-    """Panel lateral con foto, nombre, correo y botón de logout."""
+def sidebar_user_info(user):
     with st.sidebar:
         with st.container():
             c1, c2 = st.columns([1, 3])
@@ -50,8 +49,20 @@ def sidebar_user_info(user) -> None:
                 st.header("Información del usuario", anchor=False)
                 st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
                 st.write(f"**Correo:** {getattr(user, 'email', '—')}")
+
+        # ⬇️ Botón de limpieza (arriba del botón de cerrar sesión)
+        st.divider()
+        st.markdown("**🧹 Mantenimiento**")
+        if st.button("Borrar caché del paquete externo (.ext_pkgs/)", key="btn_clean_extpkgs", use_container_width=True):
+            try:
+                shutil.rmtree(".ext_pkgs", ignore_errors=True)
+                st.success("✅ Caché borrada. Hacé *Rerun* para reinstalar el paquete externo.")
+            except Exception as e:
+                st.error(f"No pude borrar .ext_pkgs: {e}")
+
         st.divider()
         st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
+
 
 
 # ---------------------------
