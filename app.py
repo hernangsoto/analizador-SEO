@@ -11,6 +11,11 @@ from google.oauth2.credentials import Credentials
 import gspread
 from gspread_dataframe import set_with_dataframe
 
+# --- OAuthlib settings para despliegues sin HTTPS en el redirect (localhost)
+import os
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")  # permite http://localhost en el authorization_response
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")   # tolera diferencias de orden/espacios en scopes
+
 # =============================
 # Configuración base
 # =============================
