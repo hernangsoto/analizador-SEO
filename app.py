@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 # Google APIs
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 import gspread
 from gspread_dataframe import set_with_dataframe
@@ -216,6 +217,50 @@ def get_template_id(kind: str, account_key: str | None = None) -> str | None:
 
 
 def verify_template_access(drive, template_id: str) -> dict | None:
+    """Lee metadatos (y permisos si DEBUG) del template para verificar acceso.
+    Si la API de Drive no está habilitada en el proyecto de tu client_id,
+    muestra un mensaje claro para habilitarla.
+    """
+    try:
+        meta = (
+            drive.files()
+            .get(
+                fileId=template_id,
+                fields="id,name,parents,mimeType,owners(displayName,emailAddress),webViewLink,driveId",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        if st.session_state.get("DEBUG"):
+            try:
+                perms = (
+                    drive.permissions()
+                    .list(fileId=template_id, fields="permissions(emailAddress,role,type)", supportsAllDrives=True)
+                    .execute()
+                )
+                meta["_permissions"] = perms.get("permissions", [])
+            except Exception as e:
+                meta["_permissions_error"] = str(e)
+        return meta
+    except HttpError as e:
+        msg = str(e)
+        if "accessNotConfigured" in msg or "has not been used in project" in msg:
+            st.error(
+                "La API de Google Drive **no está habilitada** en el proyecto de tu OAuth client.
+
+"
+                "➡️ Ingresá a Google Cloud Console con el proyecto de tu *client_id* y habilitá **Google Drive API** y **Google Sheets API**.
+"
+                "Luego reintentá la autorización."
+            )
+            st.caption("Tip: si tu app está en modo Testing, agregá tu email como *Test user* en la pantalla de consentimiento.")
+            debug_log("HttpError accessNotConfigured", msg)
+            st.stop()
+        debug_log("HttpError al leer metadatos del template", msg)
+        return None
+    except Exception as e:
+        debug_log("Error al leer metadatos del template", str(e))
+        return None -> dict | None:
     """Lee metadatos (y permisos si DEBUG) del template para verificar acceso."""
     try:
         meta = (
