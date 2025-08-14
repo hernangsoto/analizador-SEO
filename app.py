@@ -1,4 +1,8 @@
 import streamlit as st
+
+st.write("redirect_uri (secrets):", st.secrets["auth"]["redirect_uri"])
+st.write("client_id (secrets):", st.secrets["auth"]["client_id"])
+
 import requests
 
 # Configura la página para que utilice el diseño "wide" (ancho),
