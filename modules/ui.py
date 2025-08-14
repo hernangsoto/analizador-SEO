@@ -77,7 +77,10 @@ def login_screen() -> None:
 # UI de Search Console y Análisis
 # ---------------------------
 def pick_site(sc_service) -> str:
-    """Lista sitios verificados de la cuenta de Search Console conectada."""
+    """
+    Lista sitios verificados de la cuenta de Search Console conectada.
+    Mantiene la selección estable entre reruns usando un key fijo y el valor previo.
+    """
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
     try:
         site_list = sc_service.sites().list().execute()
@@ -86,13 +89,30 @@ def pick_site(sc_service) -> str:
         st.error(f"Error al obtener sitios: {e}")
         st.stop()
 
-    verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
-    if not verified:
+    # Solo sitios verificados
+    verified_urls = [s["siteUrl"] for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
+
+    # Orden estable y sin duplicados (sc-domain primero, luego hosts, todo casefold)
+    def _sort_key(u: str) -> tuple[int, str]:
+        return (0 if u.startswith("sc-domain:") else 1, u.replace("sc-domain:", "").casefold())
+
+    options = sorted(set(verified_urls), key=_sort_key)
+
+    if not options:
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    site_map = {s["siteUrl"]: s["siteUrl"] for s in verified}
-    return st.selectbox("Sitio verificado:", list(site_map.keys()))
+    # Recordar selección previa (si existe) y mantenerla tras el rerun
+    prev = st.session_state.get("site_url")
+    index = options.index(prev) if prev in options else 0
+
+    site_url = st.selectbox(
+        "Sitio verificado:",
+        options,
+        index=index,
+        key="site_url",  # clave estable: mantiene el valor entre reruns
+    )
+    return site_url
 
 
 def pick_analysis() -> str:
