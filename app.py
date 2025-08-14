@@ -4,11 +4,14 @@ from __future__ import annotations
 import os
 import streamlit as st
 
-# Permite http://localhost en el authorization_response y tolera scopes reordenados
+# Permitir http://localhost para el authorization_response (cuando copias la URL)
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+# Tolerar diferencias de orden/espacios en scopes
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-# ====== Módulos propios ======
+# =============================
+# Imports de módulos propios
+# =============================
 from modules.ui import (
     get_user,
     login_screen,
@@ -29,11 +32,7 @@ from modules.drive import (
     share_controls,
 )
 from modules.gsc import ensure_sc_client
-from modules.utils import debug_log
-
-# Analíticas separadas por archivo
-from modules.analysis_core_update import run_core_update
-from modules.analysis_evergreen import run_evergreen
+from modules.utils import debug_log, ensure_external_package
 
 # (Opcional) estilos
 try:
@@ -41,9 +40,22 @@ try:
 except Exception:
     inject_styles = None
 
+# =============================
+# Cargar análisis (externo o local)
+# =============================
+_ext = ensure_external_package(config_key="external_pkg")
+if _ext:
+    # Usa el paquete externo (repo privado)
+    run_core_update = _ext.run_core_update
+    run_evergreen  = _ext.run_evergreen
+else:
+    # Fallback a los módulos locales
+    from modules.analysis_core_update import run_core_update
+    from modules.analysis_evergreen  import run_evergreen
+
 
 # =============================
-# Config
+# Configuración de la app
 # =============================
 DEBUG_DEFAULT = bool(st.secrets.get("debug", False))
 
@@ -61,7 +73,7 @@ st.session_state.setdefault("DEBUG", DEBUG_DEFAULT)
 
 
 # =============================
-# Autenticación de la app
+# Autenticación de la app (Streamlit)
 # =============================
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
@@ -121,6 +133,7 @@ sc_service = ensure_sc_client(creds_src)
 # =============================
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
+
 
 # =============================
 # Paso 4: parámetros + ejecución
