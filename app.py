@@ -245,15 +245,15 @@ def verify_template_access(drive, template_id: str) -> dict | None:
     except HttpError as e:
         msg = str(e)
         if "accessNotConfigured" in msg or "has not been used in project" in msg:
-            st.error(
-                "La API de Google Drive **no está habilitada** en el proyecto de tu OAuth client.
+            st.error("""La API de Google Drive **no está habilitada** en el proyecto de tu OAuth client.
 
-"
-                "➡️ Ingresá a Google Cloud Console con el proyecto de tu *client_id* y habilitá **Google Drive API** y **Google Sheets API**.
-"
-                "Luego reintentá la autorización."
-            )
-            st.caption("Tip: si tu app está en modo Testing, agregá tu email como *Test user* en la pantalla de consentimiento.")
+➡️ Entrá a **Google Cloud Console** del proyecto de tu *client_id* y habilitá:
+- **Google Drive API**
+- **Google Sheets API**
+- **Search Console API** (Webmasters)
+
+Luego reintentá la autorización (Paso A y Paso B).""")
+            st.caption("Tip: si tu app está en modo *Testing*, agregá tu email como *Test user* en la pantalla de consentimiento.")
             debug_log("HttpError accessNotConfigured", msg)
             st.stop()
         debug_log("HttpError al leer metadatos del template", msg)
