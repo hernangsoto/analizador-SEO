@@ -9,6 +9,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 import gspread
 from gspread_dataframe import set_with_dataframe
 
@@ -392,19 +393,36 @@ def login_screen():
 # PATCH: OAuth con Flow persistido + authorization_response (URL completa) y sin include_granted_scopes
 
 def pick_destination_oauth():
-    """OAuth para la cuenta PERSONAL (destino de Drive/Sheets). Usa scopes de Drive+Sheets.
-    Por default usa el client_id de ACCESO, pero podés cambiarlo en st.secrets si necesitás otro.
+    """OAuth para la cuenta PERSONAL (destino de Drive/Sheets). Reutiliza tokens si ya existen en caché.
     """
     st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # opcional: permitir definir otro client id
-    # Reset si cambia la app key (poco frecuente)
+
+    # Reutilizar credenciales si ya existen para el email actual de Streamlit
+    user_email = getattr(get_user(), "email", None)
+    cache = st.session_state.setdefault("creds_cache", {"dest": {}, "src": {}})
+
+    if user_email and cache["dest"].get(user_email):
+        cached = cache["dest"][user_email]
+        creds = Credentials(**cached)
+        creds = refresh_if_needed(creds)
+        if creds and creds.valid:
+            st.success(f"Cuenta PERSONAL conectada (caché): {user_email}")
+            if st.button("Cambiar cuenta PERSONAL"):
+                cache["dest"].pop(user_email, None)
+                st.session_state.pop("creds_dest", None)
+                st.session_state.pop("oauth_dest", None)
+                st.experimental_rerun()
+            st.session_state["creds_dest"] = creds_to_dict(creds)
+            return creds
+
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
     if st.session_state.get("oauth_dest", {}).get("account_key") != acct_for_dest:
         st.session_state.pop("oauth_dest", None)
 
     if "oauth_dest" not in st.session_state:
         flow = build_flow(acct_for_dest, SCOPES_DRIVE)
         auth_url, state = flow.authorization_url(
-            prompt="consent select_account",
+            prompt="select_account",  # no forzamos consent cada vez
             access_type="offline",
             include_granted_scopes="false",
         )
@@ -433,6 +451,9 @@ def pick_destination_oauth():
             flow.fetch_token(authorization_response=url.strip())
             creds = flow.credentials
             st.session_state["creds_dest"] = creds_to_dict(creds)
+            # Guardar en caché por email de Streamlit
+            if user_email:
+                cache["dest"][user_email] = st.session_state["creds_dest"]
             st.success("Cuenta PERSONAL conectada.")
         except Exception as e:
             st.session_state.pop("oauth_dest", None)
@@ -440,11 +461,13 @@ def pick_destination_oauth():
             st.caption(f"Detalle técnico (debug): {e}")
     if not creds and st.session_state.get("creds_dest"):
         creds = Credentials(**st.session_state["creds_dest"])
+        creds = refresh_if_needed(creds)
     return creds
 
 
+
 def pick_source_oauth():
-    """OAuth para la cuenta de Search Console (fuente: ACCESO o ACCESO_MEDIOS). Usa scopes de Webmasters."""
+    """OAuth para la cuenta de Search Console (fuente: ACCESO o ACCESO_MEDIOS). Reutiliza tokens por cuenta."""
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
     acct = st.radio(
         "Cuenta SC:",
@@ -453,6 +476,23 @@ def pick_source_oauth():
         horizontal=True,
         key="acct_choice_sc",
     )
+    cache = st.session_state.setdefault("creds_cache", {"dest": {}, "src": {}})
+
+    # Reutilizar caché por cuenta
+    if cache["src"].get(acct):
+        cached = cache["src"][acct]
+        creds = Credentials(**cached)
+        creds = refresh_if_needed(creds)
+        if creds and creds.valid:
+            st.success(f"Search Console conectado (caché): {acct}")
+            if st.button("Cambiar cuenta SC"):
+                cache["src"].pop(acct, None)
+                st.session_state.pop("creds_src", None)
+                st.session_state.pop("oauth_src", None)
+                st.experimental_rerun()
+            st.session_state["creds_src"] = creds_to_dict(creds)
+            return creds
+
     # Reset si cambia la cuenta
     if st.session_state.get("oauth_src", {}).get("account") != acct:
         st.session_state.pop("oauth_src", None)
@@ -460,7 +500,7 @@ def pick_source_oauth():
     if "oauth_src" not in st.session_state:
         flow = build_flow(acct, SCOPES_GSC)
         auth_url, state = flow.authorization_url(
-            prompt="consent select_account",
+            prompt="select_account",
             access_type="offline",
             include_granted_scopes="false",
         )
@@ -489,14 +529,13 @@ def pick_source_oauth():
             flow.fetch_token(authorization_response=url.strip())
             creds = flow.credentials
             st.session_state["creds_src"] = creds_to_dict(creds)
+            cache["src"][acct] = st.session_state["creds_src"]
             st.success("Cuenta SC conectada.")
         except Exception as e:
             st.session_state.pop("oauth_src", None)
             st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
             st.caption(f"Detalle técnico (debug): {e}")
-    if not creds and st.session_state.get("creds_src"):
-        creds = Credentials(**st.session_state["creds_src"])
-    return creds
+    if not creds and st.sessi
 
 def creds_to_dict(creds: Credentials):
     return {
@@ -505,8 +544,17 @@ def creds_to_dict(creds: Credentials):
         "token_uri": creds.token_uri,
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
+        "scopes": list(creds.scopes) if getattr(creds, "scopes", None) else SCOPES_DRIVE,
+        "expiry": getattr(creds, "expiry", None),
     }
+
+def refresh_if_needed(creds: Credentials) -> Credentials:
+    try:
+        if creds and not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+    except Exception as e:
+        debug_log("No se pudo refrescar token", str(e))
+    return creds
 
 def pick_site(sc_service):
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
@@ -906,28 +954,3 @@ sc_service = ensure_sc_client(creds_src)
 
 # Paso 3: elegir sitio (usando la CUENTA fuente de SC)
 site_url = pick_site(sc_service)
-
-# Paso 3: elegir análisis
-analisis = pick_analysis()
-
-# Paso 4: parámetros y ejecución
-if analisis == "4":
-    params = params_for_core_update()
-    if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        me_email = (_me or {}).get("emailAddress")
-        share_controls(drive_service, sid, default_email=me_email)
-elif analisis == "5":
-    params = params_for_evergreen()
-    if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        me_email = (_me or {}).get("emailAddress")
-        share_controls(drive_service, sid, default_email=me_email)
-else:
-    st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
