@@ -65,7 +65,7 @@ def _streamlit_email() -> str | None:
 
 
 # ==========
-# NUEVO: Recupera credenciales personales sin UI si ya autorizaste antes
+# Recupera credenciales personales sin UI si ya autorizaste antes
 # ==========
 def get_cached_personal_creds() -> Credentials | None:
     """
@@ -133,8 +133,9 @@ def pick_destination_oauth() -> Credentials | None:
 
     if "oauth_dest" not in st.session_state:
         flow = build_flow(acct_for_dest, SCOPES_DRIVE)
+        # 👇 Forzar consentimiento la 1ª vez para asegurar refresh_token
         auth_url, state = flow.authorization_url(
-            prompt="select_account",
+            prompt="consent select_account",
             access_type="offline",
             include_granted_scopes=False,
         )
@@ -168,6 +169,12 @@ def pick_destination_oauth() -> Credentials | None:
             if user_email:
                 cache["dest"][user_email] = st.session_state["creds_dest"]
                 store["dest"][user_email] = st.session_state["creds_dest"]
+            # ⚠️ Aviso útil si no vino refresh_token
+            if not getattr(creds, "refresh_token", None):
+                st.warning(
+                    "Google no devolvió *refresh_token*. Para evitar que te vuelva a pedir este paso, "
+                    "revocá el acceso de esta app en https://myaccount.google.com/permissions y reautorizá."
+                )
             st.success("Cuenta PERSONAL conectada.")
         except Exception as e:
             st.session_state.pop("oauth_dest", None)
