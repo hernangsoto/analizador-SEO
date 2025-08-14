@@ -89,74 +89,68 @@ token_store = TokenStore()
 # =========================
 
 def ensure_external_package(config_key: str = "external_pkg"):
-    """
-    Instala e importa en runtime un paquete Python alojado en un repo privado de GitHub,
-    usando un token guardado en st.secrets.
-
-    Ejemplo en secrets:
-    [external_pkg]
-    repo    = "owner/repo"           # o repo_url = "https://github.com/owner/repo.git"
-    ref     = "main"                 # rama/tag/commit
-    package = "seo_analisis_ext"     # nombre del paquete a importar (import <package>)
-    token   = "ghp_XXXXXXXX..."      # token con permisos de lectura
-    """
     cfg = st.secrets.get(config_key)
     if not cfg:
         debug_log(f"[ensure_external_package] No hay secrets[{config_key}] configurado.")
         return None
 
-    repo_url: Optional[str] = cfg.get("repo_url")
-    repo: Optional[str] = cfg.get("repo")
-    ref: str = cfg.get("ref", "main")
-    package: Optional[str] = cfg.get("package")
-    token: Optional[str] = cfg.get("token")
+    repo_url = cfg.get("repo_url")
+    repo     = cfg.get("repo")
+    ref      = cfg.get("ref", "main")
+    package  = cfg.get("package")
+    token    = cfg.get("token")
 
     missing = [k for k in ("package", "token") if not cfg.get(k)]
     if not repo_url and not repo:
         missing.append("repo (o repo_url)")
     if missing:
-        st.error(
-            "Falta configuración en `secrets` para instalar el paquete externo: "
-            + ", ".join(missing)
-        )
+        st.error("Falta configuración en `secrets` para instalar el paquete externo: " + ", ".join(missing))
         return None
 
-    # Si ya está importado, usarlo
+    # ¿ya importado?
     try:
-        mod = importlib.import_module(package)  # type: ignore[arg-type]
-        debug_log(f"[ensure_external_package] Paquete ya importado: {package}")
-        return mod
+        import importlib
+        return importlib.import_module(package)
     except Exception:
         pass
 
-    # Construir URL git+https para pip
+    # URL git para pip
     if repo_url:
         clean = repo_url.removeprefix("https://")
-        git_url = f"git+https://{token}@{clean}@{ref}#egg={package}"
+        git_url = f"git+https://x-access-token:{token}@{clean}@{ref}#egg={package}"
     else:
-        git_url = f"git+https://{token}@github.com/{repo}.git@{ref}#egg={package}"
+        git_url = f"git+https://x-access-token:{token}@github.com/{repo}.git@{ref}#egg={package}"
 
+    debug_log("[ensure_external_package] Instalando paquete externo desde GitHub privado…", {
+        "ref": ref, "package": package, "source": repo_url or f"github.com/{repo}"
+    })
+
+    import subprocess, sys, os
+    env = os.environ.copy()
+    env.setdefault("PIP_DEFAULT_TIMEOUT", "180")
+
+    # Ejecutar pip capturando salida
+    res = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", git_url],
+        env=env, capture_output=True, text=True
+    )
+
+    if res.returncode != 0:
+        # Redactar el token y mostrar solo el tail del error
+        out = (res.stdout or "") + "\n" + (res.stderr or "")
+        if token:
+            out = out.replace(token, "***REDACTED***")
+        st.error("No se pudo instalar el paquete externo desde GitHub (pip falló).")
+        tail = "\n".join([line for line in out.splitlines() if line.strip()][-60:])
+        st.code(tail or "(sin salida de pip)")
+        return None
+
+    # Importar luego de instalar
     try:
-        debug_log("[ensure_external_package] Instalando paquete externo desde GitHub privado…", {
-            "ref": ref,
-            "package": package,
-            "source": repo_url or f"github.com/{repo}",
-        })
-        env = os.environ.copy()
-        env.setdefault("PIP_DEFAULT_TIMEOUT", "120")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--upgrade", git_url],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
-        )
-        mod = importlib.import_module(package)  # type: ignore[arg-type]
+        import importlib
+        mod = importlib.import_module(package)
         debug_log(f"[ensure_external_package] Paquete instalado e importado: {package}")
         return mod
-    except subprocess.CalledProcessError as e:
-        st.error("No se pudo instalar el paquete externo desde GitHub (pip falló).")
-        debug_log("pip error", str(e))
-        return None
     except Exception as e:
         st.error("No se pudo importar el paquete externo luego de instalarlo.")
         debug_log("import error", str(e))
