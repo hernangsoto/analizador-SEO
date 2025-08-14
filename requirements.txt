@@ -1,4 +1,3 @@
 streamlit
-google-auth
-google-auth-oauthlib
+authlib
 requests
