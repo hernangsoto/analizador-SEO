@@ -67,14 +67,16 @@ def sidebar_user_info(user):
 # OAuth y clientes
 # ---------------------------
 
-SCOPES = [
-    "https://www.googleapis.com/auth/webmasters.readonly",
+SCOPES_DRIVE = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+SCOPES_GSC = [
+    "https://www.googleapis.com/auth/webmasters.readonly",
+]
 
-def build_flow(account_key: str) -> Flow:
-    """Crea un flujo OAuth2 a partir de st.secrets para la cuenta elegida."""
+def build_flow(account_key: str, scopes: list[str]) -> Flow:
+    """Crea un flujo OAuth2 a partir de st.secrets para la cuenta elegida, con scopes provistos."""
     try:
         acc = st.secrets["accounts"][account_key]
     except Exception:
@@ -87,19 +89,22 @@ def build_flow(account_key: str) -> Flow:
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "client_secret": acc["client_secret"],
-            "redirect_uris": ["http://localhost"],  # Copia/pega la URL completa luego
+            "redirect_uris": ["http://localhost"],
         }
     }
-    flow = Flow.from_client_config(client_secrets, scopes=SCOPES)
+    flow = Flow.from_client_config(client_secrets, scopes=scopes)
     flow.redirect_uri = "http://localhost"
     return flow
 
-def ensure_google_clients(creds: Credentials):
-    """Construye clientes con credenciales ya validadas."""
-    sc = build("searchconsole", "v1", credentials=creds)
+def ensure_drive_clients(creds: Credentials):
     drive = build("drive", "v3", credentials=creds)
     gs = gspread.authorize(creds)
-    return sc, drive, gs
+    return drive, gs
+
+
+def ensure_sc_client(creds: Credentials):
+    sc = build("searchconsole", "v1", credentials=creds)
+    return sc
 
 
 def debug_log(msg: str, data: dict | str | None = None):
@@ -386,90 +391,111 @@ def login_screen():
 
 # PATCH: OAuth con Flow persistido + authorization_response (URL completa) y sin include_granted_scopes
 
-def pick_account_and_oauth():
-    st.subheader("1) Elegí con qué cuenta autenticarte (GSC/Sheets/Drive)")
-    acct = st.radio(
-        "Cuenta:",
-        options=["ACCESO", "ACCESO_MEDIOS"],
-        captions=["Credenciales de la cuenta Acceso", "Credenciales de la cuenta Acceso Medios"],
-        horizontal=True,
-        key="acct_choice",
-    )
+def pick_destination_oauth():
+    """OAuth para la cuenta PERSONAL (destino de Drive/Sheets). Usa scopes de Drive+Sheets.
+    Por default usa el client_id de ACCESO, pero podés cambiarlo en st.secrets si necesitás otro.
+    """
+    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # opcional: permitir definir otro client id
+    # Reset si cambia la app key (poco frecuente)
+    if st.session_state.get("oauth_dest", {}).get("account_key") != acct_for_dest:
+        st.session_state.pop("oauth_dest", None)
 
-    # Si cambia la cuenta, reiniciamos flujo previo
-    if "oauth" in st.session_state and st.session_state["oauth"].get("account") != acct:
-        st.session_state.pop("oauth")
-
-    # Crear o reutilizar el Flow y la auth_url
-    if "oauth" not in st.session_state:
-        flow = build_flow(acct)
-        # Opcional: si definís el correo en secrets, forzamos sugerencia de cuenta correcta
-        # [accounts.ACCESO]
-        # client_id = "..."
-        # client_secret = "..."
-        # login_hint = "tu_correo_de_acceso@ejemplo.com"
-        acc_meta = st.secrets.get("accounts", {}).get(acct, {})
+    if "oauth_dest" not in st.session_state:
+        flow = build_flow(acct_for_dest, SCOPES_DRIVE)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes="false",  # evita "Scope has changed"
-            login_hint=acc_meta.get("login_hint"),
+            include_granted_scopes="false",
         )
-        st.session_state["oauth"] = {
+        st.session_state["oauth_dest"] = {
+            "account_key": acct_for_dest,
+            "flow": flow,
+            "auth_url": auth_url,
+            "state": state,
+        }
+    od = st.session_state["oauth_dest"]
+    st.markdown(f"🔗 **Paso A (personal):** [Autorizar acceso de Drive/Sheets]({od['auth_url']})")
+    with st.expander("Ver/copiar URL de autorización (personal)"):
+        st.code(od["auth_url"])
+    url = st.text_input(
+        "🔑 Paso B (personal): pegá la URL completa (http://localhost/?code=...&state=...)",
+        key="auth_response_url_dest",
+        placeholder="http://localhost/?code=...&state=...",
+    )
+    creds = None
+    if st.button("Conectar Google PERSONAL", type="primary"):
+        if not url.strip():
+            st.error("Pegá la URL completa de redirección (incluye code y state).")
+            st.stop()
+        try:
+            flow: Flow = od["flow"]
+            flow.fetch_token(authorization_response=url.strip())
+            creds = flow.credentials
+            st.session_state["creds_dest"] = creds_to_dict(creds)
+            st.success("Cuenta PERSONAL conectada.")
+        except Exception as e:
+            st.session_state.pop("oauth_dest", None)
+            st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
+            st.caption(f"Detalle técnico (debug): {e}")
+    if not creds and st.session_state.get("creds_dest"):
+        creds = Credentials(**st.session_state["creds_dest"])
+    return creds
+
+
+def pick_source_oauth():
+    """OAuth para la cuenta de Search Console (fuente: ACCESO o ACCESO_MEDIOS). Usa scopes de Webmasters."""
+    st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
+    acct = st.radio(
+        "Cuenta SC:",
+        options=["ACCESO", "ACCESO_MEDIOS"],
+        captions=["Usar client_id de Acceso", "Usar client_id de Acceso Medios"],
+        horizontal=True,
+        key="acct_choice_sc",
+    )
+    # Reset si cambia la cuenta
+    if st.session_state.get("oauth_src", {}).get("account") != acct:
+        st.session_state.pop("oauth_src", None)
+
+    if "oauth_src" not in st.session_state:
+        flow = build_flow(acct, SCOPES_GSC)
+        auth_url, state = flow.authorization_url(
+            prompt="consent select_account",
+            access_type="offline",
+            include_granted_scopes="false",
+        )
+        st.session_state["oauth_src"] = {
             "account": acct,
             "flow": flow,
             "auth_url": auth_url,
             "state": state,
         }
-
-    oauth = st.session_state["oauth"]
-    st.markdown(f"🔗 **Paso A:** [Autorizar acceso en Google]({oauth['auth_url']})")
-    # Mostrar también la URL en texto para copiarla y abrirla en otro navegador/perfil
-    with st.expander("Ver/copiar URL de autorización"):
-        st.code(oauth["auth_url"])
-
-    # Pedir la URL completa de redirección
-    auth_response_url = st.text_input(
-        "🔑 Paso B: Pegá aquí la URL completa después de autorizar (http://localhost/…)",
-        placeholder="http://localhost/?code=...&scope=...&state=...",
-        key="auth_response_url",
+    osrc = st.session_state["oauth_src"]
+    st.markdown(f"🔗 **Paso A (fuente):** [Autorizar acceso a Search Console]({osrc['auth_url']})")
+    with st.expander("Ver/copiar URL de autorización (fuente)"):
+        st.code(osrc["auth_url"])
+    url = st.text_input(
+        "🔑 Paso B (fuente): pegá la URL completa (http://localhost/?code=...&state=...)",
+        key="auth_response_url_src",
+        placeholder="http://localhost/?code=...&state=...",
     )
-
     creds = None
-    if st.button("Conectar Google", type="primary"):
-        if not auth_response_url.strip():
+    if st.button("Conectar Search Console", type="secondary"):
+        if not url.strip():
             st.error("Pegá la URL completa de redirección (incluye code y state).")
             st.stop()
         try:
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(auth_response_url.strip())
-            q = parse_qs(parsed.query)
-            code = (q.get("code") or [None])[0]
-            state_from_callback = (q.get("state") or [None])[0]
-            if not code or not state_from_callback:
-                st.error("La URL no contiene parámetros 'code' y 'state'. Volvé a autorizar y pegá la URL completa.")
-                st.stop()
-            # Validar que el 'state' coincida con el del Flow
-            expected_state = st.session_state["oauth"].get("state")
-            if state_from_callback != expected_state:
-                # Forzar regenerar flujo para evitar usar un state viejo
-                st.session_state.pop("oauth", None)
-                st.error("El parámetro 'state' no coincide (parece ser una URL antigua). Hacé clic en 'Autorizar' de nuevo y usá esa nueva URL.")
-                st.stop()
-            # Usar el mismo Flow almacenado (con state + code_verifier intactos)
-            flow: Flow = st.session_state["oauth"]["flow"]
-            flow.fetch_token(authorization_response=auth_response_url.strip())
+            flow: Flow = osrc["flow"]
+            flow.fetch_token(authorization_response=url.strip())
             creds = flow.credentials
-            st.session_state["creds"] = creds_to_dict(creds)
-            st.success("Autenticación exitosa.")
+            st.session_state["creds_src"] = creds_to_dict(creds)
+            st.success("Cuenta SC conectada.")
         except Exception as e:
-            st.session_state.pop("oauth", None)
-            st.error("No se pudo intercambiar el código por tokens. Reintentá: Autorizar → pegar la URL completa actual.")
+            st.session_state.pop("oauth_src", None)
+            st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
             st.caption(f"Detalle técnico (debug): {e}")
-
-    # Si ya hay credenciales, reconstruimos Credentials
-    if not creds and st.session_state.get("creds"):
-        creds = Credentials(**st.session_state["creds"])
+    if not creds and st.session_state.get("creds_src"):
+        creds = Credentials(**st.session_state["creds_src"])
     return creds
 
 def creds_to_dict(creds: Credentials):
@@ -842,13 +868,14 @@ sidebar_user_info(user)
 # Modo debug opcional (muestra metadatos de Drive, permisos, etc.)
 st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-# Paso 1: OAuth con selección de cuenta
-creds = pick_account_and_oauth()
-if not creds:
+# Paso 1: Conectar Google PERSONAL (Drive/Sheets)
+creds_dest = pick_destination_oauth()
+if not creds_dest:
     st.stop()
 
-# Construir clientes
-sc_service, drive_service, gs_client = ensure_google_clients(creds)
+# Clientes de destino (Drive + GSpread)
+drive_service, gs_client = ensure_drive_clients(creds_dest)
+
 # Mostrar identidad de la cuenta de Google conectada
 _me = get_google_identity(drive_service)
 if _me:
@@ -856,7 +883,7 @@ if _me:
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
-# Aviso si el email de Streamlit y el de Google no coinciden
+# Advertencia si Streamlit email != Google conectado
 _app_email = getattr(user, "email", None)
 _google_email = (_me or {}).get("emailAddress")
 if _app_email and _google_email and _app_email.lower() != _google_email.lower():
@@ -866,10 +893,18 @@ if _app_email and _google_email and _app_email.lower() != _google_email.lower():
         % (_app_email, _google_email, _google_email, _app_email)
     )
 
-# Seleccionar carpeta destino opcional (en la CUENTA autenticada)
+# Carpeta destino opcional
 dest_folder_id = pick_destination(drive_service, _me)
 
-# Paso 2: elegir sitio
+# Paso 2: Conectar Search Console (fuente de datos)
+creds_src = pick_source_oauth()
+if not creds_src:
+    st.stop()
+
+# Cliente de Search Console (fuente)
+sc_service = ensure_sc_client(creds_src)
+
+# Paso 3: elegir sitio (usando la CUENTA fuente de SC)
 site_url = pick_site(sc_service)
 
 # Paso 3: elegir análisis
