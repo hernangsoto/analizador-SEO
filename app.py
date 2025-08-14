@@ -1,6 +1,9 @@
 import streamlit as st
 import requests
 
+st.write("redirect_uri (secrets):", st.secrets["auth"]["redirect_uri"])
+st.write("client_id (secrets):", st.secrets["auth"]["client_id"])
+
 # Este código se basa en la documentación oficial de Streamlit para la autenticación:
 # https://docs.streamlit.io/develop/tutorials/authentication/google
 
