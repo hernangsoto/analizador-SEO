@@ -12,41 +12,76 @@ import streamlit as st
 
 
 # =========================
-# Debug helpers
+# Redacción/Debug helpers
 # =========================
 
 def _redact_secrets(text: str) -> str:
-    """Redacta patrones típicos de tokens (ghp_..., Bearer ...) para evitar fugas en logs."""
+    """Redacta patrones típicos de tokens para evitar fugas en logs."""
     if not isinstance(text, str):
         return text
     out = text
-    # GitHub fine-grained/classic tokens
+    # GitHub tokens
     out = out.replace("ghp_", "ghp_***REDACTED***")
     out = out.replace("github_pat_", "github_pat_***REDACTED***")
-    # Bearer tokens in headers
+    # Bearer headers
     out = out.replace("Authorization: Bearer ", "Authorization: Bearer ***REDACTED***")
+    # Google refresh_token (heurístico)
+    out = out.replace("refresh_token", "refresh_token***REDACTED***")
     return out
 
 
 def debug_log(msg: str, data: Any | None = None) -> None:
-    """
-    Muestra bloques de depuración cuando st.session_state['DEBUG'] es True.
-    No imprime secretos (aplica redacción básica).
-    """
+    """Log sencillo cuando st.session_state['DEBUG'] es True."""
     if not st.session_state.get("DEBUG"):
         return
-
     st.info(_redact_secrets(str(msg)))
     if data is None:
         return
-
     try:
-        # Intentar pretty JSON si es serializable
         payload = json.dumps(data, indent=2, ensure_ascii=False, default=str)
     except Exception:
-        payload = _redact_secrets(str(data))
-
+        payload = str(data)
     st.code(_redact_secrets(payload))
+
+
+# =========================
+# Token Store (para creds)
+# =========================
+
+class TokenStore:
+    """
+    Guarda objetos (p.ej., credenciales serializadas) en st.session_state
+    bajo un namespace único. Útil para cachear 'creds_dest', 'creds_src', etc.
+    """
+    KEY = "__TOKENS__"
+
+    def _ensure(self) -> None:
+        st.session_state.setdefault(self.KEY, {})
+
+    def get(self, name: str, default: Any = None) -> Any:
+        self._ensure()
+        return st.session_state[self.KEY].get(name, default)
+
+    def set(self, name: str, value: Any) -> None:
+        self._ensure()
+        st.session_state[self.KEY][name] = value
+
+    def has(self, name: str) -> bool:
+        self._ensure()
+        return name in st.session_state[self.KEY]
+
+    def clear(self, name: str) -> None:
+        self._ensure()
+        st.session_state[self.KEY].pop(name, None)
+
+    def all(self) -> dict:
+        self._ensure()
+        # Devolvemos una copia superficial para depurar sin mutar
+        return dict(st.session_state[self.KEY])
+
+
+# Instancia global que pueden importar otros módulos
+token_store = TokenStore()
 
 
 # =========================
@@ -58,31 +93,24 @@ def ensure_external_package(config_key: str = "external_pkg"):
     Instala e importa en runtime un paquete Python alojado en un repo privado de GitHub,
     usando un token guardado en st.secrets.
 
-    En `secrets.toml` (Streamlit) debe existir una sección como:
-
+    Ejemplo en secrets:
     [external_pkg]
-    repo    = "owner/repo"          # o usar repo_url = "https://github.com/owner/repo.git"
-    ref     = "main"                # rama/tag/commit
-    package = "seo_analisis_ext"    # nombre del paquete a importar (import <package>)
-    token   = "ghp_XXXXXXXX..."     # token con permisos de lectura
-
-    También soporta:
-      repo_url = "https://github.com/owner/repo.git"  (en lugar de repo = "owner/repo")
+    repo    = "owner/repo"           # o repo_url = "https://github.com/owner/repo.git"
+    ref     = "main"                 # rama/tag/commit
+    package = "seo_analisis_ext"     # nombre del paquete a importar (import <package>)
+    token   = "ghp_XXXXXXXX..."      # token con permisos de lectura
     """
     cfg = st.secrets.get(config_key)
     if not cfg:
-        # No hay configuración; devolver None para que el caller haga fallback local.
         debug_log(f"[ensure_external_package] No hay secrets[{config_key}] configurado.")
         return None
 
-    # Leer configuración
     repo_url: Optional[str] = cfg.get("repo_url")
     repo: Optional[str] = cfg.get("repo")
     ref: str = cfg.get("ref", "main")
     package: Optional[str] = cfg.get("package")
     token: Optional[str] = cfg.get("token")
 
-    # Validaciones mínimas
     missing = [k for k in ("package", "token") if not cfg.get(k)]
     if not repo_url and not repo:
         missing.append("repo (o repo_url)")
@@ -93,7 +121,7 @@ def ensure_external_package(config_key: str = "external_pkg"):
         )
         return None
 
-    # Si ya está importado, solo devolverlo
+    # Si ya está importado, usarlo
     try:
         mod = importlib.import_module(package)  # type: ignore[arg-type]
         debug_log(f"[ensure_external_package] Paquete ya importado: {package}")
@@ -103,26 +131,23 @@ def ensure_external_package(config_key: str = "external_pkg"):
 
     # Construir URL git+https para pip
     if repo_url:
-        # quitar 'https://' para insertar el token al inicio
         clean = repo_url.removeprefix("https://")
         git_url = f"git+https://{token}@{clean}@{ref}#egg={package}"
     else:
         git_url = f"git+https://{token}@github.com/{repo}.git@{ref}#egg={package}"
 
-    # Ejecutar instalación
     try:
         debug_log("[ensure_external_package] Instalando paquete externo desde GitHub privado…", {
             "ref": ref,
             "package": package,
             "source": repo_url or f"github.com/{repo}",
         })
-        # Aumentar timeout de pip si el entorno es lento
         env = os.environ.copy()
         env.setdefault("PIP_DEFAULT_TIMEOUT", "120")
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--upgrade", git_url],
             env=env,
-            stdout=subprocess.DEVNULL,  # silenciar para evitar fugas
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
         )
         mod = importlib.import_module(package)  # type: ignore[arg-type]
