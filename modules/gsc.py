@@ -163,15 +163,26 @@ def fetch_site_daily_totals(service, site_url, start_dt, end_dt, country_iso3=No
 
 
 def fetch_gsc_daily_evergreen(service, site_url, start_dt, end_dt, country_iso3=None, section_path=None, page_size=25000):
+    """Diario por URL (web) para Evergreen (compatibilidad retro)."""
+    return fetch_gsc_daily_by_page(service, site_url, start_dt, end_dt, tipo="web",
+                                   country_iso3=country_iso3, section_path=section_path, page_size=page_size)
+
+
+# ========= NUEVO: Diario por URL genérico (web/discover) =========
+
+def fetch_gsc_daily_by_page(service, site_url, start_dt, end_dt, tipo="web", country_iso3=None, section_path=None, page_size=25000):
     rows_all, start_row = [], 0
     body = {
         "startDate": str(start_dt),
         "endDate": str(end_dt),
         "dimensions": ["page", "date"],
         "rowLimit": page_size,
-        "type": "web",
+        "type": "discover" if tipo == "discover" else "web",
         "aggregationType": "auto",
     }
+    if tipo == "discover":
+        body["dataState"] = "all"
+
     filters = []
     if country_iso3:
         filters.append({"dimension": "country", "operator": "equals", "expression": country_iso3})
@@ -179,12 +190,13 @@ def fetch_gsc_daily_evergreen(service, site_url, start_dt, end_dt, country_iso3=
         filters.append({"dimension": "page", "operator": "contains", "expression": section_path})
     if filters:
         body["dimensionFilterGroups"] = [{"filters": filters}]
+
     while True:
         body["startRow"] = start_row
         try:
             resp = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
         except HttpError as e:
-            debug_log("HttpError diario Evergreen", str(e))
+            debug_log("HttpError diario por URL", str(e))
             break
         rows = resp.get("rows", [])
         if not rows:
