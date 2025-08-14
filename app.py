@@ -1,5 +1,6 @@
 # app.py
 from __future__ import annotations
+from modules.lottie import lottie_spinner, lottie
 
 import os
 import streamlit as st
