@@ -89,6 +89,12 @@ token_store = TokenStore()
 # =========================
 
 def ensure_external_package(config_key: str = "external_pkg"):
+    """
+    Carga un paquete externo desde repo privado de GitHub:
+      1) import directo si ya está;
+      2) pip --target a una carpeta writable de la app (sin deps);
+      3) fallback: descarga ZIP y añade al sys.path.
+    """
     cfg = st.secrets.get(config_key)
     if not cfg:
         debug_log(f"[ensure_external_package] No hay secrets[{config_key}] configurado.")
@@ -107,51 +113,106 @@ def ensure_external_package(config_key: str = "external_pkg"):
         st.error("Falta configuración en `secrets` para instalar el paquete externo: " + ", ".join(missing))
         return None
 
-    # ¿ya importado?
+    # 0) ¿ya está importado?
     try:
         import importlib
         return importlib.import_module(package)
     except Exception:
         pass
 
-    # URL git para pip
+    # Construir URL git para pip
     if repo_url:
         clean = repo_url.removeprefix("https://")
         git_url = f"git+https://x-access-token:{token}@{clean}@{ref}#egg={package}"
     else:
         git_url = f"git+https://x-access-token:{token}@github.com/{repo}.git@{ref}#egg={package}"
 
-    debug_log("[ensure_external_package] Instalando paquete externo desde GitHub privado…", {
-        "ref": ref, "package": package, "source": repo_url or f"github.com/{repo}"
-    })
+    # Carpeta writable para instalar
+    import sys, os, subprocess, textwrap
+    base_dir = os.path.join(os.getcwd(), ".ext_pkgs")
+    target_lib = os.path.join(base_dir, "site-packages")
+    os.makedirs(target_lib, exist_ok=True)
 
-    import subprocess, sys, os
-    env = os.environ.copy()
-    env.setdefault("PIP_DEFAULT_TIMEOUT", "180")
-
-    # Ejecutar pip capturando salida
-    res = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", git_url],
-        env=env, capture_output=True, text=True
-    )
-
-    if res.returncode != 0:
-        # Redactar el token y mostrar solo el tail del error
-        out = (res.stdout or "") + "\n" + (res.stderr or "")
-        if token:
-            out = out.replace(token, "***REDACTED***")
-        st.error("No se pudo instalar el paquete externo desde GitHub (pip falló).")
-        tail = "\n".join([line for line in out.splitlines() if line.strip()][-60:])
-        st.code(tail or "(sin salida de pip)")
-        return None
-
-    # Importar luego de instalar
+    # 1) pip --target (no escribir en venv del sistema)
     try:
+        debug_log("[ensure_external_package] Instalando paquete externo (pip --target)…", {
+            "ref": ref, "package": package, "source": repo_url or f"github.com/{repo}",
+            "target": target_lib
+        })
+        env = os.environ.copy()
+        env.setdefault("PIP_DEFAULT_TIMEOUT", "180")
+        # --no-deps: las dependencias ya están en el venv del sistema
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", "--target", target_lib, git_url],
+            env=env, capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            if target_lib not in sys.path:
+                sys.path.insert(0, target_lib)
+            import importlib
+            mod = importlib.import_module(package)
+            debug_log(f"[ensure_external_package] Paquete importado desde target: {package}")
+            return mod
+        else:
+            out = (res.stdout or "") + "\n" + (res.stderr or "")
+            if token:
+                out = out.replace(token, "***REDACTED***")
+            debug_log("pip --target error (mostrando tail)", "\n".join([l for l in out.splitlines() if l.strip()][-60:]))
+    except Exception as e:
+        debug_log("pip --target exception", str(e))
+
+    # 2) Fallback ZIP (sin pip)
+    try:
+        import io, zipfile, sys, os, pathlib, urllib.request
+
+        if repo_url:
+            parts = repo_url.rstrip(".git").split("/")
+            owner_repo = "/".join(parts[-2:])
+        else:
+            owner_repo = repo
+
+        api_url = f"https://api.github.com/repos/{owner_repo}/zipball/{ref}"
+        req = urllib.request.Request(api_url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "streamlit-loader"
+        })
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            zipped = resp.read()
+
+        extract_dir = os.path.join(base_dir, f"{owner_repo.replace('/','_')}_{ref}")
+        if os.path.exists(extract_dir):
+            import shutil
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        os.makedirs(extract_dir, exist_ok=True)
+
+        zf = zipfile.ZipFile(io.BytesIO(zipped))
+        zf.extractall(extract_dir)
+
+        # Buscar carpeta del paquete (debe contener __init__.py)
+        pkg_parent = None
+        for root, dirs, files in os.walk(extract_dir):
+            if os.path.basename(root) == package and os.path.isfile(os.path.join(root, "__init__.py")):
+                pkg_parent = os.path.dirname(root)
+                break
+
+        if not pkg_parent:
+            st.error(textwrap.dedent(f"""
+                No encontré la carpeta del paquete **{package}** dentro del repo descargado.
+                Verificá que exista **{package}/__init__.py** en la raíz del proyecto o subcarpetas.
+            """).strip())
+            return None
+
+        if pkg_parent not in sys.path:
+            sys.path.insert(0, pkg_parent)
+
         import importlib
         mod = importlib.import_module(package)
-        debug_log(f"[ensure_external_package] Paquete instalado e importado: {package}")
+        debug_log(f"[ensure_external_package] Paquete cargado por ZIP (sin pip): {package}")
         return mod
+
     except Exception as e:
-        st.error("No se pudo importar el paquete externo luego de instalarlo.")
-        debug_log("import error", str(e))
+        st.error("No se pudo instalar ni cargar el paquete externo.")
+        debug_log("fallback zip error", str(e))
         return None
+
