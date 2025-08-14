@@ -1,85 +1,134 @@
 import streamlit as st
-
-st.write("redirect_uri (secrets):", st.secrets["auth"]["redirect_uri"])
-st.write("client_id (secrets):", st.secrets["auth"]["client_id"])
-
 import requests
 
-# Configura la página para que utilice el diseño "wide" (ancho),
-# ocupando todo el ancho disponible del navegador.
-st.set_page_config(layout="wide", page_title="Ejemplo Streamlit Google Auth")
-
-# Muestra el título principal de la aplicación web.
+st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 st.title("Ejemplo de inicio de sesión con Google en Streamlit")
 
-def login_screen():
-    """
-    Muestra la pantalla de inicio de sesión cuando un usuario no está autenticado.
-    Presenta un encabezado, un subencabezado y un botón que, al ser presionado,
-    inicia el flujo de autenticación de Google gestionado por Streamlit.
-    """
-    st.header("Esta aplicación es privada.")
-    st.subheader("Por favor, inicia sesión.")
-    # El botón "st.button" inicia el flujo de login gracias al argumento on_click=st.login.
-    # st.login() es una función nativa de Streamlit que redirige al usuario a la
-    # página de inicio de sesión de Google.
-    # El texto ":material/login:" es un atajo para usar los iconos de Material Design.
-    st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
+# ---------------------------
+# Helpers
+# ---------------------------
 
-# =============================================================================
-# LÓGICA PRINCIPAL DE LA APLICACIÓN
-# =============================================================================
+def get_user():
+    # Compatibilidad con versiones: usa st.user si existe; si no, experimental_user.
+    return getattr(st, "user", getattr(st, "experimental_user", None))
 
-# st.experimental_user es un objeto que contiene la información del usuario autenticado.
-# El atributo .is_logged_in devuelve True si el usuario ha iniciado sesión y False en caso contrario.
-# Este condicional es el núcleo de la aplicación: decide si mostrar la pantalla de login o el contenido principal.
-if not st.experimental_user.is_logged_in:
-    # Si el usuario NO ha iniciado sesión, llamamos a la función que muestra la pantalla de login.
-    login_screen()
-else:
-    # Si el usuario SÍ ha iniciado sesión, se ejecuta este bloque de código.
-    # Usamos "with st.sidebar:" para que todo el contenido indentado a continuación
-    # aparezca en la barra lateral de la aplicación.
+def get_first_name(full_name: str | None) -> str:
+    if not full_name:
+        return "👋"
+    return full_name.split()[0]
+
+def sidebar_user_info(user):
     with st.sidebar:
-        # Creamos un contenedor para organizar mejor los elementos de la barra lateral.
         with st.container():
-            # Dividimos el contenedor en dos columnas para alinear la imagen y la información del usuario.
-            # El ratio [1, 3] significa que la segunda columna será 3 veces más ancha que la primera.
-            c1, c2 = st.columns([1, 3])    
-            
+            c1, c2 = st.columns([1, 3])
             with c1:
-                # Verificamos si el objeto de usuario contiene una URL de imagen de perfil.
-                if st.experimental_user.picture:
+                if getattr(user, "picture", None):
                     try:
-                        # Usamos la librería 'requests' para hacer una petición GET a la URL de la imagen.
-                        response = requests.get(st.experimental_user.picture)
-                        # Si el código de estado de la respuesta es 200 (OK), significa que la imagen se obtuvo correctamente.
-                        if response.status_code == 200:
-                            # Mostramos la imagen en la aplicación. response.content contiene los bytes de la imagen.
-                            st.image(response.content, width=100)
+                        r = requests.get(user.picture, timeout=5)
+                        if r.status_code == 200:
+                            st.image(r.content, width=96)
                         else:
-                            # Si hay un problema al descargar la imagen (ej: error 404), mostramos una advertencia.
-                            st.warning("No se pudo cargar la imagen de perfil.")
+                            st.warning("No se pudo cargar la imagen.")
                     except Exception as e:
-                        # Capturamos cualquier otra excepción (ej: problemas de red) y mostramos un mensaje de error.
                         st.warning(f"Error al cargar la imagen: {e}")
                 else:
-                    # Si el usuario de Google no tiene una imagen de perfil, informamos de ello.
-                    st.info("No hay imagen de perfil disponible.")  
-            
+                    st.info("Sin imagen de perfil.")
             with c2:
-                st.header("Información del usuario")                
-                # Accedemos y mostramos el nombre y el email del usuario.
-                # Estos datos son proporcionados por Google después de una autenticación exitosa.
-                st.write(f"**Nombre:** \n {st.experimental_user.name}")
-                st.write(f"**Correo electrónico:** \n{st.experimental_user.email}")    
-        
-        # Creamos un botón para cerrar sesión.
-        # Al hacer clic, se ejecuta la función nativa st.logout(), que borra la sesión del usuario.
-        st.button(":material/logout: Cerrar sesión", on_click=st.logout)
+                st.header("Información del usuario", anchor=False)
+                st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
+                st.write(f"**Correo:** {getattr(user, 'email', '—')}")
+        st.divider()
+        st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
 
-    # st.json() es una forma útil de visualizar datos en formato JSON.
-    # .to_dict() convierte el objeto de usuario en un diccionario de Python.
-    # Esto es excelente para depuración, ya que nos permite ver toda la información
-    # que Google ha devuelto sobre el usuario.
-    st.json(st.experimental_user.to_dict())
+# ---------------------------
+# Vistas
+# ---------------------------
+
+def login_screen():
+    st.header("Esta aplicación es privada.")
+    st.subheader("Por favor, inicia sesión.")
+    st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
+
+def home_screen(user):
+    # Mensaje de bienvenida personalizado
+    first_name = get_first_name(getattr(user, "name", None))
+    st.markdown(f"### Hola, **{first_name}** 👋\nSeleccioná qué análisis querés ejecutar:")
+
+    # Opciones de análisis
+    opciones = {
+        "Análisis de impacto de Core Update": "core_update",
+        "Análisis de contenido evergreen": "evergreen",
+    }
+
+    # Selector (radio o selectbox a gusto)
+    seleccion = st.radio(
+        "Elige una opción:",
+        list(opciones.keys()),
+        captions=[
+            "Compara métricas antes vs. después de un Core Update.",
+            "Evalúa contenido atemporal: vigencia, tráfico y oportunidades."
+        ],
+        index=0,
+    )
+
+    st.session_state["analisis_seleccionado"] = opciones[seleccion]
+
+    # Acción
+    col_run, col_note = st.columns([1, 3])
+    with col_run:
+        if st.button("🚀 Ejecutar análisis", type="primary"):
+            run_analysis(opciones[seleccion])
+    with col_note:
+        st.info(
+            "Este demo solo muestra la estructura. "
+            "Conectá aquí tus funciones reales (GSC, Sheets, etc.)."
+        )
+
+def run_analysis(kind: str):
+    st.divider()
+    if kind == "core_update":
+        run_core_update_demo()
+    elif kind == "evergreen":
+        run_evergreen_demo()
+    else:
+        st.error("Análisis no reconocido.")
+
+def run_core_update_demo():
+    st.subheader("📈 Análisis de impacto de Core Update")
+    st.write(
+        "- Define tus fechas **pre** y **post** update.\n"
+        "- Trae datos diarios de Search/Discover.\n"
+        "- Filtra por país, sección o tipo de fuente.\n"
+        "- Exporta a tu plantilla de Google Sheets."
+    )
+    # 👉 Aquí conectarías tu pipeline real
+    with st.expander("Parámetros (demo)"):
+        pre_inicio = st.date_input("Fecha pre-inicio")
+        post_fin = st.date_input("Fecha post-fin")
+        fuente = st.multiselect("Fuente", ["Search", "Discover"], default=["Search"])
+        pais = st.text_input("Filtro por país (código ISO, ej: AR, MX, ES)", value="")
+        st.caption("Cuando presiones 'Ejecutar', llamá a tu rutina que consulta GSC y exporta.")
+
+def run_evergreen_demo():
+    st.subheader("🌲 Análisis de contenido evergreen")
+    st.write(
+        "- Identifica piezas con tráfico sostenido.\n"
+        "- Detecta estacionalidad vs. atemporalidad.\n"
+        "- Prioriza refrescos y oportunidades de interlinking."
+    )
+    # 👉 Aquí conectarías tu pipeline real
+    with st.expander("Parámetros (demo)"):
+        ventana_meses = st.slider("Ventana de análisis (meses)", 3, 24, 12)
+        umbral_trafico = st.number_input("Umbral de tráfico mínimo (visitas/mes)", min_value=0, value=500)
+        st.caption("Al ejecutar, consulta tu fuente (GSC/Analytics) y clasifica contenido.")
+
+# ---------------------------
+# App
+# ---------------------------
+
+user = get_user()
+if not user or not getattr(user, "is_logged_in", False):
+    login_screen()
+else:
+    sidebar_user_info(user)
+    home_screen(user)
