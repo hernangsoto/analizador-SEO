@@ -102,37 +102,6 @@ def ensure_google_clients(creds: Credentials):
     return sc, drive, gs
 
 
-def debug_log(msg: str, data: dict | str | None = None):
-    if st.session_state.get("DEBUG"):
-        st.info(msg)
-        if data is not None:
-            try:
-                import json
-                st.code(json.dumps(data, indent=2, ensure_ascii=False))
-            except Exception:
-                st.code(str(data))
-
-
-def get_google_identity(drive) -> dict:
-    """Devuelve displayName y email de la cuenta de Google autenticada."""
-    try:
-        me = drive.about().get(fields="user(displayName,emailAddress)").execute()
-        return me.get("user", {})
-    except Exception as e:
-        debug_log("No pude leer identidad de Google Drive", str(e))
-        return {}
-
-
-def debug_log(msg: str, data: dict | str | None = None):
-    if st.session_state.get("DEBUG"):
-        st.info(msg)
-        if data is not None:
-            try:
-                import json
-                st.code(json.dumps(data, indent=2, ensure_ascii=False))
-            except Exception:
-                st.code(str(data))
-
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
 # ---------------------------
@@ -260,49 +229,6 @@ Luego reintentá la autorización (Paso A y Paso B).""")
         return None
     except Exception as e:
         debug_log("Error al leer metadatos del template", str(e))
-        return None -> dict | None:
-    """Lee metadatos (y permisos si DEBUG) del template para verificar acceso."""
-    try:
-        meta = (
-            drive.files()
-            .get(
-                fileId=template_id,
-                fields="id,name,parents,mimeType,owners(displayName,emailAddress),webViewLink,driveId",
-                supportsAllDrives=True,
-            )
-            .execute()
-        )
-        if st.session_state.get("DEBUG"):
-            try:
-                perms = (
-                    drive.permissions()
-                    .list(fileId=template_id, fields="permissions(emailAddress,role,type)", supportsAllDrives=True)
-                    .execute()
-                )
-                meta["_permissions"] = perms.get("permissions", [])
-            except Exception as e:
-                meta["_permissions_error"] = str(e)
-        return meta
-    except Exception as e:
-        debug_log("Error al leer metadatos del template", str(e))
-        return None
-    """Intenta leer metadatos del template para verificar acceso. Devuelve metadatos o None si falla."""
-    try:
-        meta = (
-            drive.files()
-            .get(
-                fileId=template_id,
-                fields="id,name,parents,owners(displayName,emailAddress)",
-                supportsAllDrives=True,
-            )
-            .execute()
-        )
-        return meta
-    except Exception:
-        return None
-
-        return meta
-    except Exception as e:
         return None
 
 
@@ -333,13 +259,8 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
     except Exception as e:
         debug_log("Excepción al copiar template", str(e))
         raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
-        sid = new_file["id"]
-        sheet = gsclient.open_by_key(sid)
-        return sheet, sid
-    except Exception as e:
-        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
 
-def safe_set_df(ws, df: pd.DataFrame, include_header=True):
+def safe_set_df(ws, df: pd.DataFrame, include_header=True)(ws, df: pd.DataFrame, include_header=True):
     df = (df or pd.DataFrame()).copy()
     df = df.astype(object).where(pd.notnull(df), "")
     ws.clear()
