@@ -219,7 +219,7 @@ def verify_template_access(drive, template_id: str) -> dict | None:
         return meta
     except Exception as e:
         debug_log("Error al leer metadatos del template", str(e))
-        return None -> dict | None:
+        return None
     """Intenta leer metadatos del template para verificar acceso. Devuelve metadatos o None si falla."""
     try:
         meta = (
