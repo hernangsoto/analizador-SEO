@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import time
 from typing import Optional, List
-from urllib.parse import urlparse
 
-import pandas as pd
 import streamlit as st
 
 from .utils import debug_log
@@ -20,14 +18,14 @@ def ensure_drive_clients(creds):
     """
     try:
         from googleapiclient.discovery import build
-    except Exception as e:
+    except Exception:
         st.error("Falta el paquete **google-api-python-client**.")
         st.caption("Agregá `google-api-python-client` a requirements.txt y redeploy.")
         raise
 
     try:
         import gspread
-    except Exception as e:
+    except Exception:
         st.error("Falta el paquete **gspread**.")
         st.caption("Agregá `gspread` a requirements.txt y redeploy.")
         raise
@@ -212,8 +210,11 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str, dest_f
 
 # ========= Helpers de escritura =========
 
-def safe_set_df(ws, df: pd.DataFrame | None, include_header=True):
-    """Escribe el DataFrame manejando nulos y DataFrame vacío."""
+def safe_set_df(ws, df, include_header=True):
+    """
+    Escribe el DataFrame manejando nulos y **redimensionando** la worksheet
+    para evitar errores de API por límites del grid.
+    """
     try:
         from gspread_dataframe import set_with_dataframe
     except Exception:
@@ -221,13 +222,26 @@ def safe_set_df(ws, df: pd.DataFrame | None, include_header=True):
         st.caption("Agregá `gspread-dataframe` a requirements.txt y redeploy.")
         raise
 
+    import pandas as pd
+
+    # Normalizar DF (sin NaN) y evitar truthiness ambiguo
     if df is None:
         df = pd.DataFrame()
     else:
         df = df.copy()
+
+    # Convertimos NaN a "", y dejamos números/fechas como están
     df = df.astype(object).where(pd.notnull(df), "")
-    ws.clear()
-    set_with_dataframe(ws, df, include_column_header=include_header)
+
+    # Escribir redimensionando la hoja según el tamaño del DataFrame
+    set_with_dataframe(
+        ws,
+        df,
+        include_column_header=include_header,
+        resize=True,            # CLAVE: ajusta filas/columnas al tamaño del DF
+        allow_formulas=True,
+        string_ify=False,
+    )
 
 
 def _ensure_ws(sheet, title: str):
