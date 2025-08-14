@@ -111,6 +111,27 @@ def debug_log(msg: str, data: dict | str | None = None):
             except Exception:
                 st.code(str(data))
 
+
+def get_google_identity(drive) -> dict:
+    """Devuelve displayName y email de la cuenta de Google autenticada."""
+    try:
+        me = drive.about().get(fields="user(displayName,emailAddress)").execute()
+        return me.get("user", {})
+    except Exception as e:
+        debug_log("No pude leer identidad de Google Drive", str(e))
+        return {}
+
+
+def debug_log(msg: str, data: dict | str | None = None):
+    if st.session_state.get("DEBUG"):
+        st.info(msg)
+        if data is not None:
+            try:
+                import json
+                st.code(json.dumps(data, indent=2, ensure_ascii=False))
+            except Exception:
+                st.code(str(data))
+
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
 # ---------------------------
@@ -696,6 +717,12 @@ if not creds:
 
 # Construir clientes
 sc_service, drive_service, gs_client = ensure_google_clients(creds)
+# Mostrar identidad de la cuenta de Google conectada
+_me = get_google_identity(drive_service)
+if _me:
+    st.caption(f"Google conectado como: **{_me.get('displayName','?')}** ({_me.get('emailAddress','?')})")
+else:
+    st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
 # Paso 2: elegir sitio
 site_url = pick_site(sc_service)
