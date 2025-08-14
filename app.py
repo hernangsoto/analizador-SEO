@@ -1,5 +1,5 @@
 import os
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode
 
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
@@ -22,29 +22,13 @@ st.session_state["nombre"] = st.text_input(
 # --- Config de OAuth (desde secrets.toml) ---
 CLIENT_ID = st.secrets["oauth"]["client_id"]
 CLIENT_SECRET = st.secrets["oauth"]["client_secret"]
-
-# Normalizamos el redirect_uri: SIN barra final
-def normalize_redirect_uri(uri: str) -> str:
-    if not uri:
-        return uri
-    parts = urlsplit(uri.strip())
-    # dejamos solo scheme + netloc + (path vacío)
-    norm = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
-    return norm.rstrip("/")
-
-RAW_REDIRECT_URI = st.secrets["oauth"]["redirect_uri"]
-REDIRECT_URI = normalize_redirect_uri(RAW_REDIRECT_URI)
-
+REDIRECT_URI = st.secrets["oauth"]["redirect_uri"]  # debe coincidir EXACTAMENTE con lo configurado en Google
 SCOPES = ["openid", "email", "profile"]
 
-# Opcional: dominios permitidos (si no está, se acepta cualquier cuenta de Google)
+# Opcional: dominios permitidos. Si no está, se acepta cualquier cuenta de Google
 ALLOWED_DOMAINS = st.secrets.get("oauth", {}).get("allowed_domains", None)  # ej: ["gmail.com","tudominio.com"]
 
 # --- Helpers ---
-def origin_from_url(url: str) -> str:
-    p = urlsplit(url)
-    return f"{p.scheme}://{p.netloc}"
-
 def build_flow():
     client_config = {
         "web": {
@@ -53,8 +37,8 @@ def build_flow():
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "client_secret": CLIENT_SECRET,
-            "redirect_uris": [REDIRECT_URI],                 # EXACTO y normalizado
-            "javascript_origins": [origin_from_url(REDIRECT_URI)],
+            "redirect_uris": [REDIRECT_URI],
+            "javascript_origins": [REDIRECT_URI.rsplit("/", 1)[0]],
         }
     }
     flow = Flow.from_client_config(client_config, scopes=SCOPES)
@@ -69,7 +53,6 @@ def get_current_query_string():
     return urlencode(_as_doseq_dict(q), doseq=True)
 
 def full_current_url():
-    # Google nos redirige a REDIRECT_URI con ?code=&state=
     qs = get_current_query_string()
     return REDIRECT_URI + (f"?{qs}" if qs else "")
 
@@ -108,7 +91,7 @@ if has_code_and_state and st.session_state.get("oauth_state"):
             flow.fetch_token(authorization_response=full_current_url())
             creds = flow.credentials
 
-            # Algunas versiones exponen id_token como .id_token; otras como ._id_token
+            # Nota: credentials.id_token puede ser None según flujo/versión; si lo es, usamos _id_token.
             raw_id_token = getattr(creds, "id_token", None) or getattr(creds, "_id_token", None)
 
             idinfo = id_token.verify_oauth2_token(
@@ -156,7 +139,7 @@ if st.session_state["google_user"] is None:
         st.session_state["oauth_state"] = state
         st.query_params.clear()
 
-        # Redirigir en la MISMA pestaña (así no perdemos session_state)
+        # 🔑 Redirigir en la MISMA pestaña (evita perder session_state)
         st.write("Redirigiendo a Google…")
         st.markdown(
             f"""
