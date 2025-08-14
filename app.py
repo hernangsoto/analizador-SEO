@@ -243,23 +243,31 @@ def pick_account_and_oauth():
             st.error("Pegá la URL completa de redirección (incluye code y state).")
             st.stop()
         try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(auth_response_url.strip())
+            q = parse_qs(parsed.query)
+            code = (q.get("code") or [None])[0]
+            state_from_callback = (q.get("state") or [None])[0]
+            if not code or not state_from_callback:
+                st.error("La URL no contiene parámetros 'code' y 'state'. Volvé a autorizar y pegá la URL completa.")
+                st.stop()
+            # Validar que el 'state' coincida con el del Flow
+            expected_state = st.session_state["oauth"].get("state")
+            if state_from_callback != expected_state:
+                # Forzar regenerar flujo para evitar usar un state viejo
+                st.session_state.pop("oauth", None)
+                st.error("El parámetro 'state' no coincide (parece ser una URL antigua). Hacé clic en 'Autorizar' de nuevo y usá esa nueva URL.")
+                st.stop()
             # Usar el mismo Flow almacenado (con state + code_verifier intactos)
-            flow: Flow = oauth["flow"]
+            flow: Flow = st.session_state["oauth"]["flow"]
             flow.fetch_token(authorization_response=auth_response_url.strip())
             creds = flow.credentials
             st.session_state["creds"] = creds_to_dict(creds)
             st.success("Autenticación exitosa.")
         except Exception as e:
-            # Limpiar el flujo por si quedó en estado inconsistente
-            if "oauth" in st.session_state:
-                st.session_state.pop("oauth")
-            st.error(
-                "No se pudo intercambiar el código por tokens. Probá de nuevo: hace clic en 'Autorizar', copia la URL completa y pegala aquí."
-            )
-            st.caption(
-                "Sugerencia: si ves 'Scope has changed', es porque Google devolvió más scopes de los solicitados. "
-                "Ya desactivamos 'include_granted_scopes' para evitarlo. Reintentá la autorización."
-            )
+            st.session_state.pop("oauth", None)
+            st.error("No se pudo intercambiar el código por tokens. Reintentá: Autorizar → pegar la URL completa actual.")
+            st.caption(f"Detalle técnico (debug): {e}")
 
     # Si ya hay credenciales, reconstruimos Credentials
     if not creds and st.session_state.get("creds"):
