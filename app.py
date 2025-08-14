@@ -102,6 +102,27 @@ def ensure_google_clients(creds: Credentials):
     return sc, drive, gs
 
 
+def debug_log(msg: str, data: dict | str | None = None):
+    """Log simple en modo debug (muestra bloques legibles en la app)."""
+    if st.session_state.get("DEBUG"):
+        st.info(msg)
+        if data is not None:
+            try:
+                import json
+                st.code(json.dumps(data, indent=2, ensure_ascii=False))
+            except Exception:
+                st.code(str(data))
+
+
+def get_google_identity(drive) -> dict:
+    """Devuelve displayName y email de la cuenta de Google autenticada."""
+    try:
+        me = drive.about().get(fields="user(displayName,emailAddress)").execute()
+        return me.get("user", {})
+    except Exception as e:
+        debug_log("No pude leer identidad de Google Drive", str(e))
+        return {}
+
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
 # ---------------------------
@@ -260,7 +281,7 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
         debug_log("Excepción al copiar template", str(e))
         raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
 
-def safe_set_df(ws, df: pd.DataFrame, include_header=True)(ws, df: pd.DataFrame, include_header=True):
+def safe_set_df(ws, df: pd.DataFrame, include_header=True):
     df = (df or pd.DataFrame()).copy()
     df = df.astype(object).where(pd.notnull(df), "")
     ws.clear()
