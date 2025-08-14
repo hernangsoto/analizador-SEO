@@ -33,15 +33,28 @@ sidebar_user_info(user)
 st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
 # --- Paso 1: OAuth personal (Drive/Sheets) ---
-creds_dest = pick_destination_oauth()
-if not creds_dest:
-    st.stop()
+# app.py
+from modules.auth import pick_destination_oauth, pick_source_oauth, get_cached_personal_creds
+from modules.drive import ensure_drive_clients, get_google_identity, pick_destination
 
+# --- Paso 1: OAuth personal (Drive/Sheets) ---
+# 👉 Primero intentamos recuperar token automáticamente (sin UI)
+creds_dest = get_cached_personal_creds()
+
+if not creds_dest:
+    # Solo si NO hay token válido mostramos la UI de autorización
+    with st.container():
+        creds_dest = pick_destination_oauth()
+        if not creds_dest:
+            st.stop()
+
+# Ya tenemos credenciales personales válidas
 drive_service, gs_client = ensure_drive_clients(creds_dest)
 
 _me = get_google_identity(drive_service)
 if _me:
     st.caption(f"Google conectado como: **{_me.get('displayName','?')}** ({_me.get('emailAddress','?')})")
+    st.info(f"✅ Los archivos se guardarán en el Drive de: {_me.get('emailAddress','?')}")
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
@@ -55,6 +68,7 @@ if _app_email and _google_email and _app_email.lower() != _google_email.lower():
     )
 
 dest_folder_id = pick_destination(drive_service, _me)
+
 
 # --- Paso 2: OAuth fuente (Search Console: ACCESO/ACCESO_MEDIOS) ---
 creds_src = pick_source_oauth()
