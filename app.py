@@ -266,7 +266,7 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
         return sheet, sid
     except Exception as e:
         debug_log("Excepción al copiar template", str(e))
-        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}"). Detalle: {e}")
+        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
         sid = new_file["id"]
         sheet = gsclient.open_by_key(sid)
         return sheet, sid
