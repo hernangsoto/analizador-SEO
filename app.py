@@ -123,6 +123,68 @@ def get_google_identity(drive) -> dict:
         debug_log("No pude leer identidad de Google Drive", str(e))
         return {}
 
+def parse_drive_id_from_any(s: str | None) -> str | None:
+    """Extrae un ID de Drive desde URL o lo devuelve si ya es un ID.
+    Acepta URLs de archivo (/d/<ID>) o de carpeta (/folders/<ID>)."""
+    if not s:
+        return None
+    s = s.strip()
+    if "/folders/" in s:
+        try:
+            return s.split("/folders/")[1].split("?")[0].split("/")[0]
+        except Exception:
+            return None
+    if "/d/" in s:
+        try:
+            return s.split("/d/")[1].split("/")[0]
+        except Exception:
+            return None
+    # ID plano (heurística simple)
+    if all(ch not in s for ch in ["/", "?", " "]) and len(s) >= 10:
+        return s
+    return None
+
+
+def pick_destination(drive, identity: dict | None):
+    """UI para elegir carpeta destino opcional (en la CUENTA autenticada)."""
+    st.subheader("Destino de la copia (opcional)")
+    me_email = (identity or {}).get("emailAddress")
+    if me_email:
+        st.caption(f"Se creará en la cuenta conectada: **{me_email}**. Si no elegís carpeta, irá a **Mi unidad**.")
+    else:
+        st.caption("Se creará en la cuenta conectada. Si no elegís carpeta, irá a Mi unidad.")
+
+    folder_in = st.text_input(
+        "Carpeta destino (URL o ID, opcional)",
+        placeholder="https://drive.google.com/drive/folders/<FOLDER_ID> o ID",
+        key="dest_folder_input",
+    )
+    folder_id = None
+    folder_ok = False
+    if folder_in:
+        folder_id = parse_drive_id_from_any(folder_in)
+        if not folder_id:
+            st.error("No pude extraer un ID de carpeta de ese valor. Probá pegar la URL de la carpeta o el ID plano.")
+        else:
+            try:
+                meta = (
+                    drive.files()
+                    .get(fileId=folder_id, fields="id,name,mimeType,driveId", supportsAllDrives=True)
+                    .execute()
+                )
+                if meta.get("mimeType") == "application/vnd.google-apps.folder":
+                    folder_ok = True
+                    st.success(f"Usaremos la carpeta: **{meta.get('name','(sin nombre)')}**")
+                    debug_log("Carpeta destino", meta)
+                else:
+                    st.error("El ID proporcionado no es una carpeta de Google Drive.")
+            except Exception as e:
+                st.error("No pude acceder a esa carpeta con esta cuenta. Verificá permisos.")
+                debug_log("Error verificando carpeta destino", str(e))
+    if folder_ok:
+        st.session_state["dest_folder_id"] = folder_id
+    return st.session_state.get("dest_folder_id")
+
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
 # ---------------------------
@@ -253,7 +315,7 @@ Luego reintentá la autorización (Paso A y Paso B).""")
         return None
 
 
-def copy_template_and_open(drive, gsclient, template_id: str, title: str):
+def copy_template_and_open(drive, gsclient, template_id: str, title: str, dest_folder_id: str | None = None):
     # Pre-chequeo de acceso para dar mensajes claros
     meta = verify_template_access(drive, template_id)
     if not meta:
@@ -264,15 +326,35 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
     owners = ", ".join([o.get("displayName") or o.get("emailAddress", "?") for o in meta.get("owners", [])]) or "(desconocido)"
     st.caption(f"Template detectado: **{meta.get('name','(sin nombre)')}** – Propietario(s): {owners}")
     debug_log("Metadatos del template", meta)
+
+    # Armar body de copia; si se eligió carpeta, validarla y usarla como parent
+    body = {"name": title}
+    if dest_folder_id:
+        try:
+            folder_meta = (
+                drive.files()
+                .get(fileId=dest_folder_id, fields="id,name,mimeType,driveId", supportsAllDrives=True)
+                .execute()
+            )
+            if folder_meta.get("mimeType") != "application/vnd.google-apps.folder":
+                raise RuntimeError("El ID de destino no es una carpeta de Google Drive.")
+            body["parents"] = [dest_folder_id]
+            st.caption(f"Destino: carpeta **{folder_meta.get('name','(sin nombre)')}**")
+            debug_log("Destino carpeta", folder_meta)
+        except Exception as e:
+            debug_log("Error validando carpeta destino", str(e))
+            raise RuntimeError("No tengo acceso a la carpeta destino con esta cuenta. Compartila o elegí otra.")
+    else:
+        st.caption("Destino: **Mi unidad** (raíz)")
+
     try:
         new_file = (
             drive.files()
-            .copy(fileId=template_id, body={"name": title}, supportsAllDrives=True)
+            .copy(fileId=template_id, body=body, supportsAllDrives=True)
             .execute()
         )
         debug_log("Resultado de la copia", new_file)
         sid = new_file["id"]
-        # Proveer link de visualización por si falla gspread
         view_link = f"https://docs.google.com/spreadsheets/d/{sid}"
         debug_log("Link del nuevo archivo", {"webViewLink": view_link})
         sheet = gsclient.open_by_key(sid)
@@ -476,7 +558,7 @@ def params_for_evergreen():
 # Ejecución de análisis
 # ---------------------------
 
-def run_core_update(sc_service, drive, gsclient, site_url, params):
+def run_core_update(sc_service, drive, gsclient, site_url, params, dest_folder_id=None):
     lag_days, f_ini, termino, f_fin, tipo, pais, seccion = params
     pre_ini, pre_fin, post_ini, post_fin = compute_core_windows(lag_days, f_ini, termino, f_fin)
 
@@ -493,7 +575,7 @@ def run_core_update(sc_service, drive, gsclient, site_url, params):
     if not template_id:
         st.error("No se configuró el ID de template para 'core_update' en st.secrets.")
         st.stop()
-    sh, sid = copy_template_and_open(drive, gsclient, template_id, title)
+    sh, sid = copy_template_and_open(drive, gsclient, template_id, title, dest_folder_id)
 
     # Exportar datos Pre/Post + por país básicos
     for tipo_nombre, tipo_val in tipos:
@@ -531,7 +613,7 @@ def run_core_update(sc_service, drive, gsclient, site_url, params):
 
     return sid
 
-def run_evergreen(sc_service, drive, gsclient, site_url, params):
+def run_evergreen(sc_service, drive, gsclient, site_url, params, dest_folder_id=None):
     lag_days, pais, seccion, incluir_diario, start_date, end_date = params
 
     dom = urlparse(site_url).netloc.replace("www.", "")
@@ -543,7 +625,7 @@ def run_evergreen(sc_service, drive, gsclient, site_url, params):
     if not template_id:
         st.error("No se configuró el ID de template para 'evergreen' en st.secrets.")
         st.stop()
-    sh, sid = copy_template_and_open(drive, gsclient, template_id, title)
+    sh, sid = copy_template_and_open(drive, gsclient, template_id, title, dest_folder_id)
 
     # Mensual por página (Search/web)
     monthly = fetch_gsc_monthly_by_page(sc_service, site_url, start_date, end_date, country_iso3=pais, section_path=seccion)
@@ -711,7 +793,9 @@ if _me:
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
-# Paso 2: elegir sitio
+# Seleccionar carpeta destino opcional (en la CUENTA autenticada)
+dest_folder_id = pick_destination(drive_service, _me)
+\ n# Paso 2: elegir sitio
 site_url = pick_site(sc_service)
 
 # Paso 3: elegir análisis
