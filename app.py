@@ -19,8 +19,13 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")   # tolera diferencias 
 # =============================
 # Configuración base
 # =============================
+DEBUG_DEFAULT = bool(st.secrets.get("debug", False))
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 st.title("Análisis SEO – GSC ➜ Google Sheets")
+
+# Switch de depuración visible tras login
+st.session_state.setdefault("DEBUG", DEBUG_DEFAULT)
+
 
 # ---------------------------
 # Helpers UI
@@ -94,6 +99,17 @@ def ensure_google_clients(creds: Credentials):
     drive = build("drive", "v3", credentials=creds)
     gs = gspread.authorize(creds)
     return sc, drive, gs
+
+
+def debug_log(msg: str, data: dict | str | None = None):
+    if st.session_state.get("DEBUG"):
+        st.info(msg)
+        if data is not None:
+            try:
+                import json
+                st.code(json.dumps(data, indent=2, ensure_ascii=False))
+            except Exception:
+                st.code(str(data))
 
 # ---------------------------
 # Funciones GSC (adaptadas del Colab)
@@ -179,6 +195,31 @@ def get_template_id(kind: str, account_key: str | None = None) -> str | None:
 
 
 def verify_template_access(drive, template_id: str) -> dict | None:
+    """Lee metadatos (y permisos si DEBUG) del template para verificar acceso."""
+    try:
+        meta = (
+            drive.files()
+            .get(
+                fileId=template_id,
+                fields="id,name,parents,mimeType,owners(displayName,emailAddress),webViewLink,driveId",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        if st.session_state.get("DEBUG"):
+            try:
+                perms = (
+                    drive.permissions()
+                    .list(fileId=template_id, fields="permissions(emailAddress,role,type)", supportsAllDrives=True)
+                    .execute()
+                )
+                meta["_permissions"] = perms.get("permissions", [])
+            except Exception as e:
+                meta["_permissions_error"] = str(e)
+        return meta
+    except Exception as e:
+        debug_log("Error al leer metadatos del template", str(e))
+        return None -> dict | None:
     """Intenta leer metadatos del template para verificar acceso. Devuelve metadatos o None si falla."""
     try:
         meta = (
@@ -207,22 +248,25 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
             "No tengo acceso al template de Google Sheets especificado. Verificá que el ID sea correcto y que la cuenta de Google autenticada tenga permiso de lectura."
         )
     # Mostrar info útil para depurar (no sensible)
-    try:
-        owners = ", ".join([o.get("displayName") or o.get("emailAddress", "?") for o in meta.get("owners", [])]) or "(desconocido)"
-        st.caption(f"Template detectado: **{meta.get('name','(sin nombre)')}** – Propietario(s): {owners}")
-    except Exception:
-        pass
+    owners = ", ".join([o.get("displayName") or o.get("emailAddress", "?") for o in meta.get("owners", [])]) or "(desconocido)"
+    st.caption(f"Template detectado: **{meta.get('name','(sin nombre)')}** – Propietario(s): {owners}")
+    debug_log("Metadatos del template", meta)
     try:
         new_file = (
             drive.files()
             .copy(fileId=template_id, body={"name": title}, supportsAllDrives=True)
             .execute()
         )
+        debug_log("Resultado de la copia", new_file)
         sid = new_file["id"]
+        # Proveer link de visualización por si falla gspread
+        view_link = f"https://docs.google.com/spreadsheets/d/{sid}"
+        debug_log("Link del nuevo archivo", {"webViewLink": view_link})
         sheet = gsclient.open_by_key(sid)
         return sheet, sid
     except Exception as e:
-        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
+        debug_log("Excepción al copiar template", str(e))
+        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}"). Detalle: {e}")
         sid = new_file["id"]
         sheet = gsclient.open_by_key(sid)
         return sheet, sid
@@ -641,6 +685,9 @@ if not user or not getattr(user, "is_logged_in", False):
 
 # Sidebar info
 sidebar_user_info(user)
+
+# Modo debug opcional (muestra metadatos de Drive, permisos, etc.)
+st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
 # Paso 1: OAuth con selección de cuenta
 creds = pick_account_and_oauth()
