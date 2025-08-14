@@ -4,31 +4,7 @@ from __future__ import annotations
 import os
 import streamlit as st
 
-# --- imports seguros de utils (con fallback) ---
-try:
-    from modules.utils import debug_log, ensure_external_package
-except Exception as _utils_err:
-    import streamlit as st
-
-    st.warning(f"No pude cargar modules.utils: {_utils_err}")
-
-    def debug_log(msg: str, data=None):
-        """Fallback simple de debug_log si no existe modules.utils."""
-        if st.session_state.get("DEBUG"):
-            st.info(str(msg))
-            if data is not None:
-                try:
-                    import json
-                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-                except Exception:
-                    st.code(str(data))
-
-    def ensure_external_package(config_key: str = "external_pkg"):
-        """Fallback: no intenta instalar paquete externo."""
-        return None
-
-
-# Permitir http://localhost para el authorization_response (cuando copias la URL)
+# Permitir http://localhost en el authorization_response (cuando pegás la URL)
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 # Tolerar diferencias de orden/espacios en scopes
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -56,26 +32,31 @@ from modules.drive import (
     share_controls,
 )
 from modules.gsc import ensure_sc_client
-from modules.utils import debug_log, ensure_external_package
+
+# --- utils con fallback seguro (por si hubiera error de import) ---
+try:
+    from modules.utils import debug_log, ensure_external_package
+except Exception as _uerr:  # fallback mínimo
+    st.warning(f"No pude cargar modules.utils: {_uerr}")
+
+    def debug_log(msg: str, data=None):
+        if st.session_state.get("DEBUG"):
+            st.info(str(msg))
+            if data is not None:
+                try:
+                    import json
+                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+                except Exception:
+                    st.code(str(data))
+
+    def ensure_external_package(config_key: str = "external_pkg"):
+        return None
 
 # (Opcional) estilos
 try:
     from modules.style import inject as inject_styles
 except Exception:
     inject_styles = None
-
-# =============================
-# Cargar análisis (externo o local)
-# =============================
-_ext = ensure_external_package(config_key="external_pkg")
-if _ext:
-    # Usa el paquete externo (repo privado)
-    run_core_update = _ext.run_core_update
-    run_evergreen  = _ext.run_evergreen
-else:
-    # Fallback a los módulos locales
-    from modules.analysis_core_update import run_core_update
-    from modules.analysis_evergreen  import run_evergreen
 
 
 # =============================
@@ -94,6 +75,34 @@ if inject_styles:
 
 st.title("Análisis SEO – GSC → Google Sheets")
 st.session_state.setdefault("DEBUG", DEBUG_DEFAULT)
+
+
+# =============================
+# Cargar análisis (externo o local, con fallback robusto)
+# =============================
+_ext = ensure_external_package(config_key="external_pkg")
+
+run_core_update = None
+run_evergreen = None
+
+if _ext:
+    debug_log("Paquete externo cargado", {
+        "module_file": getattr(_ext, "__file__", None),
+        "attrs": [a for a in dir(_ext) if not a.startswith("_")][:50],
+    })
+    try:
+        run_core_update = getattr(_ext, "run_core_update")
+        run_evergreen  = getattr(_ext, "run_evergreen")
+        st.caption("🔌 Usando análisis del paquete externo (repo privado).")
+    except Exception as e:
+        st.warning(f"No pude cargar funciones desde el paquete externo: {e}")
+
+if not (callable(run_core_update) and callable(run_evergreen)):
+    from modules.analysis_core_update import run_core_update as _rcu_local
+    from modules.analysis_evergreen  import run_evergreen  as _rev_local
+    run_core_update = _rcu_local
+    run_evergreen  = _rev_local
+    st.caption("↩️ Usando análisis locales (fallback).")
 
 
 # =============================
@@ -137,7 +146,7 @@ if _app_email and _google_email and _app_email.lower() != _google_email.lower():
         % (_app_email, _google_email, _google_email, _app_email)
     )
 
-# Carpeta destino (opcional)
+# Carpeta destino (opcional, en la CUENTA personal conectada)
 dest_folder_id = pick_destination(drive_service, _me)
 
 
