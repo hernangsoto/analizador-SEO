@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Optional, List
+from typing import List
 
 import streamlit as st
 
@@ -213,7 +213,8 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str, dest_f
 def safe_set_df(ws, df, include_header=True):
     """
     Escribe el DataFrame manejando nulos y **redimensionando** la worksheet
-    para evitar errores de API por límites del grid.
+    para evitar errores de API por límites del grid. Compatible con distintas
+    versiones de gspread-dataframe (hace fallback si faltan kwargs).
     """
     try:
         from gspread_dataframe import set_with_dataframe
@@ -233,15 +234,32 @@ def safe_set_df(ws, df, include_header=True):
     # Convertimos NaN a "", y dejamos números/fechas como están
     df = df.astype(object).where(pd.notnull(df), "")
 
-    # Escribir redimensionando la hoja según el tamaño del DataFrame
-    set_with_dataframe(
-        ws,
-        df,
-        include_column_header=include_header,
-        resize=True,            # CLAVE: ajusta filas/columnas al tamaño del DF
-        allow_formulas=True,
-        string_ify=False,
-    )
+    # Intento con firma completa; si la versión no acepta algún kw, hacemos fallback.
+    try:
+        set_with_dataframe(
+            ws,
+            df,
+            include_column_header=include_header,
+            resize=True,
+            allow_formulas=True,
+            string_ify=False,
+        )
+    except TypeError:
+        try:
+            set_with_dataframe(
+                ws,
+                df,
+                include_column_header=include_header,
+                resize=True,
+                allow_formulas=True,
+            )
+        except TypeError:
+            set_with_dataframe(
+                ws,
+                df,
+                include_column_header=include_header,
+                resize=True,
+            )
 
 
 def _ensure_ws(sheet, title: str):
