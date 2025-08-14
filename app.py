@@ -795,7 +795,8 @@ else:
 
 # Seleccionar carpeta destino opcional (en la CUENTA autenticada)
 dest_folder_id = pick_destination(drive_service, _me)
-\ n# Paso 2: elegir sitio
+
+# Paso 2: elegir sitio
 site_url = pick_site(sc_service)
 
 # Paso 3: elegir análisis
