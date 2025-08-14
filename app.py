@@ -183,22 +183,20 @@ analisis = pick_analysis()
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
+        with lottie_spinner(LOTTIE_LOADER, text="Extrayendo GSC y escribiendo en Google Sheets…"):
+            sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        me_email = (_me or {}).get("emailAddress")
-        share_controls(drive_service, sid, default_email=me_email)
+
 
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
+        with lottie_spinner(LOTTIE_LOADER, text="Calculando series mensuales y diarias…"):
+            sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        me_email = (_me or {}).get("emailAddress")
-        share_controls(drive_service, sid, default_email=me_email)
+
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
