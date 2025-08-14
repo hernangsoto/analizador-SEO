@@ -1,99 +1,98 @@
 # modules/utils.py
 from __future__ import annotations
 
-import importlib
-import json
 import os
-import subprocess
 import sys
+import json
+import textwrap
 from typing import Any, Optional
 
 import streamlit as st
 
 
-# =========================
-# Redacción/Debug helpers
-# =========================
+# =============================
+# Debug helpers
+# =============================
 
-def _redact_secrets(text: str) -> str:
-    """Redacta patrones típicos de tokens para evitar fugas en logs."""
-    if not isinstance(text, str):
-        return text
-    out = text
-    # GitHub tokens
-    out = out.replace("ghp_", "ghp_***REDACTED***")
-    out = out.replace("github_pat_", "github_pat_***REDACTED***")
-    # Bearer headers
-    out = out.replace("Authorization: Bearer ", "Authorization: Bearer ***REDACTED***")
-    # Google refresh_token (heurístico)
-    out = out.replace("refresh_token", "refresh_token***REDACTED***")
-    return out
-
-
-def debug_log(msg: str, data: Any | None = None) -> None:
-    """Log sencillo cuando st.session_state['DEBUG'] es True."""
+def debug_log(msg: str, data: Any = None) -> None:
+    """Muestra mensajes de depuración si st.session_state['DEBUG'] está activo."""
     if not st.session_state.get("DEBUG"):
         return
-    st.info(_redact_secrets(str(msg)))
-    if data is None:
-        return
     try:
-        payload = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        st.info(str(msg))
+        if data is not None:
+            try:
+                st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+            except Exception:
+                st.code(str(data))
     except Exception:
-        payload = str(data)
-    st.code(_redact_secrets(payload))
+        # No hacer ruido si el frontend no soporta (e.g., en tests)
+        pass
 
 
-# =========================
-# Token Store (para creds)
-# =========================
+# =============================
+# Token store (credenciales en sesión)
+# =============================
 
-class TokenStore:
-    """
-    Guarda objetos (p.ej., credenciales serializadas) en st.session_state
-    bajo un namespace único. Útil para cachear 'creds_dest', 'creds_src', etc.
-    """
-    KEY = "__TOKENS__"
+class _TokenStore:
+    """Almacena tokens/credenciales en st.session_state."""
+    _KEY = "_TOKENS"
 
-    def _ensure(self) -> None:
-        st.session_state.setdefault(self.KEY, {})
+    def _box(self) -> dict:
+        if self._KEY not in st.session_state or not isinstance(st.session_state[self._KEY], dict):
+            st.session_state[self._KEY] = {}
+        return st.session_state[self._KEY]
 
-    def get(self, name: str, default: Any = None) -> Any:
-        self._ensure()
-        return st.session_state[self.KEY].get(name, default)
+    def save(self, name: str, value: dict) -> None:
+        box = self._box()
+        box[name] = dict(value) if value is not None else None
 
-    def set(self, name: str, value: Any) -> None:
-        self._ensure()
-        st.session_state[self.KEY][name] = value
-
-    def has(self, name: str) -> bool:
-        self._ensure()
-        return name in st.session_state[self.KEY]
+    def load(self, name: str, default: Optional[dict] = None) -> Optional[dict]:
+        return self._box().get(name, default)
 
     def clear(self, name: str) -> None:
-        self._ensure()
-        st.session_state[self.KEY].pop(name, None)
+        self._box().pop(name, None)
 
-    def all(self) -> dict:
-        self._ensure()
-        # Devolvemos una copia superficial para depurar sin mutar
-        return dict(st.session_state[self.KEY])
+    def as_credentials(self, name: str):
+        """Devuelve google.oauth2.credentials.Credentials si hay dict almacenado."""
+        from google.oauth2.credentials import Credentials
+        data = self.load(name)
+        if not data:
+            return None
+        try:
+            return Credentials(**data)
+        except Exception as e:
+            debug_log(f"[token_store.as_credentials] no se pudo construir Credentials({name})", str(e))
+            return None
 
 
-# Instancia global que pueden importar otros módulos
-token_store = TokenStore()
+token_store = _TokenStore()
 
 
-# =========================
-# External package loader
-# =========================
+# =============================
+# Carga de paquete externo (GitHub privado)
+# =============================
+
+def _purge_modules(prefix: str) -> None:
+    """Elimina del caché de import todos los submódulos del paquete para evitar mezclar copias."""
+    for name in list(sys.modules.keys()):
+        if name == prefix or name.startswith(prefix + "."):
+            sys.modules.pop(name, None)
+
 
 def ensure_external_package(config_key: str = "external_pkg"):
     """
-    Carga un paquete externo desde repo privado de GitHub:
-      1) import directo si ya está;
-      2) pip --target a una carpeta writable de la app (sin deps);
-      3) fallback: descarga ZIP y añade al sys.path.
+    Carga un paquete externo desde un repo privado de GitHub. Intenta:
+      0) import directo si ya está cargado
+      1) pip --target a .ext_pkgs/site-packages (sin deps) y PURGA sys.modules
+      2) fallback: descarga ZIP vía API y lo añade al sys.path (y PURGA sys.modules)
+
+    Config en secrets:
+      [external_pkg]
+      repo    = "owner/repo"             # o repo_url = "https://github.com/owner/repo.git"
+      ref     = "main"                   # rama / tag / commit
+      package = "seo_analisis_ext"       # nombre del paquete (carpeta con __init__.py)
+      token   = "github_pat_xxx..."      # token con Contents:Read + Metadata:Read (y SSO habilitado si aplica)
     """
     cfg = st.secrets.get(config_key)
     if not cfg:
@@ -116,7 +115,8 @@ def ensure_external_package(config_key: str = "external_pkg"):
     # 0) ¿ya está importado?
     try:
         import importlib
-        return importlib.import_module(package)
+        mod = importlib.import_module(package)
+        return mod
     except Exception:
         pass
 
@@ -127,21 +127,18 @@ def ensure_external_package(config_key: str = "external_pkg"):
     else:
         git_url = f"git+https://x-access-token:{token}@github.com/{repo}.git@{ref}#egg={package}"
 
-    # Carpeta writable para instalar
-    import sys, os, subprocess, textwrap
+    import subprocess
     base_dir = os.path.join(os.getcwd(), ".ext_pkgs")
     target_lib = os.path.join(base_dir, "site-packages")
     os.makedirs(target_lib, exist_ok=True)
 
-    # 1) pip --target (no escribir en venv del sistema)
+    # 1) pip --target (no tocar venv del sistema)
     try:
-        debug_log("[ensure_external_package] Instalando paquete externo (pip --target)…", {
-            "ref": ref, "package": package, "source": repo_url or f"github.com/{repo}",
-            "target": target_lib
+        debug_log("[ensure_external_package] Instalando paquete (pip --target)…", {
+            "ref": ref, "package": package, "source": repo_url or f"github.com/{repo}", "target": target_lib
         })
         env = os.environ.copy()
         env.setdefault("PIP_DEFAULT_TIMEOUT", "180")
-        # --no-deps: las dependencias ya están en el venv del sistema
         res = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", "--target", target_lib, git_url],
             env=env, capture_output=True, text=True
@@ -149,21 +146,28 @@ def ensure_external_package(config_key: str = "external_pkg"):
         if res.returncode == 0:
             if target_lib not in sys.path:
                 sys.path.insert(0, target_lib)
+            _purge_modules(package)
             import importlib
             mod = importlib.import_module(package)
-            debug_log(f"[ensure_external_package] Paquete importado desde target: {package}")
+            debug_log("[ensure_external_package] Importado desde target", {
+                "file": getattr(mod, "__file__", None)
+            })
             return mod
         else:
             out = (res.stdout or "") + "\n" + (res.stderr or "")
             if token:
                 out = out.replace(token, "***REDACTED***")
-            debug_log("pip --target error (mostrando tail)", "\n".join([l for l in out.splitlines() if l.strip()][-60:]))
+            tail = "\n".join([l for l in out.splitlines() if l.strip()][-60:])
+            debug_log("pip --target error (tail)", tail)
     except Exception as e:
         debug_log("pip --target exception", str(e))
 
-    # 2) Fallback ZIP (sin pip)
+    # 2) Fallback: descarga ZIP y carga directa (sin pip)
     try:
-        import io, zipfile, sys, os, pathlib, urllib.request
+        import io
+        import zipfile
+        import urllib.request
+        import shutil
 
         if repo_url:
             parts = repo_url.rstrip(".git").split("/")
@@ -182,7 +186,6 @@ def ensure_external_package(config_key: str = "external_pkg"):
 
         extract_dir = os.path.join(base_dir, f"{owner_repo.replace('/','_')}_{ref}")
         if os.path.exists(extract_dir):
-            import shutil
             shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
 
@@ -199,20 +202,27 @@ def ensure_external_package(config_key: str = "external_pkg"):
         if not pkg_parent:
             st.error(textwrap.dedent(f"""
                 No encontré la carpeta del paquete **{package}** dentro del repo descargado.
-                Verificá que exista **{package}/__init__.py** en la raíz del proyecto o subcarpetas.
+                Verificá que exista **{package}/__init__.py**.
             """).strip())
             return None
+
+        # Si existe una copia vieja en target_lib, quitarla
+        old_pkg_path = os.path.join(target_lib, package)
+        if os.path.isdir(old_pkg_path):
+            shutil.rmtree(old_pkg_path, ignore_errors=True)
 
         if pkg_parent not in sys.path:
             sys.path.insert(0, pkg_parent)
 
+        _purge_modules(package)
         import importlib
         mod = importlib.import_module(package)
-        debug_log(f"[ensure_external_package] Paquete cargado por ZIP (sin pip): {package}")
+        debug_log("[ensure_external_package] Cargado por ZIP", {
+            "file": getattr(mod, "__file__", None)
+        })
         return mod
 
     except Exception as e:
         st.error("No se pudo instalar ni cargar el paquete externo.")
         debug_log("fallback zip error", str(e))
         return None
-
