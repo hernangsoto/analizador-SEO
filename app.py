@@ -59,6 +59,14 @@ try:
 except Exception:
     inject_styles = None
 
+# =============================
+# LOTTIE
+# =============================
+
+LOTTIE_LOADER = st.secrets.get("lottie", {}).get(
+    "loader_url",
+    "https://assets2.lottiefiles.com/packages/lf20_usmfx6bp.json"  # ejemplo
+)
 
 # =============================
 # Configuración de la app
