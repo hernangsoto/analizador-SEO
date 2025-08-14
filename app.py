@@ -660,6 +660,65 @@ def run_evergreen(sc_service, drive, gsclient, site_url, params, dest_folder_id=
 
     return sid
 
+# ====== Compartir / permisos ======
+
+def _parse_emails_list(s: str) -> list[str]:
+    if not s:
+        return []
+    parts = [p.strip() for p in s.replace(";", ",").split(",")]
+    return [p for p in parts if p]
+
+
+def grant_permissions(drive, file_id: str, emails: list[str], role: str = "reader", anyone_view: bool = False):
+    """Asigna permisos al archivo recién creado."""
+    ok, errs = [], []
+    for em in emails:
+        try:
+            drive.permissions().create(
+                fileId=file_id,
+                body={"type": "user", "role": role, "emailAddress": em},
+                sendNotificationEmail=False,
+                supportsAllDrives=True,
+                fields="id",
+            ).execute()
+            ok.append(em)
+        except Exception as e:
+            errs.append((em, str(e)))
+    if anyone_view:
+        try:
+            drive.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True,
+                fields="id",
+            ).execute()
+            ok.append("link: anyone (reader)")
+        except Exception as e:
+            errs.append(("anyone", str(e)))
+    return ok, errs
+
+
+def share_controls(drive, file_id: str, default_email: str | None = None):
+    st.subheader("Compartir acceso al documento")
+    st.caption("Podés abrir el link con la **misma cuenta** autenticada o compartirlo con otras direcciones.")
+    emails_str = st.text_input(
+        "Emails a compartir (separados por coma)",
+        value=default_email or "",
+        key=f"share_emails_{file_id}",
+        placeholder="persona@ejemplo.com, otra@empresa.com",
+    )
+    role = st.selectbox("Rol", ["reader", "commenter", "writer"], index=0, key=f"share_role_{file_id}")
+    anyone = st.checkbox("Cualquiera con el enlace (visor)", value=False, key=f"share_anyone_{file_id}")
+    if st.button("Aplicar permisos", key=f"btn_share_{file_id}"):
+        emails = _parse_emails_list(emails_str)
+        ok, errs = grant_permissions(drive, file_id, emails, role=role, anyone_view=anyone)
+        if ok:
+            st.success("Permisos aplicados: " + ", ".join(ok))
+        if errs:
+            st.error("No se pudieron aplicar algunos permisos:")
+            for em, err in errs:
+                st.caption(f"• {em}: {err}")
+
 # ====== Funciones Evergreen auxiliares ======
 
 def month_range(start_date, end_date):
@@ -813,11 +872,17 @@ if analisis == "4":
         sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+        st.session_state["last_file_id"] = sid
+        me_email = (_me or {}).get("emailAddress")
+        share_controls(drive_service, sid, default_email=me_email)
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
         sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+        st.session_state["last_file_id"] = sid
+        me_email = (_me or {}).get("emailAddress")
+        share_controls(drive_service, sid, default_email=me_email)
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
