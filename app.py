@@ -168,11 +168,38 @@ def consultar_por_pais(service, site_url, fecha_inicio, fecha_fin, tipo_dato, se
 # Exportar a Google Sheets
 # ---------------------------
 
+def get_template_id(kind: str, account_key: str | None = None) -> str | None:
+    """Obtiene el template ID desde secrets. Admite por cuenta y global.
+    Prioridad: templates[<account_key>][<kind>] -> templates[<kind>]
+    """
+    troot = st.secrets.get("templates", {})
+    if account_key and isinstance(troot.get(account_key), dict):
+        return troot[account_key].get(kind) or troot.get(kind)
+    return troot.get(kind)
+
+
+def verify_template_access(drive, template_id: str) -> dict | None:
+    """Intenta leer metadatos del template para verificar acceso. Devuelve metadatos o None si falla."""
+    try:
+        meta = drive.files().get(fileId=template_id, fields="id,name,owners(displayName,emailAddress)").execute()
+        return meta
+    except Exception as e:
+        return None
+
+
 def copy_template_and_open(drive, gsclient, template_id: str, title: str):
-    new_file = drive.files().copy(fileId=template_id, body={"name": title}).execute()
-    sid = new_file["id"]
-    sheet = gsclient.open_by_key(sid)
-    return sheet, sid
+    # Pre-chequeo de acceso para dar mensajes claros
+    meta = verify_template_access(drive, template_id)
+    if not meta:
+        raise RuntimeError(
+            "No tengo acceso al template de Google Sheets especificado. Verificá que el ID sea correcto y que la cuenta de Google autenticada tenga permiso de lectura." )
+    try:
+        new_file = drive.files().copy(fileId=template_id, body={"name": title}).execute()
+        sid = new_file["id"]
+        sheet = gsclient.open_by_key(sid)
+        return sheet, sid
+    except Exception as e:
+        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
 
 def safe_set_df(ws, df: pd.DataFrame, include_header=True):
     df = (df or pd.DataFrame()).copy()
@@ -382,7 +409,10 @@ def run_core_update(sc_service, drive, gsclient, site_url, params):
     nombre_analisis = "Análisis de impacto de Core Update"
     title = f"{nombre_medio} - {nombre_analisis} - {date.today()}"
 
-    template_id = st.secrets["templates"]["core_update"]
+    template_id = get_template_id("core_update", st.session_state.get("oauth", {}).get("account"))
+    if not template_id:
+        st.error("No se configuró el ID de template para 'core_update' en st.secrets.")
+        st.stop()
     sh, sid = copy_template_and_open(drive, gsclient, template_id, title)
 
     # Exportar datos Pre/Post + por país básicos
@@ -429,7 +459,10 @@ def run_evergreen(sc_service, drive, gsclient, site_url, params):
     nombre_analisis = "Análisis de tráfico evergreen"
     title = f"{nombre_medio} - {nombre_analisis} - {date.today()}"
 
-    template_id = st.secrets["templates"]["evergreen"]
+    template_id = get_template_id("evergreen", st.session_state.get("oauth", {}).get("account"))
+    if not template_id:
+        st.error("No se configuró el ID de template para 'evergreen' en st.secrets.")
+        st.stop()
     sh, sid = copy_template_and_open(drive, gsclient, template_id, title)
 
     # Mensual por página (Search/web)
