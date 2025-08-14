@@ -181,7 +181,19 @@ def get_template_id(kind: str, account_key: str | None = None) -> str | None:
 def verify_template_access(drive, template_id: str) -> dict | None:
     """Intenta leer metadatos del template para verificar acceso. Devuelve metadatos o None si falla."""
     try:
-        meta = drive.files().get(fileId=template_id, fields="id,name,owners(displayName,emailAddress)").execute()
+        meta = (
+            drive.files()
+            .get(
+                fileId=template_id,
+                fields="id,name,parents,owners(displayName,emailAddress)",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        return meta
+    except Exception:
+        return None
+
         return meta
     except Exception as e:
         return None
@@ -192,9 +204,25 @@ def copy_template_and_open(drive, gsclient, template_id: str, title: str):
     meta = verify_template_access(drive, template_id)
     if not meta:
         raise RuntimeError(
-            "No tengo acceso al template de Google Sheets especificado. Verificá que el ID sea correcto y que la cuenta de Google autenticada tenga permiso de lectura." )
+            "No tengo acceso al template de Google Sheets especificado. Verificá que el ID sea correcto y que la cuenta de Google autenticada tenga permiso de lectura."
+        )
+    # Mostrar info útil para depurar (no sensible)
     try:
-        new_file = drive.files().copy(fileId=template_id, body={"name": title}).execute()
+        owners = ", ".join([o.get("displayName") or o.get("emailAddress", "?") for o in meta.get("owners", [])]) or "(desconocido)"
+        st.caption(f"Template detectado: **{meta.get('name','(sin nombre)')}** – Propietario(s): {owners}")
+    except Exception:
+        pass
+    try:
+        new_file = (
+            drive.files()
+            .copy(fileId=template_id, body={"name": title}, supportsAllDrives=True)
+            .execute()
+        )
+        sid = new_file["id"]
+        sheet = gsclient.open_by_key(sid)
+        return sheet, sid
+    except Exception as e:
+        raise RuntimeError(f"Falló la copia del template (ID={template_id}). Detalle: {e}")
         sid = new_file["id"]
         sheet = gsclient.open_by_key(sid)
         return sheet, sid
