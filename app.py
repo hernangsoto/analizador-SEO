@@ -5,8 +5,8 @@ import streamlit as st
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
-st.title("Análisis SEO – GSC ➜ Google Sheets")
+st.set_page_config(layout="wide", page_title="Análisis SEO - Nomadic", page_icon="🚀")
+st.title("Analizador SEO Nomadic")
 
 from modules.ui import (
     get_user, sidebar_user_info, login_screen,
