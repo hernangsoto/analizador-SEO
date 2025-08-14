@@ -4,6 +4,30 @@ from __future__ import annotations
 import os
 import streamlit as st
 
+# --- imports seguros de utils (con fallback) ---
+try:
+    from modules.utils import debug_log, ensure_external_package
+except Exception as _utils_err:
+    import streamlit as st
+
+    st.warning(f"No pude cargar modules.utils: {_utils_err}")
+
+    def debug_log(msg: str, data=None):
+        """Fallback simple de debug_log si no existe modules.utils."""
+        if st.session_state.get("DEBUG"):
+            st.info(str(msg))
+            if data is not None:
+                try:
+                    import json
+                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+                except Exception:
+                    st.code(str(data))
+
+    def ensure_external_package(config_key: str = "external_pkg"):
+        """Fallback: no intenta instalar paquete externo."""
+        return None
+
+
 # Permitir http://localhost para el authorization_response (cuando copias la URL)
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 # Tolerar diferencias de orden/espacios en scopes
