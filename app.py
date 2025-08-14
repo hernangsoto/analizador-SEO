@@ -856,6 +856,16 @@ if _me:
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
+# Aviso si el email de Streamlit y el de Google no coinciden
+_app_email = getattr(user, "email", None)
+_google_email = (_me or {}).get("emailAddress")
+if _app_email and _google_email and _app_email.lower() != _google_email.lower():
+    st.warning(
+        "Estás logueado en Streamlit como **%s**, pero la cuenta de Google conectada es **%s**. "
+        "Los archivos se **crearán y guardarán** en **%s**. Si querés que se guarden en %s, reautorizá en Paso A con ese correo."
+        % (_app_email, _google_email, _google_email, _app_email)
+    )
+
 # Seleccionar carpeta destino opcional (en la CUENTA autenticada)
 dest_folder_id = pick_destination(drive_service, _me)
 
