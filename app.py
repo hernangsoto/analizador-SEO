@@ -1,5 +1,5 @@
 import os
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
@@ -19,16 +19,31 @@ st.session_state["nombre"] = st.text_input(
     placeholder="Ej: Hernán Soto"
 )
 
-# --- Config de OAuth (desde secrets.toml) ---
+# --- Config OAuth (secrets.toml) ---
 CLIENT_ID = st.secrets["oauth"]["client_id"]
 CLIENT_SECRET = st.secrets["oauth"]["client_secret"]
-REDIRECT_URI = st.secrets["oauth"]["redirect_uri"]  # debe coincidir EXACTAMENTE con lo configurado en Google
+
+def normalize_redirect_uri(uri: str) -> str:
+    """Deja scheme+host y quita barra final."""
+    if not uri:
+        return uri
+    p = urlsplit(uri.strip())
+    norm = urlunsplit((p.scheme, p.netloc, "", "", ""))
+    return norm.rstrip("/")
+
+RAW_REDIRECT_URI = st.secrets["oauth"]["redirect_uri"]
+REDIRECT_URI = normalize_redirect_uri(RAW_REDIRECT_URI)
+
 SCOPES = ["openid", "email", "profile"]
 
-# Opcional: dominios permitidos. Si no está, se acepta cualquier cuenta de Google
+# Opcional: restringir por dominios (si no está, se acepta cualquier cuenta de Google)
 ALLOWED_DOMAINS = st.secrets.get("oauth", {}).get("allowed_domains", None)  # ej: ["gmail.com","tudominio.com"]
 
 # --- Helpers ---
+def origin_from_url(url: str) -> str:
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc}"
+
 def build_flow():
     client_config = {
         "web": {
@@ -37,8 +52,8 @@ def build_flow():
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "client_secret": CLIENT_SECRET,
-            "redirect_uris": [REDIRECT_URI],
-            "javascript_origins": [REDIRECT_URI.rsplit("/", 1)[0]],
+            "redirect_uris": [REDIRECT_URI],  # EXACTO y normalizado
+            "javascript_origins": [origin_from_url(REDIRECT_URI)],
         }
     }
     flow = Flow.from_client_config(client_config, scopes=SCOPES)
@@ -48,11 +63,11 @@ def build_flow():
 def _as_doseq_dict(q: dict) -> dict:
     return {k: (v if isinstance(v, list) else [v]) for k, v in q.items()}
 
-def get_current_query_string():
+def get_current_query_string() -> str:
     q = dict(st.query_params)
     return urlencode(_as_doseq_dict(q), doseq=True)
 
-def full_current_url():
+def full_current_url() -> str:
     qs = get_current_query_string()
     return REDIRECT_URI + (f"?{qs}" if qs else "")
 
@@ -71,15 +86,20 @@ def email_allowed(address: str) -> bool:
     return domain in {d.lower() for d in ALLOWED_DOMAINS}
 
 # --- Estado de sesión ---
-if "google_user" not in st.session_state:
-    st.session_state["google_user"] = None
-if "oauth_state" not in st.session_state:
-    st.session_state["oauth_state"] = None
+st.session_state.setdefault("google_user", None)
+st.session_state.setdefault("oauth_state", None)
 
-# --- Manejo del callback OAuth ---
-query_params = dict(st.query_params)
-code = _get_param(query_params, "code")
-state = _get_param(query_params, "state")
+# --- Diagnóstico de errores devueltos por Google (p.ej., 403 / access_denied) ---
+qp = dict(st.query_params)
+if "error" in qp:
+    err = _get_param(qp, "error")
+    desc = _get_param(qp, "error_description") or ""
+    st.error(f"Error de OAuth: **{err}**\n\n{desc}")
+    # No limpiamos aún para que se vea el mensaje; el usuario puede reintentar.
+
+# --- Callback OAuth ---
+code = _get_param(qp, "code")
+state = _get_param(qp, "state")
 has_code_and_state = bool(code and state)
 
 if has_code_and_state and st.session_state.get("oauth_state"):
@@ -91,7 +111,7 @@ if has_code_and_state and st.session_state.get("oauth_state"):
             flow.fetch_token(authorization_response=full_current_url())
             creds = flow.credentials
 
-            # Nota: credentials.id_token puede ser None según flujo/versión; si lo es, usamos _id_token.
+            # id_token puede estar en .id_token o ._id_token según la versión
             raw_id_token = getattr(creds, "id_token", None) or getattr(creds, "_id_token", None)
 
             idinfo = id_token.verify_oauth2_token(
@@ -117,7 +137,7 @@ if has_code_and_state and st.session_state.get("oauth_state"):
                 st.success(f"✅ Login exitoso con tu cuenta **{email}**. ¡Bienvenido/a {given_name or '👤'}!")
                 st.balloons()
 
-            # Limpiar la query (?code=..., ?state=...)
+            # Limpiamos la query (?code=..., ?state=...)
             st.query_params.clear()
 
     except Exception as e:
@@ -139,7 +159,7 @@ if st.session_state["google_user"] is None:
         st.session_state["oauth_state"] = state
         st.query_params.clear()
 
-        # 🔑 Redirigir en la MISMA pestaña (evita perder session_state)
+        # Redirigir en la MISMA pestaña (evita perder session_state)
         st.write("Redirigiendo a Google…")
         st.markdown(
             f"""
