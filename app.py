@@ -205,10 +205,17 @@ def pick_account_and_oauth():
     # Crear o reutilizar el Flow y la auth_url
     if "oauth" not in st.session_state:
         flow = build_flow(acct)
+        # Opcional: si definís el correo en secrets, forzamos sugerencia de cuenta correcta
+        # [accounts.ACCESO]
+        # client_id = "..."
+        # client_secret = "..."
+        # login_hint = "tu_correo_de_acceso@ejemplo.com"
+        acc_meta = st.secrets.get("accounts", {}).get(acct, {})
         auth_url, state = flow.authorization_url(
-            prompt="consent",
+            prompt="consent select_account",
             access_type="offline",
             include_granted_scopes="false",  # evita "Scope has changed"
+            login_hint=acc_meta.get("login_hint"),
         )
         st.session_state["oauth"] = {
             "account": acct,
@@ -219,6 +226,9 @@ def pick_account_and_oauth():
 
     oauth = st.session_state["oauth"]
     st.markdown(f"🔗 **Paso A:** [Autorizar acceso en Google]({oauth['auth_url']})")
+    # Mostrar también la URL en texto para copiarla y abrirla en otro navegador/perfil
+    with st.expander("Ver/copiar URL de autorización"):
+        st.code(oauth["auth_url"])
 
     # Pedir la URL completa de redirección
     auth_response_url = st.text_input(
