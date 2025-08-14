@@ -1,79 +1,41 @@
 # modules/auth.py
 from __future__ import annotations
 
+from typing import Optional, Tuple, List
+
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 
-# ===== Import seguro desde utils (con fallback) =====
-try:
-    from .utils import debug_log, token_store
-except Exception as _utils_err:
-    # Fallback: no frenar si utils no carga
-    st.warning(f"[auth] No pude importar modules.utils: {_utils_err}")
+from .utils import debug_log, token_store
 
-    def debug_log(msg: str, data=None):
-        if st.session_state.get("DEBUG"):
-            st.info(str(msg))
-            if data is not None:
-                try:
-                    import json
-                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-                except Exception:
-                    st.code(str(data))
-
-    class _TokenStore:
-        KEY = "__TOKENS__"
-        def _ensure(self):
-            st.session_state.setdefault(self.KEY, {})
-        def get(self, name: str, default=None):
-            self._ensure()
-            return st.session_state[self.KEY].get(name, default)
-        def set(self, name: str, value):
-            self._ensure()
-            st.session_state[self.KEY][name] = value
-        def has(self, name: str) -> bool:
-            self._ensure()
-            return name in st.session_state[self.KEY]
-        def clear(self, name: str):
-            self._ensure()
-            st.session_state[self.KEY].pop(name, None)
-        def all(self) -> dict:
-            self._ensure()
-            return dict(st.session_state[self.KEY])
-
-    token_store = _TokenStore()
 
 # =============================
 # Scopes
 # =============================
-SCOPES_DRIVE = [
+SCOPES_DRIVE: List[str] = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-SCOPES_GSC = [
+SCOPES_GSC: List[str] = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
+
 # =============================
-# Helpers internos
+# Helpers
 # =============================
-def _account_config(account_key: str) -> dict:
-    """Lee client_id/client_secret de st.secrets['accounts'][account_key]."""
+def build_flow(account_key: str, scopes: List[str]) -> Flow:
+    """
+    Crea un flujo OAuth2 a partir de st.secrets['accounts'][account_key] con los scopes provistos.
+    Usa redirect http://localhost (compatible con pegar la URL de redirección en Streamlit).
+    """
     try:
         acc = st.secrets["accounts"][account_key]
-        if not acc.get("client_id") or not acc.get("client_secret"):
-            raise KeyError("Falta client_id/client_secret")
-        return acc
     except Exception:
-        st.error(
-            f"No encontré credenciales en st.secrets['accounts']['{account_key}'].\n"
-            "Agregá client_id y client_secret."
-        )
+        st.error(f"No encontré credenciales en st.secrets['accounts']['{account_key}'].")
         st.stop()
 
-def _build_flow(account_key: str, scopes: list[str]) -> Flow:
-    acc = _account_config(account_key)
     client_secrets = {
         "installed": {
             "client_id": acc["client_id"],
@@ -88,61 +50,67 @@ def _build_flow(account_key: str, scopes: list[str]) -> Flow:
     flow.redirect_uri = "http://localhost"
     return flow
 
-def _creds_to_dict(creds: Credentials) -> dict:
+
+def creds_to_dict(creds: Credentials) -> dict:
     return {
         "token": creds.token,
         "refresh_token": getattr(creds, "refresh_token", None),
         "token_uri": creds.token_uri,
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes) if getattr(creds, "scopes", None) else None,
+        "scopes": creds.scopes,
     }
 
+
 # =============================
-# API pública
+# Cache de credenciales
 # =============================
-def get_cached_personal_creds() -> Credentials | None:
-    """Devuelve credenciales personales (Drive/Sheets) desde cache si existen."""
-    data = token_store.get("creds_dest")
+def get_cached_personal_creds() -> Optional[Credentials]:
+    """
+    Devuelve Credentials de la CUENTA PERSONAL (Drive/Sheets) si está cacheado.
+    Fix: usar token_store.load / as_credentials (no .get()).
+    """
+    # Preferir construir Credentials directamente desde el token_store
+    creds = token_store.as_credentials("creds_dest")
+    if creds:
+        return creds
+
+    # Fallback por compatibilidad: leer dict crudo si existe en session_state
+    data = token_store.load("creds_dest")
     if not data:
-        return None
-    try:
-        return Credentials(**data)
-    except Exception as e:
-        debug_log("No pude reconstruir creds_dest desde cache", str(e))
-        token_store.clear("creds_dest")
-        return None
+        data = st.session_state.get("creds_dest")
+    if data:
+        try:
+            return Credentials(**data)
+        except Exception as e:
+            debug_log("[get_cached_personal_creds] no pude construir Credentials desde dict", str(e))
+    return None
 
-def pick_destination_oauth() -> Credentials | None:
-    """
-    OAuth para la cuenta PERSONAL (Drive/Sheets).
-    - Si ya está cacheado en token_store, muestra estado y devuelve las credenciales.
-    - Si no, guía de autorización con URL + pega la redirect URL.
-    """
-    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
 
-    # ¿Ya tenemos credenciales cacheadas?
+# =============================
+# OAuth PERSONAL (Drive/Sheets)
+# =============================
+def pick_destination_oauth() -> Optional[Credentials]:
+    """
+    Autentica la cuenta PERSONAL (donde se crearán/copiarán los Sheets).
+    - Si hay cache (token_store) devuelve directo.
+    - Si no, muestra el flujo de autorización con 'pegar URL'.
+    """
+    # 1) Cache
     cached = get_cached_personal_creds()
     if cached:
-        st.success("Cuenta PERSONAL conectada.")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            if st.button("Cambiar de cuenta (Drive/Sheets)"):
-                token_store.clear("creds_dest")
-                st.session_state.pop("oauth_dest", None)
-                st.experimental_rerun()
-        with col2:
-            st.caption("Tus archivos se crearán en el Drive de esta cuenta.")
+        st.caption("🔐 Cuenta PERSONAL ya conectada (desde caché).")
         return cached
 
-    # Si no hay cache, armo el flow y muestro pasos
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+    # 2) Flujo de autorización
+    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # permite elegir qué client_id usar
     # Reset si cambia la app key
     if st.session_state.get("oauth_dest", {}).get("account_key") != acct_for_dest:
         st.session_state.pop("oauth_dest", None)
 
     if "oauth_dest" not in st.session_state:
-        flow = _build_flow(acct_for_dest, SCOPES_DRIVE)
+        flow = build_flow(acct_for_dest, SCOPES_DRIVE)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -166,6 +134,7 @@ def pick_destination_oauth() -> Credentials | None:
         placeholder="http://localhost/?code=...&state=...",
     )
 
+    creds = None
     if st.button("Conectar Google PERSONAL", type="primary"):
         if not url.strip():
             st.error("Pegá la URL completa de redirección (incluye code y state).")
@@ -174,25 +143,30 @@ def pick_destination_oauth() -> Credentials | None:
             flow: Flow = od["flow"]
             flow.fetch_token(authorization_response=url.strip())
             creds = flow.credentials
-            token_store.set("creds_dest", _creds_to_dict(creds))
-            st.session_state.pop("oauth_dest", None)
+            token_store.save("creds_dest", creds_to_dict(creds))
             st.success("Cuenta PERSONAL conectada.")
-            return creds
         except Exception as e:
-            st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
-            st.caption(f"Detalle técnico (debug): {e}")
-            # Reiniciar flujo para regenerar auth_url/state
+            # invalidar flujo guardado para regenerar auth_url en el próximo intento
             st.session_state.pop("oauth_dest", None)
+            st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
+            st.caption(f"Detalle técnico: {e}")
 
-    return None
+    # Leer de cache si ya guardamos en este mismo run
+    if not creds:
+        creds = get_cached_personal_creds()
 
-def pick_source_oauth() -> Credentials | None:
+    return creds
+
+
+# =============================
+# OAuth FUENTE (Search Console)
+# =============================
+def pick_source_oauth() -> Optional[Credentials]:
     """
-    OAuth para la cuenta de Search Console (fuente: ACCESO o ACCESO_MEDIOS).
-    - Cache por cuenta: guarda bajo clave 'creds_src:<acct>'.
-    - Si ya está, muestra estado y permite “Cambiar de cuenta”.
+    Autentica la cuenta FUENTE para Search Console (ACCESO o ACCESO_MEDIOS).
     """
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
+
     acct = st.radio(
         "Cuenta SC:",
         options=["ACCESO", "ACCESO_MEDIOS"],
@@ -201,31 +175,12 @@ def pick_source_oauth() -> Credentials | None:
         key="acct_choice_sc",
     )
 
-    cache_key = f"creds_src:{acct}"
-    cached = token_store.get(cache_key)
-    if cached:
-        try:
-            creds = Credentials(**cached)
-            st.success(f"Cuenta SC conectada ({acct}).")
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                if st.button("Cambiar de cuenta (SC)"):
-                    token_store.clear(cache_key)
-                    st.session_state.pop("oauth_src", None)
-                    st.experimental_rerun()
-            with col2:
-                st.caption("Usaremos esta cuenta para leer datos de Search Console.")
-            return creds
-        except Exception as e:
-            debug_log("No pude reconstruir creds_src desde cache", str(e))
-            token_store.clear(cache_key)
-
-    # Reset si cambia la cuenta elegida
+    # Reset si cambia la cuenta
     if st.session_state.get("oauth_src", {}).get("account") != acct:
         st.session_state.pop("oauth_src", None)
 
     if "oauth_src" not in st.session_state:
-        flow = _build_flow(acct, SCOPES_GSC)
+        flow = build_flow(acct, SCOPES_GSC)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -249,6 +204,7 @@ def pick_source_oauth() -> Credentials | None:
         placeholder="http://localhost/?code=...&state=...",
     )
 
+    creds = None
     if st.button("Conectar Search Console", type="secondary"):
         if not url.strip():
             st.error("Pegá la URL completa de redirección (incluye code y state).")
@@ -257,13 +213,21 @@ def pick_source_oauth() -> Credentials | None:
             flow: Flow = osrc["flow"]
             flow.fetch_token(authorization_response=url.strip())
             creds = flow.credentials
-            token_store.set(cache_key, _creds_to_dict(creds))
-            st.session_state.pop("oauth_src", None)
-            st.success(f"Cuenta SC conectada ({acct}).")
-            return creds
+            token_store.save("creds_src", creds_to_dict(creds))
+            st.success("Cuenta SC conectada.")
         except Exception as e:
-            st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
-            st.caption(f"Detalle técnico (debug): {e}")
             st.session_state.pop("oauth_src", None)
+            st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
+            st.caption(f"Detalle técnico: {e}")
 
-    return None
+    # Leer de cache si ya guardamos en este mismo run
+    if not creds:
+        creds_dict = token_store.load("creds_src")
+        if creds_dict:
+            try:
+                creds = Credentials(**creds_dict)
+            except Exception as e:
+                debug_log("[pick_source_oauth] no pude construir Credentials desde dict", str(e))
+                creds = None
+
+    return creds
