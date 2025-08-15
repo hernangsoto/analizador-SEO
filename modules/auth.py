@@ -9,6 +9,10 @@ from google.oauth2.credentials import Credentials
 
 from .utils import debug_log, token_store
 
+import os
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 
 # =============================
 # Scopes
