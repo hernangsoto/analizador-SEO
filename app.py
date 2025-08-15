@@ -114,7 +114,7 @@ from modules.gsc import ensure_sc_client
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
-    st.subheader("3) Elegí el sitio a trabajar (Search Console)")
+    st.subheader("4) Elegí el sitio a trabajar (Search Console)")
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -134,7 +134,7 @@ def pick_site(sc_service):
 
 
 def pick_analysis():
-    st.subheader("4) Elegí el tipo de análisis")
+    st.subheader("5) Elegí el tipo de análisis")
     opciones = {
         "1. Análisis de entidades (🚧 próximamente)": "1",
         "2. Análisis de tráfico general (🚧 próximamente)": "2",
@@ -207,6 +207,7 @@ def _clear_qp():
     except Exception:
         st.experimental_set_query_params()
 
+
 # ============== App ==============
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
@@ -226,11 +227,11 @@ sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 # Estados de pasos
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step2_done", False)
+st.session_state.setdefault("step3_done", False)   # NEW: Search Console
 
 # === Procesar acciones de links inline (antes de pintar los resúmenes) ===
 _qp = _get_qp()
 _action = _qp.get("action")
-# Si viene como lista (API vieja), agarrar el primero
 if isinstance(_action, list):
     _action = _action[0] if _action else None
 
@@ -247,14 +248,19 @@ elif _action == "change_folder":
     _clear_qp()
     st.rerun()
 
+elif _action == "change_src":
+    for k in ("creds_src", "oauth_src", "step3_done"):
+        st.session_state.pop(k, None)
+    _clear_qp()
+    st.rerun()
+
+
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
-    # Renderiza la UI de OAuth personal
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
-    # Guardamos y colapsamos
     st.session_state["step1_done"] = True
     st.session_state["creds_dest"] = {
         "token": creds_dest.token,
@@ -290,7 +296,6 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
     st.subheader("2) Destino de la copia (opcional)")
-    # UI para elegir carpeta (usa la cuenta personal ya conectada)
     dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente session_state["dest_folder_id"]
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
     if st.button("Siguiente ⏭️", key="btn_next_step2"):
@@ -299,7 +304,6 @@ if not st.session_state["step2_done"]:
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-
     st.markdown(
         f'''
         <div class="success-inline">
@@ -311,16 +315,46 @@ else:
     )
 
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
-creds_src = pick_source_oauth()
-if not creds_src:
-    st.stop()
-sc_service = ensure_sc_client(creds_src)
+sc_service = None
+if not st.session_state["step3_done"]:
+    # Renderiza UI de SC (elige ACCESO / ACCESO_MEDIOS y autoriza)
+    creds_src = pick_source_oauth()
+    if not creds_src:
+        st.stop()
+    # Guardar y colapsar
+    st.session_state["creds_src"] = {
+        "token": creds_src.token,
+        "refresh_token": getattr(creds_src, "refresh_token", None),
+        "token_uri": creds_src.token_uri,
+        "client_id": creds_src.client_id,
+        "client_secret": creds_src.client_secret,
+        "scopes": creds_src.scopes,
+    }
+    # Guardamos también qué cuenta se eligió (el helper suele poblar oauth_src.account)
+    src_account = (st.session_state.get("oauth_src") or {}).get("account") or "ACCESO"
+    st.session_state["src_account_label"] = src_account
+    st.session_state["step3_done"] = True
+    st.rerun()
+else:
+    # Ya autenticado en SC → construir cliente y mostrar resumen en caja verde
+    creds_src = Credentials(**st.session_state["creds_src"])
+    sc_service = ensure_sc_client(creds_src)
+    src_label = st.session_state.get("src_account_label") or "ACCESO"
+    st.markdown(
+        f'''
+        <div class="success-inline">
+            Cuenta de acceso (Search Console): <strong>{src_label}</strong>
+            <a href="?action=change_src">(Cambiar cuenta de acceso)</a>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
 
-# --- PASO 4: sitio + análisis ---
+# --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-# --- PASO 5: ejecutar ---
+# --- Ejecutar ---
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
