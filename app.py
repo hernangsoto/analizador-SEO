@@ -21,12 +21,12 @@ from modules.ui import (
     login_screen,
 )
 HEADER_COLOR = "#5c417c"
-HEADER_H = 35  # si tu header se ve más alto/bajo, ajustalo aquí
+HEADER_H = 68  # si tu header se ve más alto/bajo, ajustalo aquí
 
 apply_page_style(
     page_bg="#ffffff",
     use_gradient=False,
-    band_height_px=110,
+    band_height_px=210,
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_H,
 )
