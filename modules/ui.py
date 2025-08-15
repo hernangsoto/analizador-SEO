@@ -100,43 +100,86 @@ def _inline_logo_src(logo_url: str) -> str:
 
 def render_brand_header(
     logo_url: str,
-    width_px: int | None = None,   # opcional
-    height_px: int = 27,           # solo altura para no deformar
-    band_bg: str = "transparent",  # ← SIN fondo
-    top_offset_px: int | None = None,  # si None usa --app-header-height
+    width_px: int | None = None,     # opcional
+    height_px: int = 27,             # solo altura para no deformar
+    band_bg: str = "transparent",    # sin fondo
+    top_offset_px: int | None = None,# si None, usa --app-header-height
+    pinned: bool = True,             # ← True = anclado (fixed). False = sticky
 ) -> None:
+    """
+    Franja/overlay del logo sin fondo ni sombra.
+      - pinned=True  → anclado (position: fixed) debajo del header nativo.
+      - pinned=False → queda sticky dentro del contenido.
+    """
     src = _inline_logo_src(logo_url)
     dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
     top_css = f"{top_offset_px}px" if top_offset_px is not None else "var(--app-header-height)"
 
-    st.markdown(
-        f"""
-        <style>
-        /* Contenedor sin fondo, sin borde, sin sombra */
-        .brand-banner {{
-            background: transparent !important;
-            border-radius: 0 !important;
-            box-shadow: none !important;
-            margin: 0 0 8px 0 !important;
-            padding: 0 !important;
-            position: -webkit-sticky; position: sticky;
-            top: {top_css};
-            z-index: 1100;
-            display: flex; align-items: center;
-        }}
-        .brand-banner img.brand-logo {{
-            {dim_css}
-            image-rendering: -webkit-optimize-contrast;
-            object-fit: contain;
-            display: inline-block !important;
-        }}
-        </style>
-        <div class="brand-banner">
-            <img class="brand-logo" src="{src}" alt="Brand" />
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    if pinned:
+        # Capa full-width fija debajo del header; centramos con un contenedor interno
+        st.markdown(
+            f"""
+            <style>
+            .brand-fixed {{
+              position: fixed;
+              top: {top_css};
+              left: 0;
+              width: 100%;
+              z-index: 1200;
+              background: transparent !important;
+              pointer-events: none; /* no bloquea clics del header */
+            }}
+            .brand-fixed .brand-inner {{
+              max-width: 1200px;          /* ajustá si usás otro ancho */
+              margin: 0 auto;
+              padding: 0 16px;
+              display: flex; align-items: center;
+              pointer-events: auto;       /* el logo sí recibe hover/clic si hiciera falta */
+            }}
+            .brand-fixed img.brand-logo {{
+              {dim_css}
+              image-rendering: -webkit-optimize-contrast;
+              object-fit: contain;
+              display: inline-block !important;
+            }}
+            </style>
+            <div class="brand-fixed">
+              <div class="brand-inner">
+                <img class="brand-logo" src="{src}" alt="Brand" />
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        # Variante sticky (no anclada)
+        st.markdown(
+            f"""
+            <style>
+            .brand-banner {{
+              background: transparent !important;
+              border-radius: 0 !important;
+              box-shadow: none !important;
+              margin: 0 0 8px 0 !important;
+              padding: 0 !important;
+              position: -webkit-sticky; position: sticky;
+              top: {top_css};
+              z-index: 1100;
+              display: flex; align-items: center;
+            }}
+            .brand-banner img.brand-logo {{
+              {dim_css}
+              image-rendering: -webkit-optimize-contrast;
+              object-fit: contain;
+              display: inline-block !important;
+            }}
+            </style>
+            <div class="brand-banner">
+              <img class="brand-logo" src="{src}" alt="Brand" />
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_brand_header_once(
@@ -145,6 +188,7 @@ def render_brand_header_once(
     height_px: int = 27,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,
+    pinned: bool = True,  # ← por defecto, anclado
 ) -> None:
     if st.session_state.get("_brand_rendered"):
         return
@@ -155,7 +199,9 @@ def render_brand_header_once(
         height_px=height_px,
         band_bg=band_bg,
         top_offset_px=top_offset_px,
+        pinned=pinned,
     )
+
 
 
 def hide_old_logo_instances(logo_url: str) -> None:
