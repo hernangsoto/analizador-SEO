@@ -21,17 +21,20 @@ from modules.ui import (
     login_screen,
 )
 HEADER_COLOR = "#5c417c"
-HEADER_H = 56
+HEADER_H = 64  # si tu header se ve más alto/bajo, ajustalo aquí
 
 apply_page_style(
-    page_bg="#ffffff",          # o el que prefieras para el fondo
-    use_gradient=False,         # opcional
-    band_height_px=110,         # opcional (si usás gradiente)
+    page_bg="#ffffff",
+    use_gradient=False,
+    band_height_px=110,
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_H,
 )
 
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+render_brand_header_once(LOGO_URL, height_px=27, band_bg=HEADER_COLOR)
+# No uses hide_old_logo_instances mientras pruebas el banner
+
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
