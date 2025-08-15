@@ -6,62 +6,67 @@ from datetime import date, timedelta
 
 import streamlit as st
 import pandas as pd
-from urllib.parse import urlparse
 
-# ====== Configuración base ======
+# ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
-# Branding
+# ====== UI / Branding ======
 from modules.ui import (
     apply_page_style,
     render_brand_header_once,
     hide_old_logo_instances,
-    get_user,            # ← AÑADIR ESTO
+    get_user,
     sidebar_user_info,
     login_screen,
 )
 
+# Colores/posicionamiento del header + logo
+HEADER_COLOR = "#5c417c"
+HEADER_HEIGHT = 64  # ajustá si tu header se ve un poco más alto
+LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
-# Si estás probando y no se mueve, podés forzar borrando la firma:
+apply_page_style(
+    header_bg=HEADER_COLOR,
+    header_height_px=HEADER_HEIGHT,
+    page_bg="#ffffff",
+    use_gradient=False,
+    band_height_px=110,
+)
+
+# Si querés forzar rerender durante pruebas, descomentá:
 # st.session_state.pop("_brand_sig", None)
 
+# Logo anclado (fixed), sin recuadro ni sombra
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,        # fijo al hacer scroll
-    nudge_px=-8,        # negativo = subir; positivo = bajar
-    x_align="left",     # "left" | "center" | "right"
-    x_offset_px=140,    # mover hacia la derecha si x_align="left"
-    z_index=3000,       # por delante del header
-    container_max_px=1200,
+    pinned=True,          # anclado
+    nudge_px=-8,          # negativo = subir; positivo = bajar
+    x_align="left",       # "left" | "center" | "right"
+    x_offset_px=140,      # mover a la derecha (si x_align="left")
+    z_index=3000,         # por delante del header
+    container_max_px=1200 # alineado con el contenido
 )
-
-
-
-# hide_old_logo_instances(LOGO_URL)  # opcional
-
-
-# Mejor dejar desactivado mientras pruebas:
-# hide_old_logo_instances(LOGO_URL)
-
+# Ocultar logos por defecto del tema (opcional)
+# hide_old_logo_instances()
 
 st.title("Análisis SEO – GSC ➜ Google Sheets")
+
 
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
 
-# Intentar cargar funciones desde repo externo (si está configurado)
 _ext = ensure_external_package()
 if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
     run_core_update = _ext.run_core_update
     run_evergreen = _ext.run_evergreen
     st.caption("🧩 Usando análisis del paquete externo (repo privado).")
 else:
-    # Fallback a implementaciones locales
     from modules.analysis import run_core_update, run_evergreen  # type: ignore
     st.caption("🧩 Usando análisis embebidos en este repo.")
 
-# ====== OAuth / clientes ======
+
+# ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
 from modules.drive import (
     ensure_drive_clients,
@@ -70,6 +75,7 @@ from modules.drive import (
     share_controls,
 )
 from modules.gsc import ensure_sc_client
+
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
@@ -149,19 +155,19 @@ def params_for_evergreen():
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
 
-# ====== App ======
+# ============== App ==============
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# Sidebar
+# Sidebar info
 sidebar_user_info(user)
 
 # Debug switch (opcional)
 st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-# Paso 1: OAuth PERSONAL (Drive/Sheets)
+# --- Paso 1: OAuth personal (Drive/Sheets) ---
 creds_dest = pick_destination_oauth()
 if not creds_dest:
     st.stop()
@@ -176,18 +182,18 @@ else:
 # Carpeta destino opcional
 dest_folder_id = pick_destination(drive_service, _me)
 
-# Paso 2: Conectar Search Console (fuente de datos)
+# --- Paso 2: Conectar Search Console (fuente de datos) ---
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
 
 sc_service = ensure_sc_client(creds_src)
 
-# Paso 3: sitio + análisis
+# --- Paso 3: sitio + análisis ---
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-# Paso 4: ejecutar
+# --- Paso 4: ejecutar ---
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
@@ -195,7 +201,6 @@ if analisis == "4":
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
-        from modules.drive import share_controls
         share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 elif analisis == "5":
@@ -205,7 +210,6 @@ elif analisis == "5":
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
-        from modules.drive import share_controls
         share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
