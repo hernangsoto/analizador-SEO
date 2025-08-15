@@ -40,59 +40,63 @@ def apply_page_style(page_bg: str = "#0f172a", use_gradient: bool = True):
     )
 
 
+def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
+    """
+    Aplica estilos globales.
+    - use_gradient=True: banda superior de `band_height_px` y resto claro.
+    - page_bg: color de la banda (#5c417c por pedido).
+    """
+    if use_gradient:
+        css_bg = (
+            f"linear-gradient(180deg, {page_bg} 0, {page_bg} {band_height_px}px, "
+            f"#ffffff {band_height_px}px)"
+        )
+    else:
+        css_bg = page_bg
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: {css_bg} !important;
+        }}
+        .block-container {{
+            padding-top: 0.75rem !important;
+        }}
+        header[data-testid="stHeader"] {{
+            background: transparent !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_brand_header(
     logo_url: str,
     width_px: int = 153,
     height_px: int = 27,
-    band_bg: str = "#0f172a",
+    band_bg: str = "#5c417c",
 ):
-    """Franja superior con logo a tamaño exacto (153x27 por defecto)."""
+    """Franja superior con logo (153x27 por defecto), STICKY al hacer scroll."""
     st.markdown(
         f"""
         <div class="brand-banner" style="
             background:{band_bg};
             border-radius: 10px;
             margin: 0 0 12px 0;
-            padding: 10px 16px;
+            padding: 8px 16px;
             display: flex; align-items: center;
+            position: -webkit-sticky;   /* Safari */
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.25);
         ">
             <img src="{logo_url}" alt="Brand"
                  width="{width_px}" height="{height_px}"
                  style="width:{width_px}px;height:{height_px}px;display:block;" />
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_brand_header_once(
-    logo_url: str,
-    width_px: int = 153,
-    height_px: int = 27,
-    band_bg: str = "#0f172a",
-):
-    """Evita renders duplicados del header en reruns."""
-    if st.session_state.get("_brand_rendered"):
-        return
-    st.session_state["_brand_rendered"] = True
-    render_brand_header(logo_url, width_px=width_px, height_px=height_px, band_bg=band_bg)
-
-
-def hide_old_logo_instances(logo_url: str):
-    """
-    Parche CSS: si el logo se estaba renderizando en otra parte,
-    lo oculta en todos lados, excepto en nuestra .brand-banner.
-    """
-    st.markdown(
-        f"""
-        <style>
-        img[src*="{logo_url}"] {{
-          display:none !important;
-        }}
-        .brand-banner img {{
-          display:inline-block !important;
-        }}
-        </style>
         """,
         unsafe_allow_html=True,
     )
