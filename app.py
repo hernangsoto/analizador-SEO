@@ -54,7 +54,7 @@ enable_brand_auto_align()
 # Ocultar logos por defecto del tema (si querés)
 # hide_old_logo_instances()
 
-st.title("Análisis SEO – GSC ➜ Google Sheets")
+st.title("Analizador SEO 🚀")
 
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
