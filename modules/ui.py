@@ -13,9 +13,7 @@ import streamlit as st
 
 def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
     """
-    Aplica estilos globales.
-    - use_gradient=True: banda superior de `band_height_px` y resto claro.
-    - page_bg: color de la banda (#5c417c por pedido).
+    Deja el bloque superior en #5c417c (incluida la barra de Streamlit) y el resto claro.
     """
     if use_gradient:
         css_bg = (
@@ -28,15 +26,24 @@ def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_h
     st.markdown(
         f"""
         <style>
+        /* Fondo general con banda superior en #5c417c */
         .stApp {{
             background: {css_bg} !important;
         }}
-        .block-container {{
-            padding-top: 0.75rem !important;
-        }}
+
+        /* Barra superior propia de Streamlit también en #5c417c */
         header[data-testid="stHeader"] {{
-            background: transparent !important;
+            background: {page_bg} !important;
+            color: #fff !important;
         }}
+        /* Iconos del toolbar más visibles sobre el fondo violeta */
+        header [data-testid="stToolbar"] * {{
+            color: #fff !important;
+            fill: #fff !important;
+        }}
+
+        /* Ajustes de paddings para que el contenido quede pegado a la banda */
+        .block-container {{ padding-top: 0.75rem !important; }}
         </style>
         """,
         unsafe_allow_html=True,
