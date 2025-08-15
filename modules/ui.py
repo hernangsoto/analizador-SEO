@@ -1,7 +1,6 @@
 # modules/ui.py
 from __future__ import annotations
 
-import os
 import shutil
 import requests
 import streamlit as st
@@ -13,7 +12,10 @@ import streamlit as st
 
 def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
     """
-    Deja el bloque superior en #5c417c (incluida la barra de Streamlit) y el resto claro.
+    Aplica estilos globales.
+    - Banda superior (y barra de Streamlit) en `page_bg` (#5c417c por defecto).
+    - Si `use_gradient=True`, el resto de la página queda blanco.
+    - `band_height_px` controla la altura de la banda superior.
     """
     if use_gradient:
         css_bg = (
@@ -26,24 +28,25 @@ def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_h
     st.markdown(
         f"""
         <style>
-        /* Fondo general con banda superior en #5c417c */
+        /* Fondo con banda superior en {page_bg} */
         .stApp {{
             background: {css_bg} !important;
         }}
 
-        /* Barra superior propia de Streamlit también en #5c417c */
+        /* Barra de Streamlit (toolbar) también en {page_bg} */
         header[data-testid="stHeader"] {{
             background: {page_bg} !important;
             color: #fff !important;
         }}
-        /* Iconos del toolbar más visibles sobre el fondo violeta */
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
             fill: #fff !important;
         }}
 
-        /* Ajustes de paddings para que el contenido quede pegado a la banda */
-        .block-container {{ padding-top: 0.75rem !important; }}
+        /* Ajuste de padding superior del contenedor principal */
+        .block-container {{
+            padding-top: 0.75rem !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -56,7 +59,9 @@ def render_brand_header(
     height_px: int = 27,
     band_bg: str = "#5c417c",
 ):
-    """Franja superior con logo (153x27 por defecto), STICKY al hacer scroll."""
+    """
+    Inserta una franja superior con el logo (por defecto 153x27), fija (sticky) en scroll.
+    """
     st.markdown(
         f"""
         <div class="brand-banner" style="
@@ -86,7 +91,9 @@ def render_brand_header_once(
     height_px: int = 27,
     band_bg: str = "#5c417c",
 ):
-    """Evita renders duplicados del header en reruns."""
+    """
+    Evita renders duplicados del header en reruns.
+    """
     if st.session_state.get("_brand_rendered"):
         return
     st.session_state["_brand_rendered"] = True
@@ -95,8 +102,8 @@ def render_brand_header_once(
 
 def hide_old_logo_instances(logo_url: str):
     """
-    Parche CSS: si el logo se estaba renderizando en otra parte,
-    lo oculta en todos lados, excepto en nuestra .brand-banner.
+    Parche CSS: si el mismo logo se estaba renderizando en otro lugar,
+    se oculta en todas partes excepto en .brand-banner.
     """
     st.markdown(
         f"""
@@ -118,7 +125,9 @@ def hide_old_logo_instances(logo_url: str):
 # =============================
 
 def get_user():
-    # Compatibilidad con st.user o st.experimental_user
+    """
+    Devuelve la info del usuario autenticado en Streamlit (st.user o experimental_user).
+    """
     return getattr(st, "user", getattr(st, "experimental_user", None))
 
 
@@ -129,6 +138,9 @@ def get_first_name(full_name: str | None) -> str:
 
 
 def sidebar_user_info(user):
+    """
+    Sidebar con avatar, nombre, email y utilidades de mantenimiento.
+    """
     with st.sidebar:
         with st.container():
             c1, c2 = st.columns([1, 3])
@@ -137,7 +149,7 @@ def sidebar_user_info(user):
                     try:
                         r = requests.get(user.picture, timeout=5)
                         if r.status_code == 200:
-                            st.image(r.content, width=96)
+                            st.image(r.content, width=64)
                         else:
                             st.warning("No se pudo cargar la imagen.")
                     except Exception as e:
@@ -149,7 +161,7 @@ def sidebar_user_info(user):
                 st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
                 st.write(f"**Correo:** {getattr(user, 'email', '—')}")
 
-        # Bloque mantenimiento (arriba del cerrar sesión)
+        # Mantenimiento
         st.divider()
         st.markdown("**🧹 Mantenimiento**")
         if st.button(
