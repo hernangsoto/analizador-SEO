@@ -271,8 +271,8 @@ def enable_brand_auto_align() -> None:
            Lo identificamos porque su atributo srcdoc contiene '--brand-left' */
         iframe.stIFrame[srcdoc*="--brand-left"] {
           width: 0 !important;
-          height: 0 !important;
-          opacity: 50 !important;
+          height: 200 !important;
+          opacity: 0 !important;
           pointer-events: none !important;
           border: 0 !important;
           display: block !important;
