@@ -1,7 +1,11 @@
 # modules/ui.py
 from __future__ import annotations
 
+import base64
 import shutil
+from urllib.parse import quote
+from pathlib import Path
+
 import requests
 import streamlit as st
 
@@ -9,37 +13,8 @@ import streamlit as st
 # =============================
 # Branding / estilos
 # =============================
-# — Incrusta el logo como data URI (evita CORS/bloqueos) —
-import base64
-from urllib.parse import quote
 
-def _inline_logo_src(logo_url: str) -> str:
-    """
-    Descarga el logo y devuelve un data: URI (png/svg inline).
-    Si falla, retorna la URL original.
-    """
-    try:
-        if logo_url.startswith("http"):
-            r = requests.get(logo_url, timeout=10)
-            if r.status_code == 200:
-                content_type = r.headers.get("Content-Type", "")
-                if "svg" in content_type or logo_url.lower().endswith(".svg"):
-                    # SVG como utf8 inline
-                    return f"data:image/svg+xml;utf8,{quote(r.text)}"
-                # PNG/JPG/etc → base64
-                b64 = base64.b64encode(r.content).decode("ascii")
-                mime = "image/png"
-                if "jpeg" in content_type or logo_url.lower().endswith(".jpg") or logo_url.lower().endswith(".jpeg"):
-                    mime = "image/jpeg"
-                elif "webp" in content_type or logo_url.lower().endswith(".webp"):
-                    mime = "image/webp"
-                return f"data:{mime};base64,{b64}"
-    except Exception:
-        pass
-    # Fallback: dejar la URL directa
-    return logo_url
-
-def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
+def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110) -> None:
     """
     Aplica estilos globales.
     - Banda superior (y barra de Streamlit) en `page_bg` (#5c417c por defecto).
@@ -82,12 +57,56 @@ def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_h
     )
 
 
+# — Incrusta el logo como data URI (evita CORS/bloqueos) —
+def _inline_logo_src(logo_url: str) -> str:
+    """
+    Devuelve un data: URI a partir de:
+    - URL http(s) → descarga y embebe (svg utf8 o binario base64).
+    - Ruta local (assets/logo.png) → lee y embebe.
+    Si falla, retorna la URL original.
+    """
+    try:
+        # Ruta local
+        p = Path(logo_url)
+        if p.exists() and p.is_file():
+            data = p.read_bytes()
+            mime = "image/png"
+            suffix = p.suffix.lower()
+            if suffix in {".jpg", ".jpeg"}:
+                mime = "image/jpeg"
+            elif suffix == ".webp":
+                mime = "image/webp"
+            elif suffix == ".svg":
+                return f"data:image/svg+xml;utf8,{quote(p.read_text(encoding='utf-8'))}"
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+
+        # URL remota
+        if logo_url.startswith("http"):
+            r = requests.get(logo_url, timeout=10)
+            if r.status_code == 200:
+                content_type = r.headers.get("Content-Type", "")
+                if "svg" in content_type or logo_url.lower().endswith(".svg"):
+                    return f"data:image/svg+xml;utf8,{quote(r.text)}"
+                b64 = base64.b64encode(r.content).decode("ascii")
+                mime = "image/png"
+                if "jpeg" in content_type or logo_url.lower().endswith((".jpg", ".jpeg")):
+                    mime = "image/jpeg"
+                elif "webp" in content_type or logo_url.lower().endswith(".webp"):
+                    mime = "image/webp"
+                return f"data:{mime};base64,{b64}"
+    except Exception:
+        pass
+    # Fallback: dejar la URL directa
+    return logo_url
+
+
 def render_brand_header(
     logo_url: str,
     width_px: int = 153,
     height_px: int = 27,
     band_bg: str = "#5c417c",
-):
+) -> None:
     """
     Franja superior con logo (153x27), sticky, y logo embebido como data URI.
     """
@@ -121,14 +140,46 @@ def render_brand_header(
     )
 
 
+def render_brand_header_once(
+    logo_url: str,
+    width_px: int = 153,
+    height_px: int = 27,
+    band_bg: str = "#5c417c",
+) -> None:
+    """Evita renders duplicados del header en reruns."""
+    if st.session_state.get("_brand_rendered"):
+        return
+    st.session_state["_brand_rendered"] = True
+    render_brand_header(logo_url, width_px=width_px, height_px=height_px, band_bg=band_bg)
+
+
+def hide_old_logo_instances(logo_url: str) -> None:
+    """
+    Parche CSS: si el mismo logo se estaba renderizando en otro lugar,
+    se oculta en todas partes excepto en .brand-banner.
+    (Usar si realmente hay duplicados)
+    """
+    st.markdown(
+        f"""
+        <style>
+        img[src*="{logo_url}"]:not(.brand-banner img) {{
+          display:none !important;
+        }}
+        .brand-banner img {{
+          display:inline-block !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # =============================
 # User helpers
 # =============================
 
 def get_user():
-    """
-    Devuelve la info del usuario autenticado en Streamlit (st.user o experimental_user).
-    """
+    """Devuelve la info del usuario autenticado en Streamlit (st.user o experimental_user)."""
     return getattr(st, "user", getattr(st, "experimental_user", None))
 
 
@@ -138,10 +189,8 @@ def get_first_name(full_name: str | None) -> str:
     return full_name.split()[0]
 
 
-def sidebar_user_info(user):
-    """
-    Sidebar con avatar, nombre, email y utilidades de mantenimiento.
-    """
+def sidebar_user_info(user) -> None:
+    """Sidebar con avatar, nombre, email y utilidades de mantenimiento."""
     with st.sidebar:
         with st.container():
             c1, c2 = st.columns([1, 3])
@@ -180,7 +229,7 @@ def sidebar_user_info(user):
         st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
 
 
-def login_screen():
+def login_screen() -> None:
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
     st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
