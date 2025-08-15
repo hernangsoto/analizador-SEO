@@ -6,112 +6,52 @@ from datetime import date, timedelta
 
 import streamlit as st
 import pandas as pd
+from urllib.parse import urlparse
 
-# =========================
-# Config base de la app
-# =========================
+# ====== Configuración base ======
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
-# -------------------------
-# UI (import con guardia)
-# -------------------------
-try:
-    from modules.ui import (
-        apply_page_style,
-        render_brand_header_once,
-        hide_old_logo_instances,
-        get_user,
-        sidebar_user_info,
-        login_screen,
-    )
-except Exception as e:
-    st.warning(f"No pude cargar modules.ui: {e}")
-
-    def apply_page_style(*a, **k):  # no-op fallback
-        pass
-
-    def render_brand_header_once(*a, **k):  # no-op fallback
-        pass
-
-    def hide_old_logo_instances(*a, **k):  # no-op fallback
-        pass
-
-    def get_user():
-        return getattr(st, "user", getattr(st, "experimental_user", None))
-
-    def sidebar_user_info(user):
-        with st.sidebar:
-            st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
-
-    def login_screen():
-        st.header("Esta aplicación es privada.")
-        st.subheader("Por favor, inicia sesión.")
-        st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
-
-# Aplica estilo y header con logo
-apply_page_style(page_bg="#5c417c", use_gradient=True, band_height_px=110)
+# Branding
+from modules.ui import (
+    apply_page_style,
+    render_brand_header_once,
+    hide_old_logo_instances,
+    get_user,
+    sidebar_user_info,
+    login_screen,
+)
+apply_page_style(page_bg="#0f172a", use_gradient=True)
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
-render_brand_header_once(LOGO_URL, width_px=153, height_px=27, band_bg="#5c417c")
-# Si tenías renders duplicados del mismo logo en otro lado, podés activar esta línea:
-# hide_old_logo_instances(LOGO_URL)
+render_brand_header_once(LOGO_URL, width_px=153, height_px=27, band_bg="#0f172a")
+hide_old_logo_instances(LOGO_URL)
 
 st.title("Análisis SEO – GSC ➜ Google Sheets")
 
-# -------------------------
-# Utils / paquete externo
-# -------------------------
-try:
-    from modules.utils import debug_log, ensure_external_package
-except Exception as e:
-    st.warning(f"No pude cargar modules.utils: {e}")
+# ====== Utils / paquete externo ======
+from modules.utils import debug_log, ensure_external_package
 
-    def debug_log(msg: str, data=None):
-        if st.session_state.get("DEBUG"):
-            st.info(msg)
-            if data is not None:
-                try:
-                    import json
-                    st.code(json.dumps(data, indent=2, ensure_ascii=False))
-                except Exception:
-                    st.code(str(data))
-
-    def ensure_external_package():
-        return None
-
-# Intentar cargar funciones desde repo externo (si está configurado en secrets)
+# Intentar cargar funciones desde repo externo (si está configurado)
 _ext = ensure_external_package()
 if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
     run_core_update = _ext.run_core_update
     run_evergreen = _ext.run_evergreen
-    st.caption("🧩 Usando análisis del **paquete externo** (repo privado).")
+    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
 else:
     # Fallback a implementaciones locales
-    try:
-        from modules.analysis import run_core_update, run_evergreen  # type: ignore
-        st.caption("🧩 Usando análisis **embebidos** en este repositorio.")
-    except Exception as e:
-        st.error(f"No pude cargar funciones de análisis (externas ni locales): {e}")
-        st.stop()
+    from modules.analysis import run_core_update, run_evergreen  # type: ignore
+    st.caption("🧩 Usando análisis embebidos en este repo.")
 
-# -------------------------
-# OAuth / clientes Google
-# -------------------------
-try:
-    from modules.auth import pick_destination_oauth, pick_source_oauth
-    from modules.drive import (
-        ensure_drive_clients,
-        get_google_identity,
-        pick_destination,
-        share_controls,
-    )
-    from modules.gsc import ensure_sc_client
-except Exception as e:
-    st.error(f"No pude cargar módulos de Google (auth/drive/gsc): {e}")
-    st.stop()
+# ====== OAuth / clientes ======
+from modules.auth import pick_destination_oauth, pick_source_oauth
+from modules.drive import (
+    ensure_drive_clients,
+    get_google_identity,
+    pick_destination,
+    share_controls,
+)
+from modules.gsc import ensure_sc_client
 
-# =========================
-# Selectores / Parámetros
-# =========================
+# ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
     try:
@@ -188,21 +128,20 @@ def params_for_evergreen():
     incluir_diario = st.checkbox("Incluir análisis diario por URL (lento)", value=False, key="daily_ev")
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
-# =========================
-# App flow
-# =========================
+
+# ====== App ======
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# Sidebar con datos de usuario + mantenimiento
+# Sidebar
 sidebar_user_info(user)
 
-# Modo debug visual
+# Debug switch (opcional)
 st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-# --- Paso 1: OAuth PERSONAL (Drive/Sheets) ---
+# Paso 1: OAuth PERSONAL (Drive/Sheets)
 creds_dest = pick_destination_oauth()
 if not creds_dest:
     st.stop()
@@ -214,21 +153,21 @@ if _me:
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
-# Carpeta destino opcional (en la CUENTA personal conectada)
+# Carpeta destino opcional
 dest_folder_id = pick_destination(drive_service, _me)
 
-# --- Paso 2: OAuth fuente (Search Console: ACCESO / ACCESO_MEDIOS) ---
+# Paso 2: Conectar Search Console (fuente de datos)
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
 
 sc_service = ensure_sc_client(creds_src)
 
-# --- Paso 3: sitio + análisis ---
+# Paso 3: sitio + análisis
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-# --- Paso 4: ejecutar ---
+# Paso 4: ejecutar
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
@@ -236,6 +175,7 @@ if analisis == "4":
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
+        from modules.drive import share_controls
         share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 elif analisis == "5":
@@ -245,7 +185,7 @@ elif analisis == "5":
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
+        from modules.drive import share_controls
         share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
