@@ -37,9 +37,6 @@ apply_page_style(
     band_height_px=110,
 )
 
-# (opcional) Si alguna vez desaparece el banner, podés forzar reinyección:
-# st.session_state.pop("_brand_sig", None)
-
 # Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
 render_brand_header_once(
     LOGO_URL,
@@ -54,7 +51,7 @@ render_brand_header_once(
 # Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
-# ====== Estilos globales (botones morados + links estilo texto) ======
+# ====== Estilos globales (botones morados + links estilo texto + inline rows) ======
 st.markdown("""
 <style>
 /* Botones morado #8e7cc3 */
@@ -68,14 +65,30 @@ st.markdown("""
   filter: brightness(0.93);
 }
 
-/* Enlaces-acción que parecen texto (para "Cambiar ...") */
-.linkbox button {
+/* Asegurar que nuestro logo quede por delante del header nativo */
+header[data-testid="stHeader"] { z-index: 1500 !important; }
+
+/* Contenedor en línea para frase + link entre paréntesis */
+.inline-row { 
+  display: flex; 
+  align-items: center; 
+  flex-wrap: wrap; 
+}
+.inline-row strong { margin-right: .25rem; }
+
+/* Link-acción estilizado como texto (usa un botón, pero se ve como enlace) */
+.inline-link .stButton { 
+  display: inline-block; 
+  margin: 0 0 0 .35rem !important; 
+}
+.inline-link .stButton > button {
   background: transparent !important;
   border: none !important;
   padding: 0 !important;
   color: #5c417c !important;
   text-decoration: underline !important;
   box-shadow: none !important;
+  font-weight: 500 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -208,7 +221,7 @@ st.session_state.setdefault("step2_done", False)
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
-    # Deja que pick_destination_oauth renderice su UI (no dupliques el título aquí)
+    # Renderiza la UI de OAuth personal
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
@@ -224,7 +237,7 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (verde)
+# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (en línea + link)
 drive_service = None
 gs_client = None
 _me = None
@@ -235,24 +248,26 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     _me = get_google_identity(drive_service)
 
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-    col_l, col_r = st.columns([4, 1])
-    with col_l:
-        st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
-    with col_r:
-        st.markdown('<div class="linkbox">', unsafe_allow_html=True)
-        if st.button("Cambiar mail personal", key="link_change_personal"):
-            for k in ("creds_dest", "oauth_dest", "step1_done"):
-                st.session_state.pop(k, None)
-            st.session_state["step2_done"] = False
-            st.session_state.pop("dest_folder_id", None)
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Frase + (Cambiar mail personal) en la MISMA línea
+    st.markdown(
+        f'<div class="inline-row">Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong></div>',
+        unsafe_allow_html=True
+    )
+    st.markdown('<div class="inline-link inline-row">', unsafe_allow_html=True)
+    if st.button("(Cambiar mail personal)", key="link_change_personal_inline"):
+        for k in ("creds_dest", "oauth_dest", "step1_done"):
+            st.session_state.pop(k, None)
+        st.session_state["step2_done"] = False
+        st.session_state.pop("dest_folder_id", None)
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
     st.subheader("2) Destino de la copia (opcional)")
     # UI para elegir carpeta (usa la cuenta personal ya conectada)
-    dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente en session_state["dest_folder_id"]
+    dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente session_state["dest_folder_id"]
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
     if st.button("Siguiente ⏭️", key="btn_next_step2"):
         st.session_state["step2_done"] = True
@@ -260,15 +275,17 @@ if not st.session_state["step2_done"]:
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    col_l2, col_r2 = st.columns([4, 1])
-    with col_l2:
-        st.success(f"Destino de la copia: **{pretty}**")
-    with col_r2:
-        st.markdown('<div class="linkbox">', unsafe_allow_html=True)
-        if st.button("Cambiar carpeta", key="link_change_folder"):
-            st.session_state["step2_done"] = False
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Frase + (Cambiar carpeta) en la MISMA línea
+    st.markdown(
+        f'<div class="inline-row">Destino de la copia: <strong>{pretty}</strong></div>',
+        unsafe_allow_html=True
+    )
+    st.markdown('<div class="inline-link inline-row">', unsafe_allow_html=True)
+    if st.button("(Cambiar carpeta)", key="link_change_folder_inline"):
+        st.session_state["step2_done"] = False
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 creds_src = pick_source_oauth()
