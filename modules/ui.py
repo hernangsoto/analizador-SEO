@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import shutil
-from pathlib import Path
 from urllib.parse import quote
 
 import requests
@@ -11,19 +10,47 @@ import streamlit as st
 
 
 # =============================
-# Estilos / branding
+# Branding / utilidades
 # =============================
+
+def _inline_logo_src(logo_url: str) -> str:
+    """
+    Descarga el logo y devuelve un data: URI (SVG utf8 o binario base64).
+    Si falla, retorna la URL original.
+    """
+    try:
+        if logo_url.startswith(("http://", "https://")):
+            r = requests.get(logo_url, timeout=10)
+            if r.status_code == 200:
+                content_type = r.headers.get("Content-Type", "")
+                # SVG inline utf8
+                if "svg" in content_type or logo_url.lower().endswith(".svg"):
+                    return f"data:image/svg+xml;utf8,{quote(r.text)}"
+                # Otros formatos → base64
+                mime = "image/png"
+                if "jpeg" in content_type or logo_url.lower().endswith((".jpg", ".jpeg")):
+                    mime = "image/jpeg"
+                elif "webp" in content_type or logo_url.lower().endswith(".webp"):
+                    mime = "image/webp"
+                b64 = base64.b64encode(r.content).decode("ascii")
+                return f"data:{mime};base64,{b64}"
+    except Exception:
+        pass
+    return logo_url
+
 
 def apply_page_style(
     page_bg: str = "#ffffff",
     use_gradient: bool = False,
     band_height_px: int = 110,
     header_bg: str = "#5c417c",
-    header_height_px: int = 64,   # ← alto real del header (ajustable)
+    header_height_px: int = 64,
 ) -> None:
     """
-    Fondo + header nativo con tu color. Define --app-header-height para que
-    el banner use exactamente la misma altura de offset.
+    Aplica estilos globales:
+    - Define --app-header-height para sincronizar el offset del banner.
+    - Pinta el header nativo con `header_bg`.
+    - Opcionalmente aplica una banda/gradiente superior en el body.
     """
     if use_gradient:
         css_bg = (
@@ -37,7 +64,7 @@ def apply_page_style(
         f"""
         <style>
         .stApp {{
-            --app-header-height: {header_height_px}px;   /* ← clave */
+            --app-header-height: {header_height_px}px;
             background: {css_bg} !important;
         }}
         header[data-testid="stHeader"] {{
@@ -46,7 +73,7 @@ def apply_page_style(
             min-height: var(--app-header-height);
             height: var(--app-header-height);
             box-shadow: none !important;
-            z-index: 1000;  /* por si tu tema lo cambia */
+            z-index: 1000 !important; /* El banner puede ir por encima si lo pedimos */
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
@@ -61,57 +88,24 @@ def apply_page_style(
     )
 
 
-def _inline_logo_src(logo_url: str) -> str:
-    """
-    Devuelve un data:URI para el logo (desde ruta local o URL remota).
-    Si falla, retorna la URL original.
-    """
-    try:
-        p = Path(logo_url)
-        if p.exists() and p.is_file():
-            if p.suffix.lower() == ".svg":
-                return f"data:image/svg+xml;utf8,{quote(p.read_text(encoding='utf-8'))}"
-            data = p.read_bytes()
-            mime = "image/png"
-            if p.suffix.lower() in {".jpg", ".jpeg"}:
-                mime = "image/jpeg"
-            elif p.suffix.lower() == ".webp":
-                mime = "image/webp"
-            b64 = base64.b64encode(data).decode("ascii")
-            return f"data:{mime};base64,{b64}"
-
-        if logo_url.startswith("http"):
-            r = requests.get(logo_url, timeout=10)
-            if r.status_code == 200:
-                ct = r.headers.get("Content-Type", "")
-                if "svg" in ct or logo_url.lower().endswith(".svg"):
-                    return f"data:image/svg+xml;utf8,{quote(r.text)}"
-                mime = "image/png"
-                if "jpeg" in ct or logo_url.lower().endswith((".jpg", ".jpeg")):
-                    mime = "image/jpeg"
-                elif "webp" in ct or logo_url.lower().endswith(".webp"):
-                    mime = "image/webp"
-                b64 = base64.b64encode(r.content).decode("ascii")
-                return f"data:{mime};base64,{b64}"
-    except Exception:
-        pass
-    return logo_url
-
-
 def render_brand_header(
     logo_url: str,
     width_px: int | None = None,
     height_px: int = 27,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,   # None => usa --app-header-height
-    pinned: bool = True,                # fijo al hacer scroll
-    nudge_px: int = -30,                  # ↑↓  (+ baja, − sube)
+    pinned: bool = True,                # True = anclado (fixed), False = sticky
+    nudge_px: int = 0,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
-    x_offset_px: int = 50,               # →←  (si left: positivo mueve a la derecha; si right: positivo mueve a la izquierda)
+    x_offset_px: int = 0,               # →←  (si left: + mueve a derecha; si right: + a izquierda)
     container_max_px: int = 1200,       # ancho del contenido para alinear
 ) -> None:
+    """
+    Dibuja el logo como capa limpia, sin recuadro ni sombras.
+    """
     src = _inline_logo_src(logo_url)
+    # Dimensiones: mejor fijar altura para preservar proporción.
     dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
 
     # top calculado (base + nudge)
@@ -130,10 +124,10 @@ def render_brand_header(
     elif x_align == "right":
         img_margin = f"margin-right:{x_offset_px}px;"
     else:
-        img_margin = ""
+        img_margin = ""  # center
 
     if pinned:
-        # capa fija full-width
+        # Capa fija full-width debajo del header; contenido centrado al ancho de la app
         st.markdown(
             f"""
             <style>
@@ -144,7 +138,7 @@ def render_brand_header(
               width: 100%;
               z-index: {z_index};
               background: transparent !important;
-              pointer-events: none;
+              pointer-events: none; /* no bloquea clicks del header */
             }}
             .brand-fixed .brand-inner {{
               max-width: {container_max_px}px;
@@ -170,12 +164,12 @@ def render_brand_header(
             unsafe_allow_html=True,
         )
     else:
-        # variante sticky
+        # Variante sticky (fluye con el contenido)
         st.markdown(
             f"""
             <style>
             .brand-banner {{
-              background: transparent !important;
+              background: {band_bg} !important;
               margin: 0 0 8px 0 !important;
               padding: 0 !important;
               position: -webkit-sticky; position: sticky;
@@ -212,9 +206,18 @@ def render_brand_header_once(
     x_offset_px: int = 0,
     container_max_px: int = 1200,
 ) -> None:
-    if st.session_state.get("_brand_rendered"):
+    """
+    Renderiza el banner una sola vez por 'firma' de parámetros.
+    Cambiás un parámetro → se re-renderiza automáticamente.
+    """
+    sig = (
+        logo_url, width_px, height_px, band_bg, top_offset_px,
+        pinned, nudge_px, z_index, x_align, x_offset_px, container_max_px
+    )
+    if st.session_state.get("_brand_sig") == sig:
         return
-    st.session_state["_brand_rendered"] = True
+    st.session_state["_brand_sig"] = sig
+
     render_brand_header(
         logo_url=logo_url,
         width_px=width_px,
@@ -230,20 +233,18 @@ def render_brand_header_once(
     )
 
 
+def reset_brand_banner():
+    """Forza el re-render del banner la próxima vez que se invoque."""
+    st.session_state.pop("_brand_sig", None)
 
-def hide_old_logo_instances(logo_url: str) -> None:
-    """
-    Oculta el mismo logo si aparecía en otros lugares, menos dentro del banner.
-    """
+
+def hide_old_logo_instances() -> None:
+    """Intenta ocultar logos del header por defecto del tema/Streamlit."""
     st.markdown(
-        f"""
+        """
         <style>
-        img[src*="{logo_url}"]:not(.brand-banner img) {{
-          display:none !important;
-        }}
-        .brand-banner img {{
-          display:inline-block !important;
-        }}
+        header [data-testid="stLogo"] { display:none !important; }
+        header svg[height][width] { opacity:0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -251,11 +252,11 @@ def hide_old_logo_instances(logo_url: str) -> None:
 
 
 # =============================
-# User helpers
+# Helpers de usuario / Sidebar
 # =============================
 
 def get_user():
-    """Devuelve st.user (o experimental_user)."""
+    """Devuelve la info del usuario autenticado (st.user o experimental_user)."""
     return getattr(st, "user", getattr(st, "experimental_user", None))
 
 
@@ -265,11 +266,13 @@ def get_first_name(full_name: str | None) -> str:
     return full_name.split()[0]
 
 
-def sidebar_user_info(user) -> None:
-    """Sidebar con avatar, nombre, email y mantenimiento."""
+def sidebar_user_info(user):
+    """
+    Sidebar con avatar, nombre, email y utilidades de mantenimiento.
+    """
     with st.sidebar:
         with st.container():
-            c1, c2 = st.columns([1, 3])
+            c1, c2 = st.columns([1, 3], vertical_alignment="center")
             with c1:
                 if getattr(user, "picture", None):
                     try:
@@ -304,19 +307,7 @@ def sidebar_user_info(user) -> None:
         st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
 
 
-def login_screen() -> None:
+def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
     st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
-
-
-# (Opcional) declara lo exportado para evitar confusiones en imports con __all__
-__all__ = [
-    "apply_page_style",
-    "render_brand_header_once",
-    "hide_old_logo_instances",
-    "get_user",
-    "get_first_name",
-    "sidebar_user_info",
-    "login_screen",
-]
