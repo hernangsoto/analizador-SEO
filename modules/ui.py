@@ -198,7 +198,7 @@ def render_brand_header(
 def render_brand_header_once(
     logo_url: str,
     width_px: int | None = None,
-    height_px: int = 27,
+    height_px: int = 15,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,
     pinned: bool = True,
@@ -271,7 +271,7 @@ def enable_brand_auto_align() -> None:
            Lo identificamos porque su atributo srcdoc contiene '--brand-left' */
         iframe.stIFrame[srcdoc*="--brand-left"] {
           width: 0 !important;
-          height: 200 !important;
+          height: 0 !important;
           opacity: 0 !important;
           pointer-events: none !important;
           border: 0 !important;
