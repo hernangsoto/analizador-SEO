@@ -1,6 +1,7 @@
 # app.py
 from __future__ import annotations
 
+# ── OAuthlib (antes que nada, para permitir http://localhost y scopes relajados)
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -28,6 +29,7 @@ HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
+# Estilo general + header
 apply_page_style(
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_HEIGHT,
@@ -36,17 +38,21 @@ apply_page_style(
     band_height_px=110,
 )
 
+# Fuerza reinyectar el banner de marca en cada rerun (evita que “desaparezca” tras autenticaciones)
+st.session_state.pop("_brand_sig", None)
+
+# Banner con logo anclado
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,
-    nudge_px=-42,     # negativo = subir
+    pinned=True,       # fijo al hacer scroll
+    nudge_px=-42,      # negativo = sube el logo
     x_align="left",
-    x_offset_px=40,   # mover a la derecha
-    z_index=3000,
+    x_offset_px=40,    # mover a la derecha
+    z_index=3000,      # por delante del header nativo
     container_max_px=1200,
 )
-enable_brand_auto_align()
+enable_brand_auto_align()  # reacomoda al abrir/cerrar sidebar
 
 st.title("Analizador SEO 🚀")
 
@@ -72,9 +78,10 @@ from modules.drive import (
 from modules.gsc import ensure_sc_client
 
 
-# ====== Helpers UI (sitio / análisis / parámetros) ======
+# ====== Helpers UI ======
 def pick_site(sc_service):
-    st.subheader("3) Elegí el sitio a trabajar (Search Console)")  # numeración corre a partir del colapso
+    """Selector de sitio con orden estable y selección persistente."""
+    st.subheader("3) Elegí el sitio a trabajar (Search Console)")
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -87,7 +94,7 @@ def pick_site(sc_service):
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden estable + sin duplicados
+    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético + sin duplicados
 
     prev_options = st.session_state.get("site_options") or []
     if prev_options != verified_urls:
@@ -160,6 +167,7 @@ def params_for_evergreen():
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
 
+    # Ventana de 16 meses completos
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
@@ -172,13 +180,55 @@ def params_for_evergreen():
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
 
+# --- Helpers de resumen de carpeta ---
+def _get_folder_meta(drive, folder_id: str) -> tuple[str | None, str | None]:
+    """Devuelve (name, webViewLink) de la carpeta, o (None, None) si falla."""
+    try:
+        meta = (
+            drive.files()
+            .get(fileId=folder_id, fields="id,name,webViewLink", supportsAllDrives=True)
+            .execute()
+        )
+        return meta.get("name"), meta.get("webViewLink")
+    except Exception:
+        return None, None
+
+def render_dest_summary_or_pick(drive, me):
+    """
+    Si el paso 2 no está hecho, muestra el picker + botón Siguiente.
+    Si ya está hecho, muestra el resumen + botón Cambiar carpeta.
+    """
+    if not st.session_state.get("step_dest_done"):
+        st.subheader("2) Elegí carpeta destino (opcional)")
+        dest_folder_id = pick_destination(drive, me)
+        if st.button("⏭️ Siguiente", key="btn_next_dest", type="primary"):
+            st.session_state["step_dest_done"] = True
+            st.rerun()
+    else:
+        dest_folder_id = st.session_state.get("dest_folder_id")
+        col_left, col_right = st.columns([4, 1])
+        with col_left:
+            if dest_folder_id:
+                name, link = _get_folder_meta(drive, dest_folder_id)
+                st.success(f"Destino: carpeta **{name or '(sin nombre)'}**")
+                if link:
+                    st.markdown(f"[Abrir carpeta]({link})")
+            else:
+                st.success("Destino: **Mi unidad (raíz)**")
+            st.caption("Podés cambiar la carpeta cuando quieras.")
+        with col_right:
+            if st.button("Cambiar carpeta", key="btn_change_dest", type="secondary", use_container_width=True):
+                st.session_state["step_dest_done"] = False
+                st.rerun()
+
+
 # ============== App ==============
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# 👉 Sidebar: “Mantenimiento” con extras
+# Sidebar “Mantenimiento” con extras
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -222,23 +272,14 @@ else:
     st.session_state["step1_done"] = True
     st.rerun()
 
-# --- Paso 2: Carpeta destino (opcional) ---
-if not st.session_state["step_dest_done"]:
-    st.subheader("2) Elegí carpeta destino (opcional)")
-    dest_folder_id = pick_destination(drive_service, _me)  # guarda en session_state internamente si es válido
+# --- Paso 2: Carpeta destino (opcional, con resumen/cambiar) ---
+render_dest_summary_or_pick(drive_service, _me)
 
-    # Botón Siguiente: colapsa el paso
-    if st.button("⏭️ Siguiente", key="btn_next_dest", type="primary"):
-        st.session_state["step_dest_done"] = True
-        st.rerun()
-else:
-    # Paso 2 colapsado (no mostramos UI de carpeta)
-    pass
+# Hasta confirmar paso 2, no avanzamos
+if not st.session_state.get("step_dest_done"):
+    st.stop()
 
 # --- Paso 3: Conectar Search Console (fuente) ---
-if not st.session_state["step_dest_done"]:
-    st.stop()  # esperamos a que el usuario termine Paso 2
-
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
