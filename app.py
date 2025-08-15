@@ -32,15 +32,14 @@ apply_page_style(
 )
 
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
-render_brand_header_once(LOGO_URL, height_px=27, band_bg=HEADER_COLOR)
-# No uses hide_old_logo_instances mientras pruebas el banner
-
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    band_bg=HEADER_COLOR,
-    top_offset_px=HEADER_H,     # ← coincide con el alto del header
+    band_bg="transparent",
+    pinned=True,           # ← anclado
+    # top_offset_px=...    # opcional, si querés un offset distinto al header
 )
+
 # hide_old_logo_instances(LOGO_URL)  # opcional
 
 
