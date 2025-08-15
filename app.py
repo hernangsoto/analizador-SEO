@@ -51,10 +51,10 @@ render_brand_header_once(
 # Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
-# ====== Estilos globales (botones morados + links estilo texto + inline rows) ======
+# ====== Estilos globales ======
 st.markdown("""
 <style>
-/* Botones morado #8e7cc3 */
+/* Botones morado #8e7cc3 (para los de acción principal) */
 .stButton > button, .stDownloadButton > button {
   background: #8e7cc3 !important;
   border-color: #8e7cc3 !important;
@@ -65,31 +65,27 @@ st.markdown("""
   filter: brightness(0.93);
 }
 
-/* Asegurar que nuestro logo quede por delante del header nativo */
+/* Caja verde tipo "success" para resúmenes inline */
+.success-inline {
+  background: #e6f4ea;              /* verde claro */
+  border: 1px solid #a5d6a7;        /* borde verde */
+  color: #1e4620;                   /* texto verde oscuro */
+  padding: 10px 14px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+.success-inline a {
+  color: #0b8043;                   /* link verde */
+  text-decoration: underline;
+  font-weight: 600;
+}
+.success-inline strong { margin-left: .25rem; }
+
+/* Asegurar que el header nativo no tape nuestro logo */
 header[data-testid="stHeader"] { z-index: 1500 !important; }
-
-/* Contenedor en línea para frase + link entre paréntesis */
-.inline-row { 
-  display: flex; 
-  align-items: center; 
-  flex-wrap: wrap; 
-}
-.inline-row strong { margin-right: .25rem; }
-
-/* Link-acción estilizado como texto (usa un botón, pero se ve como enlace) */
-.inline-link .stButton { 
-  display: inline-block; 
-  margin: 0 0 0 .35rem !important; 
-}
-.inline-link .stButton > button {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-  color: #5c417c !important;
-  text-decoration: underline !important;
-  box-shadow: none !important;
-  font-weight: 500 !important;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -198,6 +194,19 @@ def params_for_evergreen():
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
 
+# ============== Helpers de query params para links inline ==============
+def _get_qp() -> dict:
+    try:
+        return dict(st.query_params)
+    except Exception:
+        return st.experimental_get_query_params()  # fallback viejo
+
+def _clear_qp():
+    try:
+        st.query_params.clear()
+    except Exception:
+        st.experimental_set_query_params()
+
 # ============== App ==============
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
@@ -218,6 +227,26 @@ sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step2_done", False)
 
+# === Procesar acciones de links inline (antes de pintar los resúmenes) ===
+_qp = _get_qp()
+_action = _qp.get("action")
+# Si viene como lista (API vieja), agarrar el primero
+if isinstance(_action, list):
+    _action = _action[0] if _action else None
+
+if _action == "change_personal":
+    for k in ("creds_dest", "oauth_dest", "step1_done"):
+        st.session_state.pop(k, None)
+    st.session_state["step2_done"] = False
+    st.session_state.pop("dest_folder_id", None)
+    _clear_qp()
+    st.rerun()
+
+elif _action == "change_folder":
+    st.session_state["step2_done"] = False
+    _clear_qp()
+    st.rerun()
+
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
@@ -237,7 +266,7 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (en línea + link)
+# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (caja verde + link)
 drive_service = None
 gs_client = None
 _me = None
@@ -246,22 +275,17 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
-
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
 
-    # Frase + (Cambiar mail personal) en la MISMA línea
     st.markdown(
-        f'<div class="inline-row">Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong></div>',
+        f'''
+        <div class="success-inline">
+            Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong>
+            <a href="?action=change_personal">(Cambiar mail personal)</a>
+        </div>
+        ''',
         unsafe_allow_html=True
     )
-    st.markdown('<div class="inline-link inline-row">', unsafe_allow_html=True)
-    if st.button("(Cambiar mail personal)", key="link_change_personal_inline"):
-        for k in ("creds_dest", "oauth_dest", "step1_done"):
-            st.session_state.pop(k, None)
-        st.session_state["step2_done"] = False
-        st.session_state.pop("dest_folder_id", None)
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
@@ -276,16 +300,15 @@ else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
 
-    # Frase + (Cambiar carpeta) en la MISMA línea
     st.markdown(
-        f'<div class="inline-row">Destino de la copia: <strong>{pretty}</strong></div>',
+        f'''
+        <div class="success-inline">
+            Destino de la copia: <strong>{pretty}</strong>
+            <a href="?action=change_folder">(Cambiar carpeta)</a>
+        </div>
+        ''',
         unsafe_allow_html=True
     )
-    st.markdown('<div class="inline-link inline-row">', unsafe_allow_html=True)
-    if st.button("(Cambiar carpeta)", key="link_change_folder_inline"):
-        st.session_state["step2_done"] = False
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 creds_src = pick_source_oauth()
