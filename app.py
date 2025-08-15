@@ -1,9 +1,15 @@
 # app.py
 from __future__ import annotations
 
+# --- Permisos OAuth en localhost + tolerancia de scope (útil para Streamlit Cloud + localhost redirect)
+import os
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
+from google.oauth2.credentials import Credentials
 
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
@@ -18,7 +24,6 @@ from modules.ui import (
     login_screen,
 )
 
-# Colores/posicionamiento del header + logo
 HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
@@ -32,21 +37,24 @@ apply_page_style(
     band_height_px=110,
 )
 
+# (opcional) Si alguna vez desaparece el banner, podés forzar reinyección:
+# st.session_state.pop("_brand_sig", None)
+
 # Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,          # anclado
-    nudge_px=-42,         # negativo = subir; positivo = bajar
-    x_align="left",       # "left" | "center" | "right"
-    x_offset_px=40,       # mover a la derecha (si x_align="left")
-    z_index=3000,
+    pinned=True,         # anclado
+    nudge_px=-42,        # vertical fino: negativo = subir; positivo = bajar
+    x_align="left",      # "left" | "center" | "right"
+    x_offset_px=40,      # mover a la derecha si x_align="left"
+    z_index=3000,        # por delante del header nativo
     container_max_px=1200,
 )
-# Auto-alineación con el contenedor principal (responde a abrir/cerrar sidebar)
+# Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
-# ====== Estilos globales (botones, pills, links) ======
+# ====== Estilos globales (botones morados + links estilo texto) ======
 st.markdown("""
 <style>
 /* Botones morado #8e7cc3 */
@@ -58,17 +66,6 @@ st.markdown("""
 }
 .stButton > button:hover, .stDownloadButton > button:hover {
   filter: brightness(0.93);
-}
-
-/* Pills de resumen */
-.pill {
-  display:inline-block;
-  padding:.40rem .80rem;
-  border-radius:9999px;
-  background:#b4a7d6;   /* color pedido */
-  color:#1f1f1f;
-  font-weight:600;
-  line-height:1;
 }
 
 /* Enlaces-acción que parecen texto (para "Cambiar ...") */
@@ -83,24 +80,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper pill
-def pill(texto: str) -> str:
-    return f'<span class="pill">{texto}</span>'
-
-
 st.title("Analizador SEO 🚀")
 
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
-
 _ext = ensure_external_package()
-if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
+USING_EXT = bool(_ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"))
+if USING_EXT:
     run_core_update = _ext.run_core_update
     run_evergreen = _ext.run_evergreen
-    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
 else:
     from modules.analysis import run_core_update, run_evergreen  # type: ignore
-    st.caption("🧩 Usando análisis embebidos en este repo.")
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
@@ -127,10 +117,10 @@ def pick_site(sc_service):
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    # Evitar “salto” al seleccionar
-    options = [s["siteUrl"] for s in verified]
-    default = st.session_state.get("site_url_choice", options[0] if options else "")
-    site_url = st.selectbox("Sitio verificado:", options, key="site_url_choice", index=options.index(default))
+    options = sorted({s["siteUrl"] for s in verified})
+    prev = st.session_state.get("site_url_choice")
+    index = options.index(prev) if prev in options else 0
+    site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
     return site_url
 
 
@@ -201,79 +191,78 @@ if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# Sidebar info
-sidebar_user_info(user)
+# Sidebar → Mantenimiento: mensaje del paquete y modo debug
+def maintenance_extra_ui():
+    if USING_EXT:
+        st.caption("🧩 Usando análisis del paquete externo (repo privado).")
+    else:
+        st.caption("🧩 Usando análisis embebidos en este repo.")
+    st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
+
+sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
 # Estados de pasos
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step2_done", False)
 
-# --- PASO 1: OAuth personal (Drive/Sheets) ---
-# Evitamos poner un subheader aquí para no duplicar; el propio pick_destination_oauth imprime su título.
+# --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
+    # Deja que pick_destination_oauth renderice su UI (no dupliques el título aquí)
     creds_dest = pick_destination_oauth()
-    if creds_dest:
-        st.session_state["step1_done"] = True
-        st.session_state["creds_dest"] = {
-            "token": creds_dest.token,
-            "refresh_token": getattr(creds_dest, "refresh_token", None),
-            "token_uri": creds_dest.token_uri,
-            "client_id": creds_dest.client_id,
-            "client_secret": creds_dest.client_secret,
-            "scopes": creds_dest.scopes,
-        }
-        st.rerun()
+    if not creds_dest:
+        st.stop()
+    # Guardamos y colapsamos
+    st.session_state["step1_done"] = True
+    st.session_state["creds_dest"] = {
+        "token": creds_dest.token,
+        "refresh_token": getattr(creds_dest, "refresh_token", None),
+        "token_uri": creds_dest.token_uri,
+        "client_id": creds_dest.client_id,
+        "client_secret": creds_dest.client_secret,
+        "scopes": creds_dest.scopes,
+    }
+    st.rerun()
 
-# Si ya está completo, construimos clientes y mostramos RESUMEN colapsado
-from modules.drive import ensure_drive_clients, get_google_identity, pick_destination
-
+# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (verde)
 drive_service = None
 gs_client = None
 _me = None
 
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
-    from google.oauth2.credentials import Credentials
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
 
-    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-    col_l, col_r = st.columns([3, 1])
+    col_l, col_r = st.columns([4, 1])
     with col_l:
-        st.markdown(
-            pill(f"Los archivos se guardarán en el Drive de: {email_txt}"),
-            unsafe_allow_html=True,
-        )
+        st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
     with col_r:
         st.markdown('<div class="linkbox">', unsafe_allow_html=True)
         if st.button("Cambiar mail personal", key="link_change_personal"):
             for k in ("creds_dest", "oauth_dest", "step1_done"):
                 st.session_state.pop(k, None)
+            st.session_state["step2_done"] = False
+            st.session_state.pop("dest_folder_id", None)
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-# Si no tenemos credenciales aún, frenamos la app hasta completar el paso 1
-if not st.session_state["step1_done"]:
-    st.stop()
-
 # --- PASO 2: Carpeta destino (opcional) ---
-st.subheader("2) Destino de la copia (opcional)")
 if not st.session_state["step2_done"]:
+    st.subheader("2) Destino de la copia (opcional)")
     # UI para elegir carpeta (usa la cuenta personal ya conectada)
-    dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente en session_state
+    dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente en session_state["dest_folder_id"]
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
     if st.button("Siguiente ⏭️", key="btn_next_step2"):
         st.session_state["step2_done"] = True
         st.rerun()
 else:
-    # Resumen colapsado del paso 2
     chosen = st.session_state.get("dest_folder_id")
-    txt = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    col_l2, col_r2 = st.columns([3, 1])
+    pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
+    col_l2, col_r2 = st.columns([4, 1])
     with col_l2:
-        st.markdown(pill(f"Destino de la copia: {txt}"), unsafe_allow_html=True)
+        st.success(f"Destino de la copia: **{pretty}**")
     with col_r2:
         st.markdown('<div class="linkbox">', unsafe_allow_html=True)
         if st.button("Cambiar carpeta", key="link_change_folder"):
