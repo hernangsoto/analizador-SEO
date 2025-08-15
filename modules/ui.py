@@ -123,13 +123,13 @@ def apply_page_style(page_bg: str = "#0f172a", use_gradient: bool = True):
         unsafe_allow_html=True,
     )
 
-def render_brand_header(logo_url: str,
-                        height_px: int = 54,
-                        band_bg: str = "#0f172a"):
-    """
-    Inserta una franja superior con el logo (izquierda).
-    Llamar justo antes del título principal.
-    """
+def render_brand_header(
+    logo_url: str,
+    width_px: int = 153,
+    height_px: int = 27,
+    band_bg: str = "#0f172a",
+):
+    """Franja superior con logo a tamaño exacto (153x27 por defecto)."""
     st.markdown(
         f"""
         <div class="brand-banner" style="
@@ -139,11 +139,14 @@ def render_brand_header(logo_url: str,
             padding: 10px 16px;
             display: flex; align-items: center;
         ">
-            <img src="{logo_url}" alt="Brand" style="height:{height_px}px; display:block;" />
+            <img src="{logo_url}" alt="Brand"
+                 width="{width_px}" height="{height_px}"
+                 style="width:{width_px}px;height:{height_px}px;display:block;" />
         </div>
         """,
         unsafe_allow_html=True,
     )
+
 
 
 # ---------------------------
