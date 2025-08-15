@@ -37,7 +37,7 @@ render_brand_header_once(
     height_px=27,
     band_bg="transparent",
     pinned=True,           # ← anclado
-    # top_offset_px=52    # opcional, si querés un offset distinto al header
+    top_offset_px=52    # opcional, si querés un offset distinto al header
 )
 
 # hide_old_logo_instances(LOGO_URL)  # opcional
