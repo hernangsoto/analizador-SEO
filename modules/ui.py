@@ -108,28 +108,32 @@ def render_brand_header(
     nudge_px: int = 0,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
-    x_offset_px: int = 0,               # →←  (positivo empuja hacia la derecha si left; hacia la izquierda si right)
-    container_max_px: int = 1200,       # ancho del contenido para alinear con la app
+    x_offset_px: int = 0,               # →←  (si left: positivo mueve a la derecha; si right: positivo mueve a la izquierda)
+    container_max_px: int = 1200,       # ancho del contenido para alinear
 ) -> None:
     src = _inline_logo_src(logo_url)
     dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
 
-    # top calculado
-    if top_offset_px is None:
-        top_css = f"calc(var(--app-header-height) {f'+{nudge_px}' if nudge_px>=0 else nudge_px}px)"
+    # top calculado (base + nudge)
+    base = "var(--app-header-height)" if top_offset_px is None else f"{top_offset_px}px"
+    if nudge_px == 0:
+        top_css = base
+    elif nudge_px > 0:
+        top_css = f"calc({base} + {nudge_px}px)"
     else:
-        top_css = f"calc({top_offset_px}px {f'+{nudge_px}' if nudge_px>=0 else nudge_px}px)"
+        top_css = f"calc({base} - {abs(nudge_px)}px)"
 
     # alineación horizontal
-    justify = {"left":"flex-start", "center":"center", "right":"flex-end"}.get(x_align, "flex-start")
+    justify = {"left": "flex-start", "center": "center", "right": "flex-end"}.get(x_align, "flex-start")
     if x_align == "left":
         img_margin = f"margin-left:{x_offset_px}px;"
     elif x_align == "right":
         img_margin = f"margin-right:{x_offset_px}px;"
     else:
-        img_margin = ""  # center
+        img_margin = ""
 
     if pinned:
+        # capa fija full-width
         st.markdown(
             f"""
             <style>
@@ -140,7 +144,7 @@ def render_brand_header(
               width: 100%;
               z-index: {z_index};
               background: transparent !important;
-              pointer-events: none; /* no bloquea clics del header */
+              pointer-events: none;
             }}
             .brand-fixed .brand-inner {{
               max-width: {container_max_px}px;
@@ -166,7 +170,7 @@ def render_brand_header(
             unsafe_allow_html=True,
         )
     else:
-        # versión sticky (por si la necesitás)
+        # variante sticky
         st.markdown(
             f"""
             <style>
@@ -195,25 +199,34 @@ def render_brand_header(
         )
 
 
-
 def render_brand_header_once(
     logo_url: str,
     width_px: int | None = None,
     height_px: int = 27,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,
-    pinned: bool = True,  # ← por defecto, anclado
+    pinned: bool = True,
+    nudge_px: int = 0,
+    z_index: int = 3000,
+    x_align: str = "left",
+    x_offset_px: int = 0,
+    container_max_px: int = 1200,
 ) -> None:
     if st.session_state.get("_brand_rendered"):
         return
     st.session_state["_brand_rendered"] = True
     render_brand_header(
-        logo_url,
+        logo_url=logo_url,
         width_px=width_px,
         height_px=height_px,
         band_bg=band_bg,
         top_offset_px=top_offset_px,
         pinned=pinned,
+        nudge_px=nudge_px,
+        z_index=z_index,
+        x_align=x_align,
+        x_offset_px=x_offset_px,
+        container_max_px=container_max_px,
     )
 
 
