@@ -1,9 +1,14 @@
 # app.py
 from __future__ import annotations
 
+import os
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"   # permite http://localhost
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"    # tolera órdenes/espacios en scopes
+
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
+
 
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
