@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple, List
-
-import streamlit as st
-from google_auth_oauthlib.flow import Flow
-from google.oauth2.credentials import Credentials
-
-from .utils import debug_log, token_store
-
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
+from urllib.parse import urlsplit, parse_qs
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+import streamlit as st
+
+from .utils import debug_log, token_store
 
 # =============================
 # Scopes
