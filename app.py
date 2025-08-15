@@ -13,7 +13,6 @@ from modules.ui import (
     apply_page_style,
     render_brand_header_once,
     enable_brand_auto_align,
-    # hide_old_logo_instances,  # opcional
     get_user,
     sidebar_user_info,
     login_screen,
@@ -21,10 +20,9 @@ from modules.ui import (
 
 # Colores/posicionamiento del header + logo
 HEADER_COLOR = "#5c417c"
-HEADER_HEIGHT = 64  # ajustá si tu header se ve un poco más alto
+HEADER_HEIGHT = 64
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
-# Estilo general + header nativo
 apply_page_style(
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_HEIGHT,
@@ -33,26 +31,18 @@ apply_page_style(
     band_height_px=110,
 )
 
-# Si querés forzar rerender durante pruebas, descomentá:
-# st.session_state.pop("_brand_sig", None)
-
-# Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
+# st.session_state.pop("_brand_sig", None)  # (opcional) forzar re-render del banner
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,      # anclado
-    nudge_px=-42,     # negativo = subir; positivo = bajar
-    x_align="left",   # "left" | "center" | "right"
-    x_offset_px=40,  # mover a la derecha (si x_align="left")
+    pinned=True,
+    nudge_px=-42,     # negativo = subir
+    x_align="left",
+    x_offset_px=40,   # mover a la derecha
     z_index=3000,
     container_max_px=1200,
 )
-
-# Auto-alineación con el contenedor principal (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
-
-# Ocultar logos por defecto del tema (si querés)
-# hide_old_logo_instances()
 
 st.title("Analizador SEO 🚀")
 
@@ -60,13 +50,12 @@ st.title("Analizador SEO 🚀")
 from modules.utils import debug_log, ensure_external_package
 
 _ext = ensure_external_package()
-if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
+USING_EXT = bool(_ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"))
+if USING_EXT:
     run_core_update = _ext.run_core_update
     run_evergreen = _ext.run_evergreen
-    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
 else:
     from modules.analysis import run_core_update, run_evergreen  # type: ignore
-    st.caption("🧩 Usando análisis embebidos en este repo.")
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
@@ -148,7 +137,7 @@ def params_for_evergreen():
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
-    start_month_first_day = (end_month_first_day - pd.DateOffset(months=15))
+    start_month_first_day = (end_month_last_day - pd.DateOffset(months=15)).replace(day=1)
     start_date = start_month_first_day.date()
     end_date = end_month_last_day.date()
     st.info(f"Ventana mensual: {start_date} → {end_date}")
@@ -163,13 +152,18 @@ if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# Sidebar info
-sidebar_user_info(user)
+# 👉 Callback para inyectar UI extra dentro de “🧹 Mantenimiento” (sidebar)
+def maintenance_extra_ui():
+    if USING_EXT:
+        st.caption("🧩 Usando análisis del paquete externo (repo privado).")
+    else:
+        st.caption("🧩 Usando análisis embebidos en este repo.")
+    st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-# Debug switch (opcional)
-st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
+# Sidebar info (con “Mantenimiento” extendido)
+sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
-# --- Paso 1: OAuth personal (Drive/Sheets) ---
+# --- Paso 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = pick_destination_oauth()
 if not creds_dest:
     st.stop()
@@ -184,7 +178,7 @@ else:
 # Carpeta destino opcional
 dest_folder_id = pick_destination(drive_service, _me)
 
-# --- Paso 2: Conectar Search Console (fuente de datos) ---
+# --- Paso 2: Conectar Search Console (fuente) ---
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
