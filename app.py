@@ -1,7 +1,7 @@
 # app.py
 from __future__ import annotations
 
-# ── OAuthlib (antes que nada, para permitir http://localhost y scopes relajados)
+# --- Permisos OAuth en localhost + tolerancia de scope ---
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -24,12 +24,10 @@ from modules.ui import (
     login_screen,
 )
 
-# Colores/posicionamiento del header + logo
 HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
-# Estilo general + header
 apply_page_style(
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_HEIGHT,
@@ -38,21 +36,57 @@ apply_page_style(
     band_height_px=110,
 )
 
-# Fuerza reinyectar el banner de marca en cada rerun (evita que “desaparezca” tras autenticaciones)
+# Fuerza a reinyectar el banner en cada rerun (evita “desapariciones”)
 st.session_state.pop("_brand_sig", None)
 
-# Banner con logo anclado
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,       # fijo al hacer scroll
-    nudge_px=-42,      # negativo = sube el logo
+    pinned=True,
+    nudge_px=-42,     # subir/bajar fino
     x_align="left",
-    x_offset_px=40,    # mover a la derecha
-    z_index=3000,      # por delante del header nativo
+    x_offset_px=40,   # mover a la derecha
+    z_index=3000,
     container_max_px=1200,
 )
-enable_brand_auto_align()  # reacomoda al abrir/cerrar sidebar
+enable_brand_auto_align()
+
+# ---- Estilos globales (color de botones + pills + enlaces tipo botón) ----
+st.markdown("""
+<style>
+/* Botones morado #8e7cc3 */
+.stButton > button, .stDownloadButton > button {
+  background: #8e7cc3 !important;
+  border-color: #8e7cc3 !important;
+  color: #fff !important;
+  border-radius: 8px !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  filter: brightness(0.93);
+}
+
+/* "Pills" de resumen */
+.pill {
+  display:inline-block;
+  padding:.35rem .75rem;
+  border-radius:9999px;
+  background:#8e7cc3;
+  color:#fff;
+  font-weight:600;
+  line-height:1;
+}
+
+/* Enlaces-acción (para "Cambiar ...") */
+.linkbox button {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  color: #5c417c !important;
+  text-decoration: underline !important;
+  box-shadow: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("Analizador SEO 🚀")
 
@@ -80,7 +114,7 @@ from modules.gsc import ensure_sc_client
 
 # ====== Helpers UI ======
 def pick_site(sc_service):
-    """Selector de sitio con orden estable y selección persistente."""
+    """Selector de sitio estable y persistente."""
     st.subheader("3) Elegí el sitio a trabajar (Search Console)")
     try:
         site_list = sc_service.sites().list().execute()
@@ -94,10 +128,8 @@ def pick_site(sc_service):
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético + sin duplicados
-
-    prev_options = st.session_state.get("site_options") or []
-    if prev_options != verified_urls:
+    verified_urls = sorted({s["siteUrl"] for s in verified})
+    if st.session_state.get("site_options") != verified_urls:
         st.session_state["site_options"] = verified_urls
         if st.session_state.get("site_selected") not in verified_urls:
             st.session_state["site_selected"] = verified_urls[0]
@@ -109,12 +141,7 @@ def pick_site(sc_service):
     except ValueError:
         idx = 0
 
-    choice = st.selectbox(
-        "Sitio verificado:",
-        options,
-        index=idx,
-        key="site_select_widget",
-    )
+    choice = st.selectbox("Sitio verificado:", options, index=idx, key="site_select_widget")
     st.session_state["site_selected"] = choice
     return choice
 
@@ -167,7 +194,6 @@ def params_for_evergreen():
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
 
-    # Ventana de 16 meses completos
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
@@ -180,9 +206,11 @@ def params_for_evergreen():
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
 
-# --- Helpers de resumen de carpeta ---
-def _get_folder_meta(drive, folder_id: str) -> tuple[str | None, str | None]:
-    """Devuelve (name, webViewLink) de la carpeta, o (None, None) si falla."""
+# --- Helpers de resumen/pills ---
+def pill(text: str) -> str:
+    return f'<span class="pill">{text}</span>'
+
+def _get_folder_meta(drive, folder_id: str):
     try:
         meta = (
             drive.files()
@@ -194,10 +222,7 @@ def _get_folder_meta(drive, folder_id: str) -> tuple[str | None, str | None]:
         return None, None
 
 def render_dest_summary_or_pick(drive, me):
-    """
-    Si el paso 2 no está hecho, muestra el picker + botón Siguiente.
-    Si ya está hecho, muestra el resumen + botón Cambiar carpeta.
-    """
+    """Paso 2 con resumen: muestra picker si no está confirmado; si lo está, muestra pill + enlace Cambiar."""
     if not st.session_state.get("step_dest_done"):
         st.subheader("2) Elegí carpeta destino (opcional)")
         dest_folder_id = pick_destination(drive, me)
@@ -206,20 +231,23 @@ def render_dest_summary_or_pick(drive, me):
             st.rerun()
     else:
         dest_folder_id = st.session_state.get("dest_folder_id")
-        col_left, col_right = st.columns([4, 1])
-        with col_left:
+        col_l, col_r = st.columns([5, 1])
+        with col_l:
             if dest_folder_id:
                 name, link = _get_folder_meta(drive, dest_folder_id)
-                st.success(f"Destino: carpeta **{name or '(sin nombre)'}**")
+                txt = f"Destino: {pill(name or '(sin nombre)')}"
                 if link:
-                    st.markdown(f"[Abrir carpeta]({link})")
+                    txt += f' &nbsp;[Abrir carpeta]({link})'
+                st.markdown(txt, unsafe_allow_html=True)
             else:
-                st.success("Destino: **Mi unidad (raíz)**")
-            st.caption("Podés cambiar la carpeta cuando quieras.")
-        with col_right:
-            if st.button("Cambiar carpeta", key="btn_change_dest", type="secondary", use_container_width=True):
+                st.markdown(f"Destino: {pill('Mi unidad (raíz)')}", unsafe_allow_html=True)
+
+        with col_r:
+            st.markdown('<div class="linkbox">', unsafe_allow_html=True)
+            if st.button("Cambiar carpeta", key="btn_change_dest"):
                 st.session_state["step_dest_done"] = False
                 st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============== App ==============
@@ -228,7 +256,7 @@ if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# Sidebar “Mantenimiento” con extras
+# Sidebar con mantenimiento + info del paquete
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -238,7 +266,7 @@ def maintenance_extra_ui():
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
-# ====== Navegación por pasos con colapso ======
+# Estado de pasos
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step_dest_done", False)
 
@@ -249,37 +277,41 @@ gs_client = None
 _me = None
 
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
-    # Paso 1 colapsado → solo resumen + botón "Cambiar"
+    # Resumen colapsado + enlace "Cambiar mail personal"
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
     email_txt = (_me or {}).get("emailAddress", "?")
-    st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
-    if st.button("Cambiar mail personal", key="btn_change_personal"):
-        st.session_state.pop("oauth_dest", None)
-        st.session_state.pop("creds_dest", None)
-        st.session_state["step1_done"] = False
-        st.session_state["step_dest_done"] = False
-        st.session_state.pop("dest_folder_id", None)
-        st.rerun()
+
+    col_l, col_r = st.columns([5, 1])
+    with col_l:
+        st.markdown(f"Los archivos se guardarán en el Drive de: {pill(email_txt)}", unsafe_allow_html=True)
+    with col_r:
+        st.markdown('<div class="linkbox">', unsafe_allow_html=True)
+        if st.button("Cambiar mail personal", key="btn_change_personal"):
+            st.session_state.pop("oauth_dest", None)
+            st.session_state.pop("creds_dest", None)
+            st.session_state["step1_done"] = False
+            st.session_state["step_dest_done"] = False
+            st.session_state.pop("dest_folder_id", None)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
 else:
-    # Mostrar flujo de autorización
-    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
+    # ⚠️ Importante: NO repetimos el título aquí para evitar el duplicado.
+    # Deja que pick_destination_oauth() renderice "1) Conectar Google PERSONAL (Drive/Sheets)".
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
-    # Una vez autenticado, marcamos paso como completo y colapsamos
     st.session_state["step1_done"] = True
     st.rerun()
 
-# --- Paso 2: Carpeta destino (opcional, con resumen/cambiar) ---
+# --- Paso 2: Carpeta destino (opcional) ---
 render_dest_summary_or_pick(drive_service, _me)
-
-# Hasta confirmar paso 2, no avanzamos
 if not st.session_state.get("step_dest_done"):
     st.stop()
 
-# --- Paso 3: Conectar Search Console (fuente) ---
+# --- Paso 3: SC (fuente) ---
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
@@ -289,11 +321,11 @@ sc_service = ensure_sc_client(creds_src)
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-# --- Paso 5: ejecutar ---
+# --- Paso 5: Ejecutar ---
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        dest_folder_id = st.session_state.get("dest_folder_id")  # puede ser None
+        dest_folder_id = st.session_state.get("dest_folder_id")
         sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
@@ -303,7 +335,7 @@ if analisis == "4":
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        dest_folder_id = st.session_state.get("dest_folder_id")  # puede ser None
+        dest_folder_id = st.session_state.get("dest_folder_id")
         sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
