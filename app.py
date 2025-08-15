@@ -32,13 +32,17 @@ apply_page_style(
 )
 
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    band_bg="transparent",
-    pinned=True,           # ← anclado
-    top_offset_px=42    # opcional, si querés un offset distinto al header
+    pinned=True,          # fijo al hacer scroll
+    nudge_px=-10,         # súbelo 10px (ajustá -6/-12...)
+    x_align="left",       # o "right" / "center"
+    x_offset_px=140,      # empuja a la derecha (si x_align="left")
+    z_index=3000          # por delante del header
 )
+
 
 # hide_old_logo_instances(LOGO_URL)  # opcional
 
