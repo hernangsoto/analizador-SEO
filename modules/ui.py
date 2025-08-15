@@ -128,42 +128,44 @@ def render_brand_header(
 
     if pinned:
         # Capa fija full-width debajo del header; contenido centrado al ancho de la app
-        st.markdown(
-            f"""
-            <style>
-            .brand-fixed {{
-              position: fixed;
-              top: {top_css};
-              left: 0;
-              width: 100%;
-              z-index: {z_index};
-              background: transparent !important;
-              pointer-events: none; /* no bloquea clicks del header */
-            }}
-            .brand-fixed .brand-inner {{
-              max-width: {container_max_px}px;
-              margin: 0 auto;
-              padding: 0 16px;
-              display: flex; align-items: center; justify-content: {justify};
-            }}
-            .brand-fixed img.brand-logo {{
-              {dim_css}
-              {img_margin}
-              image-rendering: -webkit-optimize-contrast;
-              object-fit: contain;
-              display: inline-block !important;
-              pointer-events: none;
-            }}
-            </style>
-            <div class="brand-fixed">
-              <div class="brand-inner">
-                <img class="brand-logo" src="{src}" alt="Brand" />
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
+        # dentro de render_brand_header(), rama if pinned:
+st.markdown(
+    f"""
+    <style>
+    .brand-fixed {{
+      position: fixed;
+      top: {top_css};
+      left: var(--brand-left, 0px);     /* ← dinámico */
+      width: var(--brand-width, 100%);  /* ← dinámico */
+      z-index: {z_index};
+      background: transparent !important;
+      pointer-events: none;
+      transition: left .18s ease, width .18s ease;  /* suave al abrir/cerrar sidebar */
+    }}
+    .brand-fixed .brand-inner {{
+      max-width: {container_max_px}px;
+      margin: 0 auto;
+      padding: 0 16px;
+      display: flex; align-items: center; justify-content: {justify};
+    }}
+    .brand-fixed img.brand-logo {{
+      {dim_css}
+      {img_margin}
+      image-rendering: -webkit-optimize-contrast;
+      object-fit: contain;
+      display: inline-block !important;
+      pointer-events: none;
+    }}
+    </style>
+    <div class="brand-fixed">
+      <div class="brand-inner">
+        <img class="brand-logo" src="{src}" alt="Brand" />
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+   else:
         # Variante sticky (fluye con el contenido)
         st.markdown(
             f"""
