@@ -296,7 +296,7 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
     st.subheader("2) Destino de la copia (opcional)")
-    dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente session_state["dest_folder_id"]
+    dest_folder_id = pick_destination(drive_service, _me, show_header=False)  # ← acá
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
     if st.button("Siguiente ⏭️", key="btn_next_step2"):
         st.session_state["step2_done"] = True
@@ -304,15 +304,15 @@ if not st.session_state["step2_done"]:
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    st.markdown(
-        f'''
-        <div class="success-inline">
-            Destino de la copia: <strong>{pretty}</strong>
-            <a href="?action=change_folder">(Cambiar carpeta)</a>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
+    col_l2, col_r2 = st.columns([4, 1])
+    with col_l2:
+        st.success(f"Destino de la copia: **{pretty}**")
+    with col_r2:
+        st.markdown('<div class="linkbox">', unsafe_allow_html=True)
+        if st.button("Cambiar carpeta", key="link_change_folder"):
+            st.session_state["step2_done"] = False
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 sc_service = None
