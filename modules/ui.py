@@ -14,15 +14,20 @@ import streamlit as st
 # Estilos / branding
 # =============================
 
-def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110) -> None:
+def apply_page_style(
+    page_bg: str = "#ffffff",          # color/fondo del body (puede ser blanco)
+    use_gradient: bool = False,        # si querés gradiente, poné True
+    band_height_px: int = 110,         # banda de fondo “decorativa” del body
+    header_bg: str = "#5c417c",        # ← color del header nativo
+    header_height_px: int = 56,        # alto aproximado del header nativo
+) -> None:
     """
-    Fondo con banda superior y header de Streamlit transparente
-    para que no tape nuestro header sticky.
+    Fondo y estilos globales + header nativo en el color deseado.
     """
     if use_gradient:
         css_bg = (
-            f"linear-gradient(180deg, {page_bg} 0, {page_bg} {band_height_px}px, "
-            f"#ffffff {band_height_px}px)"
+            f"linear-gradient(180deg, {header_bg} 0, {header_bg} {band_height_px}px, "
+            f"{page_bg} {band_height_px}px)"
         )
     else:
         css_bg = page_bg
@@ -33,14 +38,19 @@ def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_h
         .stApp {{
             background: {css_bg} !important;
         }}
-        /* Header nativo transparente para evitar que cubra nuestro banner */
+        /* Header nativo con tu color */
         header[data-testid="stHeader"] {{
-            background: transparent !important;
+            background: {header_bg} !important;
+            color: #fff !important;
+            min-height: {header_height_px}px;
+            box-shadow: none !important;
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
             fill: #fff !important;
         }}
+
+        /* margen superior normal del contenido */
         .block-container {{
             padding-top: 0.75rem !important;
         }}
