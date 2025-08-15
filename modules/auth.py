@@ -93,27 +93,25 @@ def get_cached_personal_creds() -> Optional[Credentials]:
 # =============================
 # OAuth PERSONAL (Drive/Sheets)
 # =============================
-def pick_destination_oauth() -> Optional[Credentials]:
+def pick_destination_oauth():
     """
-    Autentica la cuenta PERSONAL (donde se crearán/copiarán los Sheets).
-    - Si hay cache (token_store) devuelve directo.
-    - Si no, muestra el flujo de autorización con 'pegar URL'.
+    OAuth para la cuenta PERSONAL (Drive/Sheets).
+    - Genera la URL una sola vez por sesión.
+    - Verifica el 'state' devuelto en la URL pegada.
+    - Permite 'Reiniciar Paso 1' si hay mismatch.
     """
-    # 1) Cache
-    cached = get_cached_personal_creds()
-    if cached:
-        st.caption("🔐 Cuenta PERSONAL ya conectada (desde caché).")
-        return cached
-
-    # 2) Flujo de autorización
     st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # permite elegir qué client_id usar
-    # Reset si cambia la app key
+
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+
+    # Si cambia la app key (raro), resetea flujo
     if st.session_state.get("oauth_dest", {}).get("account_key") != acct_for_dest:
         st.session_state.pop("oauth_dest", None)
 
+    # Construye el flow y auth_url solo si no existe ya
     if "oauth_dest" not in st.session_state:
-        flow = build_flow(acct_for_dest, SCOPES_DRIVE)
+        from .utils import build_flow_drive  # tu helper que arma Flow con scopes de Drive/Sheets
+        flow = build_flow_drive(acct_for_dest)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -123,11 +121,12 @@ def pick_destination_oauth() -> Optional[Credentials]:
             "account_key": acct_for_dest,
             "flow": flow,
             "auth_url": auth_url,
-            "state": state,
+            "state": state,              # ← guardamos el state generado
         }
 
     od = st.session_state["oauth_dest"]
     st.markdown(f"🔗 **Paso A (personal):** [Autorizar Drive/Sheets]({od['auth_url']})")
+
     with st.expander("Ver/copiar URL de autorización (personal)"):
         st.code(od["auth_url"])
 
@@ -137,26 +136,66 @@ def pick_destination_oauth() -> Optional[Credentials]:
         placeholder="http://localhost/?code=...&state=...",
     )
 
+    col1, col2 = st.columns([1, 1])
     creds = None
-    if st.button("Conectar Google PERSONAL", type="primary"):
-        if not url.strip():
-            st.error("Pegá la URL completa de redirección (incluye code y state).")
-            st.stop()
-        try:
-            flow: Flow = od["flow"]
-            flow.fetch_token(authorization_response=url.strip())
-            creds = flow.credentials
-            token_store.save("creds_dest", creds_to_dict(creds))
-            st.success("Cuenta PERSONAL conectada.")
-        except Exception as e:
-            # invalidar flujo guardado para regenerar auth_url en el próximo intento
-            st.session_state.pop("oauth_dest", None)
-            st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
-            st.caption(f"Detalle técnico: {e}")
 
-    # Leer de cache si ya guardamos en este mismo run
-    if not creds:
-        creds = get_cached_personal_creds()
+    with col1:
+        if st.button("Conectar Google PERSONAL", type="primary", key="btn_connect_dest"):
+            if not url.strip():
+                st.error("Pegá la URL completa de redirección (incluye code y state).")
+                st.stop()
+
+            # --- Validar 'state' explícitamente antes de fetch_token ---
+            try:
+                qs = parse_qs(urlsplit(url.strip()).query)
+                returned_state = (qs.get("state") or [""])[0]
+            except Exception:
+                returned_state = ""
+
+            if not returned_state:
+                st.error("La URL pegada no contiene parámetro 'state'. Verificá que sea la URL completa.")
+                st.stop()
+
+            expected_state = od.get("state")
+            if returned_state != expected_state:
+                st.error(
+                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
+                    f"state esperado: `{expected_state}`\n"
+                    f"state recibido: `{returned_state}`"
+                )
+                st.info("Hacé clic en **Reiniciar Paso 1** y repetí la autorización (un solo click).")
+                st.stop()
+
+            # Si el state coincide, procedemos a intercambiar el code por tokens
+            try:
+                flow: Flow = od["flow"]
+                flow.fetch_token(authorization_response=url.strip())
+                creds = flow.credentials
+                st.session_state["creds_dest"] = {
+                    "token": creds.token,
+                    "refresh_token": getattr(creds, "refresh_token", None),
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": creds.scopes,
+                }
+                st.success("Cuenta PERSONAL conectada.")
+            except Exception as e:
+                st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
+                st.caption(f"Detalle técnico: {e}")
+                st.stop()
+
+    with col2:
+        if st.button("Reiniciar Paso 1", key="btn_reset_dest"):
+            # Limpia solo lo relacionado al flujo personal
+            st.session_state.pop("oauth_dest", None)
+            st.session_state.pop("creds_dest", None)
+            st.success("Restaurado. Volvé a hacer clic en 'Autorizar Drive/Sheets'.")
+            st.stop()
+
+    # Rehidratar desde cache si ya está autenticado
+    if not creds and st.session_state.get("creds_dest"):
+        creds = Credentials(**st.session_state["creds_dest"])
 
     return creds
 
