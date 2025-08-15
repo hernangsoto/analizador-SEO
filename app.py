@@ -82,7 +82,20 @@ st.set_page_config(
 if inject_styles:
     inject_styles()
 
-st.title("Análisis SEO – GSC → Google Sheets")
+from modules.ui import apply_page_style, render_brand_header
+
+# Aplica fondo: banda superior oscura y resto claro
+apply_page_style(page_bg="#0f172a", use_gradient=True)
+
+# Coloca el logo en la franja (arriba del título)
+render_brand_header(
+    "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png",
+    height_px=54,
+    band_bg="#0f172a",
+)
+
+
+st.title("Analizador SEO 📊")
 st.session_state.setdefault("DEBUG", DEBUG_DEFAULT)
 
 
