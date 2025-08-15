@@ -1,11 +1,9 @@
 # app.py
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
-
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
@@ -14,7 +12,8 @@ st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 from modules.ui import (
     apply_page_style,
     render_brand_header_once,
-    hide_old_logo_instances,
+    enable_brand_auto_align,
+    # hide_old_logo_instances,  # opcional
     get_user,
     sidebar_user_info,
     login_screen,
@@ -25,6 +24,7 @@ HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64  # ajustá si tu header se ve un poco más alto
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
+# Estilo general + header nativo
 apply_page_style(
     header_bg=HEADER_COLOR,
     header_height_px=HEADER_HEIGHT,
@@ -36,28 +36,25 @@ apply_page_style(
 # Si querés forzar rerender durante pruebas, descomentá:
 # st.session_state.pop("_brand_sig", None)
 
-# Logo anclado (fixed), sin recuadro ni sombra
-from modules.ui import apply_page_style, render_brand_header_once, enable_brand_auto_align
-
-apply_page_style(header_bg="#5c417c", header_height_px=64)
+# Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,
-    nudge_px=-42,       # si querés subir/bajar fino
-    x_align="left",
-    x_offset_px=140,
+    pinned=True,      # anclado
+    nudge_px=-42,     # negativo = subir; positivo = bajar
+    x_align="left",   # "left" | "center" | "right"
+    x_offset_px=140,  # mover a la derecha (si x_align="left")
     z_index=3000,
     container_max_px=1200,
 )
 
-# 🔧 Hace que el logo se ajuste al ancho/posición del contenido aunque abras/cierres la sidebar
+# Auto-alineación con el contenedor principal (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
-# Ocultar logos por defecto del tema (opcional)
+
+# Ocultar logos por defecto del tema (si querés)
 # hide_old_logo_instances()
 
 st.title("Análisis SEO – GSC ➜ Google Sheets")
-
 
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
@@ -70,7 +67,6 @@ if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
 else:
     from modules.analysis import run_core_update, run_evergreen  # type: ignore
     st.caption("🧩 Usando análisis embebidos en este repo.")
-
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
