@@ -41,7 +41,7 @@ render_brand_header_once(
     LOGO_URL,
     height_px=27,
     pinned=True,          # anclado
-    nudge_px=-30,          # negativo = subir; positivo = bajar
+    nudge_px=-42,          # negativo = subir; positivo = bajar
     x_align="left",       # "left" | "center" | "right"
     x_offset_px=140,      # mover a la derecha (si x_align="left")
     z_index=3000,         # por delante del header
