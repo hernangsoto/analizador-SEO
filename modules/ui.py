@@ -313,3 +313,54 @@ def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
     st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
+
+
+import streamlit.components.v1 as components
+
+def enable_brand_auto_align() -> None:
+    """
+    Sincroniza las variables CSS --brand-left y --brand-width con el
+    bounding box del .block-container (main content). Funciona en
+    resize y al abrir/cerrar la sidebar.
+    """
+    # Asegura el uso de las variables aunque el CSS ya las tenga
+    st.markdown(
+        """
+        <style>
+        .brand-fixed {
+          left: var(--brand-left, 0px) !important;
+          width: var(--brand-width, 100%) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    components.html(
+        """
+        <script>
+        (function() {
+          const doc = window.parent.document;
+
+          function updateVars() {
+            const bc = doc.querySelector('.block-container');
+            if (!bc) return;
+            const r = bc.getBoundingClientRect();
+            doc.documentElement.style.setProperty('--brand-left',  r.left + 'px');
+            doc.documentElement.style.setProperty('--brand-width', r.width + 'px');
+          }
+
+          // Observa cambios en el layout (sidebar, colapsos, etc.)
+          const obs = new MutationObserver(() => updateVars());
+          obs.observe(doc.body, { attributes: true, childList: true, subtree: true });
+
+          // Resize de ventana
+          window.addEventListener('resize', updateVars);
+
+          // Primera medición
+          updateVars();
+        })();
+        </script>
+        """,
+        height=0,
+    )
