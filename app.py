@@ -22,8 +22,8 @@ from modules.ui import (
 )
 apply_page_style(page_bg="#0f172a", use_gradient=True)
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
-render_brand_header_once(LOGO_URL, width_px=153, height_px=27, band_bg="#0f172a")
-hide_old_logo_instances(LOGO_URL)
+render_brand_header_once(LOGO_URL, height_px=27, band_bg="#0f172a")
+# hide_old_logo_instances(LOGO_URL)  # opcional, yo lo dejaría desactivado
 
 st.title("Análisis SEO – GSC ➜ Google Sheets")
 
