@@ -12,36 +12,26 @@ from urllib.parse import urlparse
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
 # Branding
-from modules.ui import (
-    apply_page_style,
-    render_brand_header_once,
-    hide_old_logo_instances,
-    get_user,
-    sidebar_user_info,
-    login_screen,
-)
-HEADER_COLOR = "#5c417c"
-HEADER_H = 68  # si tu header se ve más alto/bajo, ajustalo aquí
+from modules.ui import apply_page_style, render_brand_header_once
 
-apply_page_style(
-    page_bg="#ffffff",
-    use_gradient=False,
-    band_height_px=210,
-    header_bg=HEADER_COLOR,
-    header_height_px=HEADER_H,
-)
+apply_page_style(header_bg="#5c417c", header_height_px=64)
 
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+
+# Si estás probando y no se mueve, podés forzar borrando la firma:
+# st.session_state.pop("_brand_sig", None)
 
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,          # fijo al hacer scroll
-    nudge_px=-10,         # súbelo 10px (ajustá -6/-12...)
-    x_align="left",       # o "right" / "center"
-    x_offset_px=140,      # empuja a la derecha (si x_align="left")
-    z_index=3000          # por delante del header
+    pinned=True,        # fijo al hacer scroll
+    nudge_px=-8,        # negativo = subir; positivo = bajar
+    x_align="left",     # "left" | "center" | "right"
+    x_offset_px=140,    # mover hacia la derecha si x_align="left"
+    z_index=3000,       # por delante del header
+    container_max_px=1200,
 )
+
 
 
 # hide_old_logo_instances(LOGO_URL)  # opcional
