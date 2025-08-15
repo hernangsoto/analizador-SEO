@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components  # <- necesario para enable_brand_auto_align()
 
 
 # =============================
@@ -127,45 +128,44 @@ def render_brand_header(
         img_margin = ""  # center
 
     if pinned:
-        # Capa fija full-width debajo del header; contenido centrado al ancho de la app
-        # dentro de render_brand_header(), rama if pinned:
-st.markdown(
-    f"""
-    <style>
-    .brand-fixed {{
-      position: fixed;
-      top: {top_css};
-      left: var(--brand-left, 0px);     /* ← dinámico */
-      width: var(--brand-width, 100%);  /* ← dinámico */
-      z-index: {z_index};
-      background: transparent !important;
-      pointer-events: none;
-      transition: left .18s ease, width .18s ease;  /* suave al abrir/cerrar sidebar */
-    }}
-    .brand-fixed .brand-inner {{
-      max-width: {container_max_px}px;
-      margin: 0 auto;
-      padding: 0 16px;
-      display: flex; align-items: center; justify-content: {justify};
-    }}
-    .brand-fixed img.brand-logo {{
-      {dim_css}
-      {img_margin}
-      image-rendering: -webkit-optimize-contrast;
-      object-fit: contain;
-      display: inline-block !important;
-      pointer-events: none;
-    }}
-    </style>
-    <div class="brand-fixed">
-      <div class="brand-inner">
-        <img class="brand-logo" src="{src}" alt="Brand" />
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-   else:
+        # Capa fija full-width; left/width dinámicos para seguir al .block-container
+        st.markdown(
+            f"""
+            <style>
+            .brand-fixed {{
+              position: fixed;
+              top: {top_css};
+              left: var(--brand-left, 0px);     /* ← dinámico */
+              width: var(--brand-width, 100%);  /* ← dinámico */
+              z-index: {z_index};
+              background: transparent !important;
+              pointer-events: none; /* no bloquea clicks del header */
+              transition: left .18s ease, width .18s ease;  /* suave al abrir/cerrar sidebar */
+            }}
+            .brand-fixed .brand-inner {{
+              max-width: {container_max_px}px;
+              margin: 0 auto;
+              padding: 0 16px;
+              display: flex; align-items: center; justify-content: {justify};
+            }}
+            .brand-fixed img.brand-logo {{
+              {dim_css}
+              {img_margin}
+              image-rendering: -webkit-optimize-contrast;
+              object-fit: contain;
+              display: inline-block !important;
+              pointer-events: none;
+            }}
+            </style>
+            <div class="brand-fixed">
+              <div class="brand-inner">
+                <img class="brand-logo" src="{src}" alt="Brand" />
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
         # Variante sticky (fluye con el contenido)
         st.markdown(
             f"""
@@ -253,77 +253,12 @@ def hide_old_logo_instances() -> None:
     )
 
 
-# =============================
-# Helpers de usuario / Sidebar
-# =============================
-
-def get_user():
-    """Devuelve la info del usuario autenticado (st.user o experimental_user)."""
-    return getattr(st, "user", getattr(st, "experimental_user", None))
-
-
-def get_first_name(full_name: str | None) -> str:
-    if not full_name:
-        return "👋"
-    return full_name.split()[0]
-
-
-def sidebar_user_info(user):
-    """
-    Sidebar con avatar, nombre, email y utilidades de mantenimiento.
-    """
-    with st.sidebar:
-        with st.container():
-            c1, c2 = st.columns([1, 3], vertical_alignment="center")
-            with c1:
-                if getattr(user, "picture", None):
-                    try:
-                        r = requests.get(user.picture, timeout=5)
-                        if r.status_code == 200:
-                            st.image(r.content, width=64)
-                        else:
-                            st.warning("No se pudo cargar la imagen.")
-                    except Exception as e:
-                        st.warning(f"Error al cargar la imagen: {e}")
-                else:
-                    st.info("Sin imagen de perfil.")
-            with c2:
-                st.header("Información del usuario", anchor=False)
-                st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
-                st.write(f"**Correo:** {getattr(user, 'email', '—')}")
-
-        st.divider()
-        st.markdown("**🧹 Mantenimiento**")
-        if st.button(
-            "Borrar caché del paquete externo (.ext_pkgs/)",
-            key="btn_clean_extpkgs",
-            use_container_width=True,
-        ):
-            try:
-                shutil.rmtree(".ext_pkgs", ignore_errors=True)
-                st.success("✅ Caché borrada. Hacé *Rerun* para reinstalar el paquete externo.")
-            except Exception as e:
-                st.error(f"No pude borrar .ext_pkgs: {e}")
-
-        st.divider()
-        st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
-
-
-def login_screen():
-    st.header("Esta aplicación es privada.")
-    st.subheader("Por favor, inicia sesión.")
-    st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
-
-
-import streamlit.components.v1 as components
-
 def enable_brand_auto_align() -> None:
     """
-    Sincroniza las variables CSS --brand-left y --brand-width con el
-    bounding box del .block-container (main content). Funciona en
-    resize y al abrir/cerrar la sidebar.
+    Sincroniza --brand-left y --brand-width con el bounding box del .block-container.
+    Funciona en resize y al abrir/cerrar la sidebar.
     """
-    # Asegura el uso de las variables aunque el CSS ya las tenga
+    # Refuerzo CSS (por si el orden de inyección cambió)
     st.markdown(
         """
         <style>
@@ -364,3 +299,65 @@ def enable_brand_auto_align() -> None:
         """,
         height=0,
     )
+
+
+# =============================
+# Helpers de usuario / Sidebar
+# =============================
+
+def get_user():
+    """Devuelve la info del usuario autenticado (st.user o experimental_user)."""
+    return getattr(st, "user", getattr(st, "experimental_user", None))
+
+
+def get_first_name(full_name: str | None) -> str:
+    if not full_name:
+        return "👋"
+    return full_name.split()[0]
+
+
+def sidebar_user_info(user):
+    """
+    Sidebar con avatar, nombre, email y utilidades de mantenimiento.
+    """
+    with st.sidebar:
+        with st.container():
+            c1, c2 = st.columns([1, 3], vertical_alignment="center")
+            with c1:
+                if getattr(user, "picture", None):
+                    try:
+                        r = requests.get(user.picture, timeout=10)
+                        if r.status_code == 200:
+                            st.image(r.content, width=64)
+                        else:
+                            st.warning("No se pudo cargar la imagen.")
+                    except Exception as e:
+                        st.warning(f"Error al cargar la imagen: {e}")
+                else:
+                    st.info("Sin imagen de perfil.")
+            with c2:
+                st.header("Información del usuario", anchor=False)
+                st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
+                st.write(f"**Correo:** {getattr(user, 'email', '—')}")
+
+        st.divider()
+        st.markdown("**🧹 Mantenimiento**")
+        if st.button(
+            "Borrar caché del paquete externo (.ext_pkgs/)",
+            key="btn_clean_extpkgs",
+            use_container_width=True,
+        ):
+            try:
+                shutil.rmtree(".ext_pkgs", ignore_errors=True)
+                st.success("✅ Caché borrada. Hacé *Rerun* para reinstalar el paquete externo.")
+            except Exception as e:
+                st.error(f"No pude borrar .ext_pkgs: {e}")
+
+        st.divider()
+        st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
+
+
+def login_screen():
+    st.header("Esta aplicación es privada.")
+    st.subheader("Por favor, inicia sesión.")
+    st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
