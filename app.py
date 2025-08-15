@@ -10,6 +10,15 @@ from urllib.parse import urlparse
 
 # ====== Configuración base ======
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
+from modules.ui import apply_page_style, render_brand_header_once, hide_old_logo_instances
+
+# Banda al 50% de la altura anterior (110px), color #5c417c y header sticky
+apply_page_style(page_bg="#5c417c", use_gradient=True, band_height_px=110)
+
+LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+render_brand_header_once(LOGO_URL, width_px=153, height_px=27, band_bg="#5c417c")
+hide_old_logo_instances(LOGO_URL)
+
 
 # Branding
 from modules.ui import (
