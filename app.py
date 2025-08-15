@@ -76,18 +76,50 @@ from modules.gsc import ensure_sc_client
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
+
+    # 1) Traemos y normalizamos la lista (orden estable)
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
     except Exception as e:
         st.error(f"Error al obtener sitios: {e}")
         st.stop()
+
     verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
     if not verified:
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
-    site_url = st.selectbox("Sitio verificado:", [s["siteUrl"] for s in verified], key="site_select")
-    return site_url
+
+    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético y sin duplicados
+
+    # 2) Guardamos las opciones de forma estable en session_state
+    prev_options = st.session_state.get("site_options") or []
+    if prev_options != verified_urls:
+        st.session_state["site_options"] = verified_urls
+        # si la selección actual ya no existe, inicializamos con la primera
+        if st.session_state.get("site_selected") not in verified_urls:
+            st.session_state["site_selected"] = verified_urls[0]
+
+    options = st.session_state["site_options"]
+    current = st.session_state.get("site_selected", options[0])
+
+    # 3) Calculamos el index a partir de la selección persistida
+    try:
+        idx = options.index(current)
+    except ValueError:
+        idx = 0
+
+    # 4) Dibujamos el selector con key exclusiva (no reutilices "site_select" en otro lado)
+    choice = st.selectbox(
+        "Sitio verificado:",
+        options,
+        index=idx,
+        key="site_select_widget",  # clave única para este widget
+    )
+
+    # 5) Actualizamos la selección persistida
+    st.session_state["site_selected"] = choice
+    return choice
 
 
 def pick_analysis():
