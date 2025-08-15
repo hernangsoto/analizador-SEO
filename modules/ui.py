@@ -105,7 +105,7 @@ def render_brand_header(
     band_bg: str = "transparent",
     top_offset_px: int | None = None,   # None => usa --app-header-height
     pinned: bool = True,                # fijo al hacer scroll
-    nudge_px: int = -15,                  # ↑↓  (+ baja, − sube)
+    nudge_px: int = 15,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
     x_offset_px: int = 0,               # →←  (si left: positivo mueve a la derecha; si right: positivo mueve a la izquierda)
