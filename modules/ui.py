@@ -103,22 +103,26 @@ def _inline_logo_src(logo_url: str) -> str:
 
 def render_brand_header(
     logo_url: str,
-    width_px: int = 153,
-    height_px: int = 27,
+    width_px: int | None = None,   # ancho opcional, por compatibilidad
+    height_px: int = 27,           # ← fijamos altura, ancho auto
     band_bg: str = "#5c417c",
 ) -> None:
     """
-    Franja superior con logo (153x27), sticky, y logo embebido como data URI.
+    Franja superior con logo sticky.
+    Para evitar distorsión se fija SOLO la altura y se deja el ancho en auto.
     """
     src = _inline_logo_src(logo_url)
+    # CSS para que NO se distorsione: height fija, width auto
+    dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
+
     st.markdown(
         f"""
         <style>
-        /* Asegura que NUESTRO logo no se oculte por otras reglas */
         .brand-banner img.brand-logo {{
-            display:inline-block !important;
-            width:{width_px}px !important;
-            height:{height_px}px !important;
+            {dim_css}
+            image-rendering: -webkit-optimize-contrast;
+            object-fit: contain;
+            display: inline-block !important;
         }}
         </style>
         <div class="brand-banner" style="
@@ -127,10 +131,8 @@ def render_brand_header(
             margin: 0 0 12px 0;
             padding: 8px 16px;
             display: flex; align-items: center;
-            position: -webkit-sticky;   /* Safari */
-            position: sticky;
-            top: 0;
-            z-index: 999;
+            position: -webkit-sticky; position: sticky;
+            top: 0; z-index: 999;
             box-shadow: 0 4px 14px rgba(0,0,0,0.25);
         ">
             <img class="brand-logo" src="{src}" alt="Brand" />
@@ -142,15 +144,15 @@ def render_brand_header(
 
 def render_brand_header_once(
     logo_url: str,
-    width_px: int = 153,
+    width_px: int | None = None,
     height_px: int = 27,
     band_bg: str = "#5c417c",
 ) -> None:
-    """Evita renders duplicados del header en reruns."""
     if st.session_state.get("_brand_rendered"):
         return
     st.session_state["_brand_rendered"] = True
     render_brand_header(logo_url, width_px=width_px, height_px=height_px, band_bg=band_bg)
+
 
 
 def hide_old_logo_instances(logo_url: str) -> None:
