@@ -100,23 +100,36 @@ def _inline_logo_src(logo_url: str) -> str:
 
 def render_brand_header(
     logo_url: str,
-    width_px: int | None = None,     # opcional
-    height_px: int = 27,             # solo altura para no deformar
-    band_bg: str = "transparent",    # sin fondo
-    top_offset_px: int | None = None,# si None, usa --app-header-height
-    pinned: bool = True,             # ← True = anclado (fixed). False = sticky
+    width_px: int | None = None,
+    height_px: int = 27,
+    band_bg: str = "transparent",
+    top_offset_px: int | None = None,   # None => usa --app-header-height
+    pinned: bool = True,                # fijo al hacer scroll
+    nudge_px: int = 0,                  # ↑↓  (+ baja, − sube)
+    z_index: int = 3000,                # por delante del header
+    x_align: str = "left",              # "left" | "center" | "right"
+    x_offset_px: int = 0,               # →←  (positivo empuja hacia la derecha si left; hacia la izquierda si right)
+    container_max_px: int = 1200,       # ancho del contenido para alinear con la app
 ) -> None:
-    """
-    Franja/overlay del logo sin fondo ni sombra.
-      - pinned=True  → anclado (position: fixed) debajo del header nativo.
-      - pinned=False → queda sticky dentro del contenido.
-    """
     src = _inline_logo_src(logo_url)
     dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
-    top_css = f"{top_offset_px}px" if top_offset_px is not None else "var(--app-header-height)"
+
+    # top calculado
+    if top_offset_px is None:
+        top_css = f"calc(var(--app-header-height) {f'+{nudge_px}' if nudge_px>=0 else nudge_px}px)"
+    else:
+        top_css = f"calc({top_offset_px}px {f'+{nudge_px}' if nudge_px>=0 else nudge_px}px)"
+
+    # alineación horizontal
+    justify = {"left":"flex-start", "center":"center", "right":"flex-end"}.get(x_align, "flex-start")
+    if x_align == "left":
+        img_margin = f"margin-left:{x_offset_px}px;"
+    elif x_align == "right":
+        img_margin = f"margin-right:{x_offset_px}px;"
+    else:
+        img_margin = ""  # center
 
     if pinned:
-        # Capa full-width fija debajo del header; centramos con un contenedor interno
         st.markdown(
             f"""
             <style>
@@ -125,22 +138,23 @@ def render_brand_header(
               top: {top_css};
               left: 0;
               width: 100%;
-              z-index: 1200;
+              z-index: {z_index};
               background: transparent !important;
               pointer-events: none; /* no bloquea clics del header */
             }}
             .brand-fixed .brand-inner {{
-              max-width: 1200px;          /* ajustá si usás otro ancho */
+              max-width: {container_max_px}px;
               margin: 0 auto;
               padding: 0 16px;
-              display: flex; align-items: center;
-              pointer-events: auto;       /* el logo sí recibe hover/clic si hiciera falta */
+              display: flex; align-items: center; justify-content: {justify};
             }}
             .brand-fixed img.brand-logo {{
               {dim_css}
+              {img_margin}
               image-rendering: -webkit-optimize-contrast;
               object-fit: contain;
               display: inline-block !important;
+              pointer-events: none;
             }}
             </style>
             <div class="brand-fixed">
@@ -152,23 +166,22 @@ def render_brand_header(
             unsafe_allow_html=True,
         )
     else:
-        # Variante sticky (no anclada)
+        # versión sticky (por si la necesitás)
         st.markdown(
             f"""
             <style>
             .brand-banner {{
               background: transparent !important;
-              border-radius: 0 !important;
-              box-shadow: none !important;
               margin: 0 0 8px 0 !important;
               padding: 0 !important;
               position: -webkit-sticky; position: sticky;
               top: {top_css};
-              z-index: 1100;
-              display: flex; align-items: center;
+              z-index: {z_index};
+              display: flex; align-items: center; justify-content: {justify};
             }}
             .brand-banner img.brand-logo {{
               {dim_css}
+              {img_margin}
               image-rendering: -webkit-optimize-contrast;
               object-fit: contain;
               display: inline-block !important;
@@ -180,6 +193,7 @@ def render_brand_header(
             """,
             unsafe_allow_html=True,
         )
+
 
 
 def render_brand_header_once(
