@@ -85,6 +85,65 @@ def login_screen() -> None:
         except Exception as e:
             st.error("No se pudo iniciar sesión con Streamlit Auth.")
             st.caption(f"Detalle técnico (debug): {e}")
+# -----------------------------
+# Fondo y logo
+# -----------------------------
+# === Branding helpers ===
+import streamlit as st
+
+def apply_page_style(page_bg: str = "#0f172a", use_gradient: bool = True):
+    """
+    Estilos base de la página.
+    - page_bg: color base (oscuro recomendado para logo blanco)
+    - use_gradient: crea banda superior oscura y resto claro; si es False, todo el fondo es oscuro
+    """
+    if use_gradient:
+        # Banda superior oscura (200px) y resto claro
+        css_bg = f"linear-gradient(180deg, {page_bg} 0, {page_bg} 220px, #ffffff 220px)"
+    else:
+        # Todo oscuro
+        css_bg = page_bg
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: {css_bg} !important;
+        }}
+        /* afina el padding superior del contenido */
+        .block-container {{
+            padding-top: 0.75rem !important;
+        }}
+        /* oculta la barra de Streamlit default si no te gusta */
+        header[data-testid="stHeader"] {{
+            background: transparent !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_brand_header(logo_url: str,
+                        height_px: int = 54,
+                        band_bg: str = "#0f172a"):
+    """
+    Inserta una franja superior con el logo (izquierda).
+    Llamar justo antes del título principal.
+    """
+    st.markdown(
+        f"""
+        <div class="brand-banner" style="
+            background:{band_bg};
+            border-radius: 10px;
+            margin: 0 0 12px 0;
+            padding: 10px 16px;
+            display: flex; align-items: center;
+        ">
+            <img src="{logo_url}" alt="Brand" style="height:{height_px}px; display:block;" />
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------
