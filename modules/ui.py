@@ -9,6 +9,35 @@ import streamlit as st
 # =============================
 # Branding / estilos
 # =============================
+# — Incrusta el logo como data URI (evita CORS/bloqueos) —
+import base64
+from urllib.parse import quote
+
+def _inline_logo_src(logo_url: str) -> str:
+    """
+    Descarga el logo y devuelve un data: URI (png/svg inline).
+    Si falla, retorna la URL original.
+    """
+    try:
+        if logo_url.startswith("http"):
+            r = requests.get(logo_url, timeout=10)
+            if r.status_code == 200:
+                content_type = r.headers.get("Content-Type", "")
+                if "svg" in content_type or logo_url.lower().endswith(".svg"):
+                    # SVG como utf8 inline
+                    return f"data:image/svg+xml;utf8,{quote(r.text)}"
+                # PNG/JPG/etc → base64
+                b64 = base64.b64encode(r.content).decode("ascii")
+                mime = "image/png"
+                if "jpeg" in content_type or logo_url.lower().endswith(".jpg") or logo_url.lower().endswith(".jpeg"):
+                    mime = "image/jpeg"
+                elif "webp" in content_type or logo_url.lower().endswith(".webp"):
+                    mime = "image/webp"
+                return f"data:{mime};base64,{b64}"
+    except Exception:
+        pass
+    # Fallback: dejar la URL directa
+    return logo_url
 
 def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
     """
