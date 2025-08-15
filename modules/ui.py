@@ -108,7 +108,7 @@ def render_brand_header(
     nudge_px: int = -30,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
-    x_offset_px: int = 0,               # →←  (si left: positivo mueve a la derecha; si right: positivo mueve a la izquierda)
+    x_offset_px: int = 50,               # →←  (si left: positivo mueve a la derecha; si right: positivo mueve a la izquierda)
     container_max_px: int = 1200,       # ancho del contenido para alinear
 ) -> None:
     src = _inline_logo_src(logo_url)
