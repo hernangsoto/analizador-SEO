@@ -65,9 +65,12 @@ def parse_drive_id_from_any(s: str | None) -> str | None:
     return None
 
 
-def pick_destination(drive, identity: dict | None):
-    """UI para elegir carpeta destino (opcional) en la cuenta personal conectada."""
-    st.subheader("Destino de la copia (opcional)")
+
+def pick_destination(drive, identity: dict | None, show_header: bool = True):
+    """UI para elegir carpeta destino opcional (en la CUENTA autenticada)."""
+    if show_header:
+        st.subheader("Destino de la copia (opcional)")
+
     me_email = (identity or {}).get("emailAddress")
     if me_email:
         st.caption(f"Se creará en la cuenta conectada: **{me_email}**. Si no elegís carpeta, irá a **Mi unidad**.")
@@ -84,7 +87,7 @@ def pick_destination(drive, identity: dict | None):
     if folder_in:
         folder_id = parse_drive_id_from_any(folder_in)
         if not folder_id:
-            st.error("No pude extraer un ID de carpeta de ese valor. Pegá la URL de la carpeta o el ID plano.")
+            st.error("No pude extraer un ID de carpeta de ese valor. Probá pegar la URL de la carpeta o el ID plano.")
         else:
             try:
                 meta = (
