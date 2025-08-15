@@ -9,6 +9,56 @@ from typing import Any, Optional
 
 import streamlit as st
 
+# modules/utils.py  — helpers de OAuth para Drive/Sheets y Search Console
+from google_auth_oauthlib.flow import Flow
+import streamlit as st
+
+SCOPES_DRIVE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+SCOPES_GSC = [
+    "https://www.googleapis.com/auth/webmasters.readonly",
+]
+
+def _client_config_from_secrets(account_key: str) -> dict:
+    """
+    Lee client_id/client_secret desde st.secrets['accounts'][account_key]
+    y arma el client_config para google-auth.
+    """
+    try:
+        acc = st.secrets["accounts"][account_key]
+    except Exception:
+        st.error("No encontré las credenciales en st.secrets['accounts'][…].")
+        st.stop()
+    return {
+        "installed": {
+            "client_id": acc["client_id"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_secret": acc["client_secret"],
+            "redirect_uris": ["http://localhost"],
+        }
+    }
+
+def build_flow_with_scopes(account_key: str, scopes: list[str]) -> Flow:
+    """
+    Crea un Flow con los scopes que le pases y redirect http://localhost.
+    """
+    client_config = _client_config_from_secrets(account_key)
+    flow = Flow.from_client_config(client_config, scopes=scopes)
+    flow.redirect_uri = "http://localhost"
+    return flow
+
+def build_flow_drive(account_key: str) -> Flow:
+    """Flow para Drive/Sheets (cuenta PERSONAL)."""
+    return build_flow_with_scopes(account_key, SCOPES_DRIVE)
+
+def build_flow_sc(account_key: str) -> Flow:
+    """Flow para Search Console (cuentas ACCESO / ACCESO_MEDIOS)."""
+    return build_flow_with_scopes(account_key, SCOPES_GSC)
+
 
 # =============================
 # Debug helpers
