@@ -37,16 +37,22 @@ apply_page_style(
 # st.session_state.pop("_brand_sig", None)
 
 # Logo anclado (fixed), sin recuadro ni sombra
+from modules.ui import apply_page_style, render_brand_header_once, enable_brand_auto_align
+
+apply_page_style(header_bg="#5c417c", header_height_px=64)
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,          # anclado
-    nudge_px=-42,          # negativo = subir; positivo = bajar
-    x_align="left",       # "left" | "center" | "right"
-    x_offset_px=140,      # mover a la derecha (si x_align="left")
-    z_index=3000,         # por delante del header
-    container_max_px=1200 # alineado con el contenido
+    pinned=True,
+    nudge_px=-42,       # si querés subir/bajar fino
+    x_align="left",
+    x_offset_px=140,
+    z_index=3000,
+    container_max_px=1200,
 )
+
+# 🔧 Hace que el logo se ajuste al ancho/posición del contenido aunque abras/cierres la sidebar
+enable_brand_auto_align()
 # Ocultar logos por defecto del tema (opcional)
 # hide_old_logo_instances()
 
