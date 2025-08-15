@@ -20,9 +20,26 @@ from modules.ui import (
     sidebar_user_info,
     login_screen,
 )
-apply_page_style(page_bg="#0f172a", use_gradient=True)
+HEADER_COLOR = "#5c417c"
+HEADER_H = 56
+
+apply_page_style(
+    page_bg="#ffffff",          # o el que prefieras para el fondo
+    use_gradient=False,         # opcional
+    band_height_px=110,         # opcional (si usás gradiente)
+    header_bg=HEADER_COLOR,
+    header_height_px=HEADER_H,
+)
+
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
-render_brand_header_once(LOGO_URL, height_px=27, band_bg="#0f172a", top_offset_px=56)
+render_brand_header_once(
+    LOGO_URL,
+    height_px=27,
+    band_bg=HEADER_COLOR,
+    top_offset_px=HEADER_H,     # ← coincide con el alto del header
+)
+# hide_old_logo_instances(LOGO_URL)  # opcional
+
 
 # Mejor dejar desactivado mientras pruebas:
 # hide_old_logo_instances(LOGO_URL)
