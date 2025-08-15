@@ -37,9 +37,6 @@ apply_page_style(
     band_height_px=110,
 )
 
-# (opcional) Si alguna vez desaparece el banner, podés forzar reinyección:
-# st.session_state.pop("_brand_sig", None)
-
 # Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
 render_brand_header_once(
     LOGO_URL,
@@ -54,7 +51,7 @@ render_brand_header_once(
 # Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
-# ====== Estilos globales (botones morados + links estilo texto) ======
+# ====== Estilos globales (botones morados + links + pills #b4a7d6) ======
 st.markdown("""
 <style>
 /* Botones morado #8e7cc3 */
@@ -77,8 +74,22 @@ st.markdown("""
   text-decoration: underline !important;
   box-shadow: none !important;
 }
+
+/* Pills color #b4a7d6 */
+.pill {
+  display:inline-block;
+  padding:.40rem .80rem;
+  border-radius:9999px;
+  background:#b4a7d6;
+  color:#1f1f1f;
+  font-weight:600;
+  line-height:1;
+}
 </style>
 """, unsafe_allow_html=True)
+
+def pill(texto: str) -> str:
+    return f'<span class="pill">{texto}</span>'
 
 st.title("Analizador SEO 🚀")
 
@@ -224,7 +235,7 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (verde)
+# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (en pill #b4a7d6)
 drive_service = None
 gs_client = None
 _me = None
@@ -237,7 +248,7 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
     col_l, col_r = st.columns([4, 1])
     with col_l:
-        st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
+        st.markdown(pill(f"Los archivos se guardarán en el Drive de: {email_txt}"), unsafe_allow_html=True)
     with col_r:
         st.markdown('<div class="linkbox">', unsafe_allow_html=True)
         if st.button("Cambiar mail personal", key="link_change_personal"):
@@ -262,7 +273,7 @@ else:
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
     col_l2, col_r2 = st.columns([4, 1])
     with col_l2:
-        st.success(f"Destino de la copia: **{pretty}**")
+        st.markdown(pill(f"Destino de la copia: {pretty}"), unsafe_allow_html=True)
     with col_r2:
         st.markdown('<div class="linkbox">', unsafe_allow_html=True)
         if st.button("Cambiar carpeta", key="link_change_folder"):
