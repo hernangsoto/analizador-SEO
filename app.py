@@ -8,7 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
-from google.oauth2.credentials import Credentials  # ← para rehidratar desde session_state
+from google.oauth2.credentials import Credentials
 
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
@@ -72,11 +72,9 @@ from modules.drive import (
 from modules.gsc import ensure_sc_client
 
 
-# ====== Pequeñas utilidades UI (parámetros y selección) ======
+# ====== Helpers UI (sitio / análisis / parámetros) ======
 def pick_site(sc_service):
-    st.subheader("2) Elegí el sitio a trabajar (Search Console)")
-
-    # Traer y normalizar la lista (orden estable)
+    st.subheader("3) Elegí el sitio a trabajar (Search Console)")  # numeración corre a partir del colapso
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -89,9 +87,8 @@ def pick_site(sc_service):
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético + sin duplicados
+    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden estable + sin duplicados
 
-    # Persistir opciones/selección
     prev_options = st.session_state.get("site_options") or []
     if prev_options != verified_urls:
         st.session_state["site_options"] = verified_urls
@@ -100,7 +97,6 @@ def pick_site(sc_service):
 
     options = st.session_state["site_options"]
     current = st.session_state.get("site_selected", options[0])
-
     try:
         idx = options.index(current)
     except ValueError:
@@ -117,7 +113,7 @@ def pick_site(sc_service):
 
 
 def pick_analysis():
-    st.subheader("3) Elegí el tipo de análisis")
+    st.subheader("4) Elegí el tipo de análisis")
     opciones = {
         "1. Análisis de entidades (🚧 próximamente)": "1",
         "2. Análisis de tráfico general (🚧 próximamente)": "2",
@@ -164,7 +160,6 @@ def params_for_evergreen():
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
 
-    # Ventana de 16 meses completos
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
@@ -183,7 +178,7 @@ if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
-# 👉 Callback para inyectar UI extra dentro de “🧹 Mantenimiento” (sidebar)
+# 👉 Sidebar: “Mantenimiento” con extras
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -191,57 +186,73 @@ def maintenance_extra_ui():
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-# Sidebar info (con “Mantenimiento” extendido)
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
-# --- Paso 1: OAuth PERSONAL (Drive/Sheets) ---
-st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
+# ====== Navegación por pasos con colapso ======
+st.session_state.setdefault("step1_done", False)
+st.session_state.setdefault("step_dest_done", False)
 
-creds_dest = None
+# --- Paso 1: OAuth PERSONAL (Drive/Sheets) ---
+creds_dest: Credentials | None = None
 drive_service = None
 gs_client = None
 _me = None
 
-# Si YA está autenticado, ocultamos el flujo y mostramos resumen + botón "Cambiar"
-if st.session_state.get("creds_dest"):
+if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
+    # Paso 1 colapsado → solo resumen + botón "Cambiar"
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
     email_txt = (_me or {}).get("emailAddress", "?")
     st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
     if st.button("Cambiar mail personal", key="btn_change_personal"):
-        # Limpia todo lo relacionado al Paso 1
         st.session_state.pop("oauth_dest", None)
         st.session_state.pop("creds_dest", None)
+        st.session_state["step1_done"] = False
+        st.session_state["step_dest_done"] = False
         st.session_state.pop("dest_folder_id", None)
         st.rerun()
 else:
-    # Mostrar el flujo normal de OAuth si no hay credenciales
+    # Mostrar flujo de autorización
+    st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
-    drive_service, gs_client = ensure_drive_clients(creds_dest)
-    _me = get_google_identity(drive_service)
-    email_txt = (_me or {}).get("emailAddress", "?")
-    st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
+    # Una vez autenticado, marcamos paso como completo y colapsamos
+    st.session_state["step1_done"] = True
+    st.rerun()
 
-# Carpeta destino opcional (se mantiene igual)
-dest_folder_id = pick_destination(drive_service, _me)
+# --- Paso 2: Carpeta destino (opcional) ---
+if not st.session_state["step_dest_done"]:
+    st.subheader("2) Elegí carpeta destino (opcional)")
+    dest_folder_id = pick_destination(drive_service, _me)  # guarda en session_state internamente si es válido
 
-# --- Paso 2: Conectar Search Console (fuente) ---
+    # Botón Siguiente: colapsa el paso
+    if st.button("⏭️ Siguiente", key="btn_next_dest", type="primary"):
+        st.session_state["step_dest_done"] = True
+        st.rerun()
+else:
+    # Paso 2 colapsado (no mostramos UI de carpeta)
+    pass
+
+# --- Paso 3: Conectar Search Console (fuente) ---
+if not st.session_state["step_dest_done"]:
+    st.stop()  # esperamos a que el usuario termine Paso 2
+
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
 sc_service = ensure_sc_client(creds_src)
 
-# --- Paso 3: sitio + análisis ---
+# --- Paso 4: Sitio + análisis ---
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-# --- Paso 4: ejecutar ---
+# --- Paso 5: ejecutar ---
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+        dest_folder_id = st.session_state.get("dest_folder_id")  # puede ser None
         sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
@@ -251,6 +262,7 @@ if analisis == "4":
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
+        dest_folder_id = st.session_state.get("dest_folder_id")  # puede ser None
         sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
