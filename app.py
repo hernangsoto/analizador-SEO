@@ -69,6 +69,20 @@ LOTTIE_LOADER = st.secrets.get("lottie", {}).get(
 )
 
 # =============================
+# LOGO NOMADIC
+# =============================
+from modules.ui import apply_page_style, render_brand_header
+
+apply_page_style(page_bg="#0f172a", use_gradient=True)
+
+render_brand_header(
+    "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png",
+    width_px=153,
+    height_px=27,
+    band_bg="#0f172a",
+)
+# =============================
+# =============================
 # Configuración de la app
 # =============================
 DEBUG_DEFAULT = bool(st.secrets.get("debug", False))
