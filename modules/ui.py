@@ -316,9 +316,13 @@ def get_first_name(full_name: str | None) -> str:
     return full_name.split()[0]
 
 
-def sidebar_user_info(user):
+# modules/ui.py  — reemplazar solo esta función
+
+def sidebar_user_info(user, maintenance_extra=None):
     """
     Sidebar con avatar, nombre, email y utilidades de mantenimiento.
+    Podés inyectar controles extra dentro de 'Mantenimiento' pasando
+    un callback en maintenance_extra().
     """
     with st.sidebar:
         with st.container():
@@ -342,6 +346,12 @@ def sidebar_user_info(user):
 
         st.divider()
         st.markdown("**🧹 Mantenimiento**")
+
+        # 🔌 Elementos extra dentro de "Mantenimiento"
+        if callable(maintenance_extra):
+            maintenance_extra()
+
+        # Botón para limpiar paquete externo
         if st.button(
             "Borrar caché del paquete externo (.ext_pkgs/)",
             key="btn_clean_extpkgs",
@@ -355,6 +365,7 @@ def sidebar_user_info(user):
 
         st.divider()
         st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
+
 
 
 def login_screen():
