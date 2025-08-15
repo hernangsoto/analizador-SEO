@@ -11,35 +11,6 @@ import streamlit as st
 # Branding / estilos
 # =============================
 
-def apply_page_style(page_bg: str = "#0f172a", use_gradient: bool = True):
-    """
-    Aplica estilos globales.
-    - use_gradient=True: banda superior oscura de ~220px y resto claro.
-    - use_gradient=False: toda la página del color `page_bg`.
-    """
-    if use_gradient:
-        css_bg = f"linear-gradient(180deg, {page_bg} 0, {page_bg} 220px, #ffffff 220px)"
-    else:
-        css_bg = page_bg
-
-    st.markdown(
-        f"""
-        <style>
-        .stApp {{
-            background: {css_bg} !important;
-        }}
-        .block-container {{
-            padding-top: 0.75rem !important;
-        }}
-        header[data-testid="stHeader"] {{
-            background: transparent !important;
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def apply_page_style(page_bg: str = "#5c417c", use_gradient: bool = True, band_height_px: int = 110):
     """
     Aplica estilos globales.
@@ -97,6 +68,39 @@ def render_brand_header(
                  width="{width_px}" height="{height_px}"
                  style="width:{width_px}px;height:{height_px}px;display:block;" />
         </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_brand_header_once(
+    logo_url: str,
+    width_px: int = 153,
+    height_px: int = 27,
+    band_bg: str = "#5c417c",
+):
+    """Evita renders duplicados del header en reruns."""
+    if st.session_state.get("_brand_rendered"):
+        return
+    st.session_state["_brand_rendered"] = True
+    render_brand_header(logo_url, width_px=width_px, height_px=height_px, band_bg=band_bg)
+
+
+def hide_old_logo_instances(logo_url: str):
+    """
+    Parche CSS: si el logo se estaba renderizando en otra parte,
+    lo oculta en todos lados, excepto en nuestra .brand-banner.
+    """
+    st.markdown(
+        f"""
+        <style>
+        img[src*="{logo_url}"] {{
+          display:none !important;
+        }}
+        .brand-banner img {{
+          display:inline-block !important;
+        }}
+        </style>
         """,
         unsafe_allow_html=True,
     )
