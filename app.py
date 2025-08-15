@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import os
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"   # permite http://localhost
-os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"    # tolera órdenes/espacios en scopes
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
-
+from google.oauth2.credentials import Credentials  # ← para rehidratar desde session_state
 
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
@@ -36,7 +36,6 @@ apply_page_style(
     band_height_px=110,
 )
 
-# st.session_state.pop("_brand_sig", None)  # (opcional) forzar re-render del banner
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
@@ -77,7 +76,7 @@ from modules.gsc import ensure_sc_client
 def pick_site(sc_service):
     st.subheader("2) Elegí el sitio a trabajar (Search Console)")
 
-    # 1) Traemos y normalizamos la lista (orden estable)
+    # Traer y normalizar la lista (orden estable)
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -90,34 +89,29 @@ def pick_site(sc_service):
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
 
-    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético y sin duplicados
+    verified_urls = sorted({s["siteUrl"] for s in verified})  # orden alfabético + sin duplicados
 
-    # 2) Guardamos las opciones de forma estable en session_state
+    # Persistir opciones/selección
     prev_options = st.session_state.get("site_options") or []
     if prev_options != verified_urls:
         st.session_state["site_options"] = verified_urls
-        # si la selección actual ya no existe, inicializamos con la primera
         if st.session_state.get("site_selected") not in verified_urls:
             st.session_state["site_selected"] = verified_urls[0]
 
     options = st.session_state["site_options"]
     current = st.session_state.get("site_selected", options[0])
 
-    # 3) Calculamos el index a partir de la selección persistida
     try:
         idx = options.index(current)
     except ValueError:
         idx = 0
 
-    # 4) Dibujamos el selector con key exclusiva (no reutilices "site_select" en otro lado)
     choice = st.selectbox(
         "Sitio verificado:",
         options,
         index=idx,
-        key="site_select_widget",  # clave única para este widget
+        key="site_select_widget",
     )
-
-    # 5) Actualizamos la selección persistida
     st.session_state["site_selected"] = choice
     return choice
 
@@ -201,25 +195,43 @@ def maintenance_extra_ui():
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
 # --- Paso 1: OAuth PERSONAL (Drive/Sheets) ---
-creds_dest = pick_destination_oauth()
-if not creds_dest:
-    st.stop()
+st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
 
-drive_service, gs_client = ensure_drive_clients(creds_dest)
-_me = get_google_identity(drive_service)
-if _me:
-    st.success(f"Los archivos se guardarán en el Drive de: **{_me.get('emailAddress','?')}**")
+creds_dest = None
+drive_service = None
+gs_client = None
+_me = None
+
+# Si YA está autenticado, ocultamos el flujo y mostramos resumen + botón "Cambiar"
+if st.session_state.get("creds_dest"):
+    creds_dest = Credentials(**st.session_state["creds_dest"])
+    drive_service, gs_client = ensure_drive_clients(creds_dest)
+    _me = get_google_identity(drive_service)
+    email_txt = (_me or {}).get("emailAddress", "?")
+    st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
+    if st.button("Cambiar mail personal", key="btn_change_personal"):
+        # Limpia todo lo relacionado al Paso 1
+        st.session_state.pop("oauth_dest", None)
+        st.session_state.pop("creds_dest", None)
+        st.session_state.pop("dest_folder_id", None)
+        st.rerun()
 else:
-    st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
+    # Mostrar el flujo normal de OAuth si no hay credenciales
+    creds_dest = pick_destination_oauth()
+    if not creds_dest:
+        st.stop()
+    drive_service, gs_client = ensure_drive_clients(creds_dest)
+    _me = get_google_identity(drive_service)
+    email_txt = (_me or {}).get("emailAddress", "?")
+    st.success(f"Los archivos se guardarán en el Drive de: **{email_txt}**")
 
-# Carpeta destino opcional
+# Carpeta destino opcional (se mantiene igual)
 dest_folder_id = pick_destination(drive_service, _me)
 
 # --- Paso 2: Conectar Search Console (fuente) ---
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
-
 sc_service = ensure_sc_client(creds_src)
 
 # --- Paso 3: sitio + análisis ---
