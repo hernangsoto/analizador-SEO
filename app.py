@@ -65,13 +65,13 @@ st.markdown("""
   filter: brightness(0.93);
 }
 
-/* "Pills" de resumen */
+/* "Pills" de resumen – NUEVO color */
 .pill {
   display:inline-block;
-  padding:.35rem .75rem;
+  padding:.40rem .80rem;
   border-radius:9999px;
-  background:#8e7cc3;
-  color:#fff;
+  background:#b4a7d6;     /* ← color pedido */
+  color:#1f1f1f;          /* texto oscuro para contraste */
   font-weight:600;
   line-height:1;
 }
@@ -285,7 +285,11 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
 
     col_l, col_r = st.columns([5, 1])
     with col_l:
-        st.markdown(f"Los archivos se guardarán en el Drive de: {pill(email_txt)}", unsafe_allow_html=True)
+    st.markdown(
+        pill(f"Los archivos se guardarán en el Drive de: {email_txt}"),
+        unsafe_allow_html=True
+    )
+
     with col_r:
         st.markdown('<div class="linkbox">', unsafe_allow_html=True)
         if st.button("Cambiar mail personal", key="btn_change_personal"):
