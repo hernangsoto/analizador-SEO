@@ -15,14 +15,15 @@ import streamlit as st
 # =============================
 
 def apply_page_style(
-    page_bg: str = "#ffffff",          # color/fondo del body (puede ser blanco)
-    use_gradient: bool = False,        # si querés gradiente, poné True
-    band_height_px: int = 110,         # banda de fondo “decorativa” del body
-    header_bg: str = "#5c417c",        # ← color del header nativo
-    header_height_px: int = 56,        # alto aproximado del header nativo
+    page_bg: str = "#ffffff",
+    use_gradient: bool = False,
+    band_height_px: int = 110,
+    header_bg: str = "#5c417c",
+    header_height_px: int = 64,   # ← alto real del header (ajustable)
 ) -> None:
     """
-    Fondo y estilos globales + header nativo en el color deseado.
+    Fondo + header nativo con tu color. Define --app-header-height para que
+    el banner use exactamente la misma altura de offset.
     """
     if use_gradient:
         css_bg = (
@@ -36,21 +37,21 @@ def apply_page_style(
         f"""
         <style>
         .stApp {{
+            --app-header-height: {header_height_px}px;   /* ← clave */
             background: {css_bg} !important;
         }}
-        /* Header nativo con tu color */
         header[data-testid="stHeader"] {{
             background: {header_bg} !important;
             color: #fff !important;
-            min-height: {header_height_px}px;
+            min-height: var(--app-header-height);
+            height: var(--app-header-height);
             box-shadow: none !important;
+            z-index: 1000;  /* por si tu tema lo cambia */
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
             fill: #fff !important;
         }}
-
-        /* margen superior normal del contenido */
         .block-container {{
             padding-top: 0.75rem !important;
         }}
@@ -99,13 +100,14 @@ def _inline_logo_src(logo_url: str) -> str:
 
 def render_brand_header(
     logo_url: str,
-    width_px: int | None = None,   # opcional
-    height_px: int = 27,           # fijamos SOLO altura para no deformar
+    width_px: int | None = None,
+    height_px: int = 27,           # fijamos SOLO altura (proporción correcta)
     band_bg: str = "#5c417c",
-    top_offset_px: int = 56,       # queda por debajo del header nativo
+    top_offset_px: int | None = None,  # si None, usa la variable CSS del header
 ) -> None:
     src = _inline_logo_src(logo_url)
-    dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
+    dim_css = "height:%dpx !important; width:auto !important; max-width:100%% !important;" % height_px
+    top_css = f"{top_offset_px}px" if top_offset_px is not None else "var(--app-header-height)"
 
     st.markdown(
         f"""
@@ -119,14 +121,14 @@ def render_brand_header(
         </style>
         <div class="brand-banner" style="
             background:{band_bg};
-            border-radius: 10px;
-            margin: 0 0 12px 0;
-            padding: 8px 16px;
-            display: flex; align-items: center;
-            position: -webkit-sticky; position: sticky;
-            top: {top_offset_px}px;
-            z-index: 1000;
-            box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+            border-radius:10px;
+            margin:0 0 12px 0;
+            padding:8px 16px;
+            display:flex; align-items:center;
+            position:-webkit-sticky; position:sticky;
+            top:{top_css};             /* ← exactamente debajo del header */
+            z-index: 1100;             /* por encima del contenido */
+            box-shadow:0 4px 14px rgba(0,0,0,.25);
         ">
             <img class="brand-logo" src="{src}" alt="Brand" />
         </div>
@@ -140,9 +142,8 @@ def render_brand_header_once(
     width_px: int | None = None,
     height_px: int = 27,
     band_bg: str = "#5c417c",
-    top_offset_px: int = 56,
+    top_offset_px: int | None = None,
 ) -> None:
-    """Evita renders duplicados del header en reruns."""
     if st.session_state.get("_brand_rendered"):
         return
     st.session_state["_brand_rendered"] = True
