@@ -12,11 +12,15 @@ from urllib.parse import urlparse
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
 # Branding
-from modules.ui import apply_page_style, render_brand_header_once
+from modules.ui import (
+    apply_page_style,
+    render_brand_header_once,
+    hide_old_logo_instances,
+    get_user,            # ← AÑADIR ESTO
+    sidebar_user_info,
+    login_screen,
+)
 
-apply_page_style(header_bg="#5c417c", header_height_px=64)
-
-LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 
 # Si estás probando y no se mueve, podés forzar borrando la firma:
 # st.session_state.pop("_brand_sig", None)
