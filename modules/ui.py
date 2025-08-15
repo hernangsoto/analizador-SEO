@@ -252,13 +252,13 @@ def hide_old_logo_instances() -> None:
         unsafe_allow_html=True,
     )
 
-
 def enable_brand_auto_align() -> None:
     """
     Sincroniza --brand-left y --brand-width con el bounding box del .block-container.
     Funciona en resize y al abrir/cerrar la sidebar.
+    Además, oculta visualmente el iframe sensor (4a).
     """
-    # Refuerzo CSS (por si el orden de inyección cambió)
+    # Refuerzo CSS para la posición/ancho del logo fijo
     st.markdown(
         """
         <style>
@@ -266,11 +266,29 @@ def enable_brand_auto_align() -> None:
           left: var(--brand-left, 0px) !important;
           width: var(--brand-width, 100%) !important;
         }
+
+        /* 4a) OCULTAR SOLO el iframe sensor de auto-align
+           Lo identificamos porque su atributo srcdoc contiene '--brand-left' */
+        iframe.stIFrame[srcdoc*="--brand-left"] {
+          width: 0 !important;
+          height: 0 !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+          border: 0 !important;
+          display: block !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        /* A veces Streamlit agrega un div spacer inmediatamente después del iframe */
+        iframe.stIFrame[srcdoc*="--brand-left"] + div {
+          display: none !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+    # Iframe/sensor que mide el contenedor y actualiza variables CSS
     components.html(
         """
         <script>
@@ -297,7 +315,7 @@ def enable_brand_auto_align() -> None:
         })();
         </script>
         """,
-        height=0,
+        height=0,  # mantenemos 0; el CSS anterior lo oculta por completo
     )
 
 
