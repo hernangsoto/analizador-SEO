@@ -272,7 +272,7 @@ def enable_brand_auto_align() -> None:
         iframe.stIFrame[srcdoc*="--brand-left"] {
           width: 0 !important;
           height: 0 !important;
-          opacity: 0 !important;
+          opacity: 2 !important;
           pointer-events: none !important;
           border: 0 !important;
           display: block !important;
