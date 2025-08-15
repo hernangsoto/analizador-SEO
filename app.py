@@ -1,31 +1,48 @@
 # app.py
 from __future__ import annotations
-from modules.lottie import lottie_spinner, lottie
 
 import os
+from datetime import date, timedelta
+
 import streamlit as st
+import pandas as pd
+from urllib.parse import urlparse
 
-# Permitir http://localhost en el authorization_response (cuando pegás la URL)
-os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
-# Tolerar diferencias de orden/espacios en scopes
-os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+# ====== Configuración base ======
+st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
-# =============================
-# Imports de módulos propios
-# =============================
+# Branding
 from modules.ui import (
+    apply_page_style,
+    render_brand_header_once,
+    hide_old_logo_instances,
     get_user,
-    login_screen,
     sidebar_user_info,
-    pick_site,
-    pick_analysis,
-    params_for_core_update,
-    params_for_evergreen,
+    login_screen,
 )
-from modules.auth import (
-    pick_destination_oauth,   # OAuth personal (Drive/Sheets)
-    pick_source_oauth,        # OAuth fuente (Search Console)
-)
+apply_page_style(page_bg="#0f172a", use_gradient=True)
+LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+render_brand_header_once(LOGO_URL, width_px=153, height_px=27, band_bg="#0f172a")
+hide_old_logo_instances(LOGO_URL)
+
+st.title("Análisis SEO – GSC ➜ Google Sheets")
+
+# ====== Utils / paquete externo ======
+from modules.utils import debug_log, ensure_external_package
+
+# Intentar cargar funciones desde repo externo (si está configurado)
+_ext = ensure_external_package()
+if _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"):
+    run_core_update = _ext.run_core_update
+    run_evergreen = _ext.run_evergreen
+    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
+else:
+    # Fallback a implementaciones locales
+    from modules.analysis import run_core_update, run_evergreen  # type: ignore
+    st.caption("🧩 Usando análisis embebidos en este repo.")
+
+# ====== OAuth / clientes ======
+from modules.auth import pick_destination_oauth, pick_source_oauth
 from modules.drive import (
     ensure_drive_clients,
     get_google_identity,
@@ -34,196 +51,141 @@ from modules.drive import (
 )
 from modules.gsc import ensure_sc_client
 
-# --- utils con fallback seguro (por si hubiera error de import) ---
-try:
-    from modules.utils import debug_log, ensure_external_package
-except Exception as _uerr:  # fallback mínimo
-    st.warning(f"No pude cargar modules.utils: {_uerr}")
-
-    def debug_log(msg: str, data=None):
-        if st.session_state.get("DEBUG"):
-            st.info(str(msg))
-            if data is not None:
-                try:
-                    import json
-                    st.code(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-                except Exception:
-                    st.code(str(data))
-
-    def ensure_external_package(config_key: str = "external_pkg"):
-        return None
-
-# (Opcional) estilos
-try:
-    from modules.style import inject as inject_styles
-except Exception:
-    inject_styles = None
-
-# =============================
-# LOTTIE
-# =============================
-
-LOTTIE_LOADER = st.secrets.get("lottie", {}).get(
-    "loader_url",
-    "https://assets2.lottiefiles.com/packages/lf20_usmfx6bp.json"  # ejemplo
-)
-
-# =============================
-# LOGO NOMADIC
-# =============================
-from modules.ui import apply_page_style, render_brand_header
-
-apply_page_style(page_bg="#0f172a", use_gradient=True)
-
-render_brand_header(
-    "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png",
-    width_px=153,
-    height_px=27,
-    band_bg="#0f172a",
-)
-# =============================
-# =============================
-# Configuración de la app
-# =============================
-DEBUG_DEFAULT = bool(st.secrets.get("debug", False))
-
-st.set_page_config(
-    layout="wide",
-    page_title="Análisis SEO",
-    page_icon="📊",
-)
-
-if inject_styles:
-    inject_styles()
-
-from modules.ui import apply_page_style, render_brand_header
-
-# Aplica fondo: banda superior oscura y resto claro
-apply_page_style(page_bg="#0f172a", use_gradient=True)
-
-# Coloca el logo en la franja (arriba del título)
-render_brand_header(
-    "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png",
-    height_px=54,
-    band_bg="#0f172a",
-)
-
-
-st.title("Analizador SEO 📊")
-st.session_state.setdefault("DEBUG", DEBUG_DEFAULT)
-
-
-# =============================
-# Cargar análisis (externo o local, con fallback robusto)
-# =============================
-_ext = ensure_external_package(config_key="external_pkg")
-
-run_core_update = None
-run_evergreen = None
-
-if _ext:
-    debug_log("Paquete externo cargado", {
-        "module_file": getattr(_ext, "__file__", None),
-        "attrs": [a for a in dir(_ext) if not a.startswith("_")][:50],
-    })
+# ====== Pequeñas utilidades UI (parámetros y selección) ======
+def pick_site(sc_service):
+    st.subheader("2) Elegí el sitio a trabajar (Search Console)")
     try:
-        run_core_update = getattr(_ext, "run_core_update")
-        run_evergreen  = getattr(_ext, "run_evergreen")
-        st.caption("🔌 Usando análisis del paquete externo (repo privado).")
+        site_list = sc_service.sites().list().execute()
+        sites = site_list.get("siteEntry", [])
     except Exception as e:
-        st.warning(f"No pude cargar funciones desde el paquete externo: {e}")
+        st.error(f"Error al obtener sitios: {e}")
+        st.stop()
+    verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
+    if not verified:
+        st.error("No se encontraron sitios verificados en esta cuenta.")
+        st.stop()
+    site_url = st.selectbox("Sitio verificado:", [s["siteUrl"] for s in verified], key="site_select")
+    return site_url
 
-if not (callable(run_core_update) and callable(run_evergreen)):
-    from modules.analysis_core_update import run_core_update as _rcu_local
-    from modules.analysis_evergreen  import run_evergreen  as _rev_local
-    run_core_update = _rcu_local
-    run_evergreen  = _rev_local
-    st.caption("↩️ Usando análisis locales (fallback).")
+
+def pick_analysis():
+    st.subheader("3) Elegí el tipo de análisis")
+    opciones = {
+        "1. Análisis de entidades (🚧 próximamente)": "1",
+        "2. Análisis de tráfico general (🚧 próximamente)": "2",
+        "3. Análisis de secciones (🚧 próximamente)": "3",
+        "4. Análisis de impacto de Core Update ✅": "4",
+        "5. Análisis de tráfico evergreen ✅": "5",
+    }
+    key = st.radio("Tipos disponibles:", list(opciones.keys()), index=3, key="analysis_choice")
+    return opciones[key]
 
 
-# =============================
-# Autenticación de la app (Streamlit)
-# =============================
+LAG_DAYS_DEFAULT = 3
+
+def params_for_core_update():
+    st.markdown("#### Parámetros (Core Update)")
+    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core")
+    fecha_inicio = st.date_input("¿Cuándo inició el Core Update? (YYYY-MM-DD)", key="core_ini")
+    termino = st.radio("¿El Core Update ya terminó?", ["sí", "no"], horizontal=True, key="core_end")
+    fecha_fin = None
+    if termino == "sí":
+        fecha_fin = st.date_input("¿Cuándo finalizó el Core Update? (YYYY-MM-DD)", key="core_fin")
+    tipo = st.selectbox("Datos a analizar", ["Search", "Discover", "Ambos"], index=2, key="tipo_core")
+    pais_choice = st.selectbox(
+        "¿Filtrar por país? (ISO-3)",
+        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
+        index=0,
+        key="pais_core",
+    )
+    pais = None if pais_choice == "Todos" else pais_choice
+    seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_core") or None
+    return lag_days, fecha_inicio, termino, fecha_fin, tipo, pais, seccion
+
+
+def params_for_evergreen():
+    st.markdown("#### Parámetros (Evergreen)")
+    st.caption("Se usa el período más amplio posible de **meses completos** (hasta 16) en Search.")
+    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_ev")
+    pais_choice = st.selectbox(
+        "¿Filtrar por país? (ISO-3)",
+        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
+        index=0,
+        key="pais_ev",
+    )
+    pais = None if pais_choice == "Todos" else pais_choice
+    seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
+
+    # Ventana de 16 meses completos
+    hoy_util = date.today() - timedelta(days=lag_days)
+    end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
+    end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
+    start_month_first_day = (end_month_first_day - pd.DateOffset(months=15))
+    start_date = start_month_first_day.date()
+    end_date = end_month_last_day.date()
+    st.info(f"Ventana mensual: {start_date} → {end_date}")
+
+    incluir_diario = st.checkbox("Incluir análisis diario por URL (lento)", value=False, key="daily_ev")
+    return lag_days, pais, seccion, incluir_diario, start_date, end_date
+
+
+# ====== App ======
 user = get_user()
 if not user or not getattr(user, "is_logged_in", False):
     login_screen()
     st.stop()
 
+# Sidebar
 sidebar_user_info(user)
 
-# Toggle de debug
+# Debug switch (opcional)
 st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
 
-
-# =============================
 # Paso 1: OAuth PERSONAL (Drive/Sheets)
-# =============================
 creds_dest = pick_destination_oauth()
 if not creds_dest:
     st.stop()
 
-# Clientes de Drive/Sheets usando la cuenta personal
 drive_service, gs_client = ensure_drive_clients(creds_dest)
-
-# Identidad Google conectada
 _me = get_google_identity(drive_service)
 if _me:
     st.success(f"Los archivos se guardarán en el Drive de: **{_me.get('emailAddress','?')}**")
 else:
     st.caption("No se pudo determinar el correo de la cuenta de Google conectada.")
 
-# Aviso si el email de Streamlit y el de Google difieren
-_app_email = getattr(user, "email", None)
-_google_email = (_me or {}).get("emailAddress")
-if _app_email and _google_email and _app_email.lower() != _google_email.lower():
-    st.warning(
-        "Estás logueado en Streamlit como **%s**, pero la cuenta de Google conectada es **%s**. "
-        "Los archivos se crearán en **%s**. Si querés que se guarden en **%s**, reautorizá el Paso 1 con ese correo."
-        % (_app_email, _google_email, _google_email, _app_email)
-    )
-
-# Carpeta destino (opcional, en la CUENTA personal conectada)
+# Carpeta destino opcional
 dest_folder_id = pick_destination(drive_service, _me)
 
-
-# =============================
-# Paso 2: OAuth FUENTE (Search Console)
-# =============================
+# Paso 2: Conectar Search Console (fuente de datos)
 creds_src = pick_source_oauth()
 if not creds_src:
     st.stop()
 
-# Cliente de Search Console (fuente)
 sc_service = ensure_sc_client(creds_src)
 
-
-# =============================
-# Paso 3: elegir sitio + análisis
-# =============================
+# Paso 3: sitio + análisis
 site_url = pick_site(sc_service)
 analisis = pick_analysis()
 
-
-# =============================
-# Paso 4: parámetros + ejecución
-# =============================
+# Paso 4: ejecutar
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        with lottie_spinner(LOTTIE_LOADER, text="Extrayendo GSC y escribiendo en Google Sheets…"):
-            sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
+        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
+        st.session_state["last_file_id"] = sid
+        from modules.drive import share_controls
+        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        with lottie_spinner(LOTTIE_LOADER, text="Calculando series mensuales y diarias…"):
-            sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
+        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, dest_folder_id)
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-
+        st.session_state["last_file_id"] = sid
+        from modules.drive import share_controls
+        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
