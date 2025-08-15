@@ -43,7 +43,7 @@ render_brand_header_once(
     pinned=True,      # anclado
     nudge_px=-42,     # negativo = subir; positivo = bajar
     x_align="left",   # "left" | "center" | "right"
-    x_offset_px=20,  # mover a la derecha (si x_align="left")
+    x_offset_px=40,  # mover a la derecha (si x_align="left")
     z_index=3000,
     container_max_px=1200,
 )
