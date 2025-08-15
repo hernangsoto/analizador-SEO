@@ -100,18 +100,30 @@ def _inline_logo_src(logo_url: str) -> str:
 
 def render_brand_header(
     logo_url: str,
-    width_px: int | None = None,
-    height_px: int = 27,           # fijamos SOLO altura (proporción correcta)
-    band_bg: str = "#5c417c",
-    top_offset_px: int | None = None,  # si None, usa la variable CSS del header
+    width_px: int | None = None,   # opcional
+    height_px: int = 27,           # solo altura para no deformar
+    band_bg: str = "transparent",  # ← SIN fondo
+    top_offset_px: int | None = None,  # si None usa --app-header-height
 ) -> None:
     src = _inline_logo_src(logo_url)
-    dim_css = "height:%dpx !important; width:auto !important; max-width:100%% !important;" % height_px
+    dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
     top_css = f"{top_offset_px}px" if top_offset_px is not None else "var(--app-header-height)"
 
     st.markdown(
         f"""
         <style>
+        /* Contenedor sin fondo, sin borde, sin sombra */
+        .brand-banner {{
+            background: transparent !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            margin: 0 0 8px 0 !important;
+            padding: 0 !important;
+            position: -webkit-sticky; position: sticky;
+            top: {top_css};
+            z-index: 1100;
+            display: flex; align-items: center;
+        }}
         .brand-banner img.brand-logo {{
             {dim_css}
             image-rendering: -webkit-optimize-contrast;
@@ -119,17 +131,7 @@ def render_brand_header(
             display: inline-block !important;
         }}
         </style>
-        <div class="brand-banner" style="
-            background:{band_bg};
-            border-radius:10px;
-            margin:0 0 12px 0;
-            padding:8px 16px;
-            display:flex; align-items:center;
-            position:-webkit-sticky; position:sticky;
-            top:{top_css};             /* ← exactamente debajo del header */
-            z-index: 1100;             /* por encima del contenido */
-            box-shadow:0 4px 14px rgba(0,0,0,.25);
-        ">
+        <div class="brand-banner">
             <img class="brand-logo" src="{src}" alt="Brand" />
         </div>
         """,
@@ -141,7 +143,7 @@ def render_brand_header_once(
     logo_url: str,
     width_px: int | None = None,
     height_px: int = 27,
-    band_bg: str = "#5c417c",
+    band_bg: str = "transparent",
     top_offset_px: int | None = None,
 ) -> None:
     if st.session_state.get("_brand_rendered"):
