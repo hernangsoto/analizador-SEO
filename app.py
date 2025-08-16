@@ -108,12 +108,10 @@ if not (run_core_update and run_evergreen):
     try:
         import importlib
         analysis = importlib.import_module("modules.analysis")
-        # Solo pisamos si existen en el módulo local
         run_core_update = getattr(analysis, "run_core_update", run_core_update)
         run_evergreen  = getattr(analysis, "run_evergreen",  run_evergreen)
-        # auditoría puede existir o no en local
         run_auditoria  = getattr(analysis, "run_auditoria",  run_auditoria)
-        st.caption("🧩 Usando análisis embebidos en este repo.")
+        USING_EXT = False
     except Exception as e:
         st.error(
             "No pude cargar las funciones de análisis ni del paquete externo ni de `modules/analysis.py`.\n\n"
@@ -123,7 +121,10 @@ if not (run_core_update and run_evergreen):
         st.caption(f"Detalle técnico: {e}")
         st.stop()
 else:
-    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
+    USING_EXT = True
+
+# 👉 GUARDA el flag en session_state para que esté disponible en cualquier callback
+st.session_state["USING_EXT"] = USING_EXT
 
 
 # ====== OAuth / Clientes ======
@@ -267,7 +268,8 @@ if not user or not getattr(user, "is_logged_in", False):
     st.stop()
 
 # Sidebar → Mantenimiento: mensaje del paquete y modo debug
-def maintenance_extra_ui():
+def maintenance_extra_ui(USING_EXT: bool = st.session_state.get("USING_EXT", False)):
+    """Bloque 'Mantenimiento' en el sidebar: mensaje de origen de análisis + toggle debug."""
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
     else:
