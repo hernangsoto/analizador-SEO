@@ -93,20 +93,38 @@ st.title("Analizador SEO 🚀")
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
 
+# Inicializamos referencias vacías
+run_core_update = run_evergreen = run_auditoria = None
+
+# 1) Intentar cargar desde el paquete externo (repo privado)
 _ext = ensure_external_package()
-USING_EXT = bool(_ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"))
-if USING_EXT and hasattr(_ext, "run_auditoria"):
-    run_core_update = _ext.run_core_update
-    run_evergreen = _ext.run_evergreen
-    run_auditoria = _ext.run_auditoria
-    USING_EXT = True
-else:
-    from modules.analysis import run_core_update, run_evergreen  # type: ignore
-    # auditoría puede estar en el paquete externo; si no, intentamos fallback local
+if _ext:
+    run_core_update = getattr(_ext, "run_core_update", None)
+    run_evergreen = getattr(_ext, "run_evergreen", None)
+    run_auditoria = getattr(_ext, "run_auditoria", None)
+
+# 2) Si no están (o faltan algunas), intentar fallback local dinámico
+if not (run_core_update and run_evergreen):
     try:
-        from modules.analysis import run_auditoria  # type: ignore
-    except Exception:
-        run_auditoria = None  # si no existe, avisaremos al ejecutar
+        import importlib
+        analysis = importlib.import_module("modules.analysis")
+        # Solo pisamos si existen en el módulo local
+        run_core_update = getattr(analysis, "run_core_update", run_core_update)
+        run_evergreen  = getattr(analysis, "run_evergreen",  run_evergreen)
+        # auditoría puede existir o no en local
+        run_auditoria  = getattr(analysis, "run_auditoria",  run_auditoria)
+        st.caption("🧩 Usando análisis embebidos en este repo.")
+    except Exception as e:
+        st.error(
+            "No pude cargar las funciones de análisis ni del paquete externo ni de `modules/analysis.py`.\n\n"
+            "✔️ Verificá que exista `modules/analysis.py` con `run_core_update` y `run_evergreen`, "
+            "o configurá correctamente el paquete externo."
+        )
+        st.caption(f"Detalle técnico: {e}")
+        st.stop()
+else:
+    st.caption("🧩 Usando análisis del paquete externo (repo privado).")
+
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
