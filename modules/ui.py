@@ -382,7 +382,8 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-        st.button(":material/logout: Cerrar sesión", on_click=st.logout, use_container_width=True)
+            if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
+    st.logout()
 
 
 
