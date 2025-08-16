@@ -389,4 +389,6 @@ def sidebar_user_info(user, maintenance_extra=None):
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
-    st.button(":material/login: Iniciar sesión con Google", on_click=st.login)
+    # IMPORTANTE: No uses on_click=st.login
+    if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
+        st.login()
