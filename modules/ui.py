@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components  # <- necesario para enable_brand_auto_align()
+import streamlit.components.v1 as components  # para enable_brand_auto_align()
 
 
 # =============================
@@ -74,7 +74,7 @@ def apply_page_style(
             min-height: var(--app-header-height);
             height: var(--app-header-height);
             box-shadow: none !important;
-            z-index: 1000 !important; /* El banner puede ir por encima si lo pedimos */
+            z-index: 1000 !important;
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
@@ -95,7 +95,7 @@ def render_brand_header(
     height_px: int = 27,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,   # None => usa --app-header-height
-    pinned: bool = True,                # True = anclado (fixed), False = sticky
+    pinned: bool = True,                # True = fixed, False = sticky
     nudge_px: int = 0,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
@@ -135,12 +135,12 @@ def render_brand_header(
             .brand-fixed {{
               position: fixed;
               top: {top_css};
-              left: var(--brand-left, 0px);     /* ← dinámico */
-              width: var(--brand-width, 100%);  /* ← dinámico */
+              left: var(--brand-left, 0px);
+              width: var(--brand-width, 100%);
               z-index: {z_index};
               background: transparent !important;
               pointer-events: none; /* no bloquea clicks del header */
-              transition: left .18s ease, width .18s ease;  /* suave al abrir/cerrar sidebar */
+              transition: left .18s ease, width .18s ease;
             }}
             .brand-fixed .brand-inner {{
               max-width: {container_max_px}px;
@@ -198,7 +198,7 @@ def render_brand_header(
 def render_brand_header_once(
     logo_url: str,
     width_px: int | None = None,
-    height_px: int = 15,
+    height_px: int = 27,
     band_bg: str = "transparent",
     top_offset_px: int | None = None,
     pinned: bool = True,
@@ -235,7 +235,7 @@ def render_brand_header_once(
     )
 
 
-def reset_brand_banner():
+def reset_brand_banner() -> None:
     """Forza el re-render del banner la próxima vez que se invoque."""
     st.session_state.pop("_brand_sig", None)
 
@@ -252,11 +252,12 @@ def hide_old_logo_instances() -> None:
         unsafe_allow_html=True,
     )
 
+
 def enable_brand_auto_align() -> None:
     """
     Sincroniza --brand-left y --brand-width con el bounding box del .block-container.
     Funciona en resize y al abrir/cerrar la sidebar.
-    Además, oculta visualmente el iframe sensor (4a).
+    El iframe/sensor queda totalmente oculto (height=0, opacity=0).
     """
     # Refuerzo CSS para la posición/ancho del logo fijo
     st.markdown(
@@ -266,9 +267,7 @@ def enable_brand_auto_align() -> None:
           left: var(--brand-left, 0px) !important;
           width: var(--brand-width, 100%) !important;
         }
-
-        /* 4a) OCULTAR SOLO el iframe sensor de auto-align
-           Lo identificamos porque su atributo srcdoc contiene '--brand-left' */
+        /* Ocultar por completo el iframe sensor */
         iframe.stIFrame[srcdoc*="--brand-left"] {
           width: 0 !important;
           height: 0 !important;
@@ -279,10 +278,7 @@ def enable_brand_auto_align() -> None:
           margin: 0 !important;
           padding: 0 !important;
         }
-        /* A veces Streamlit agrega un div spacer inmediatamente después del iframe */
-        iframe.stIFrame[srcdoc*="--brand-left"] + div {
-          display: none !important;
-        }
+        iframe.stIFrame[srcdoc*="--brand-left"] + div { display: none !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -315,7 +311,7 @@ def enable_brand_auto_align() -> None:
         })();
         </script>
         """,
-        height=0,  # mantenemos 0; el CSS anterior lo oculta por completo
+        height=0,
     )
 
 
@@ -334,8 +330,6 @@ def get_first_name(full_name: str | None) -> str:
     return full_name.split()[0]
 
 
-# modules/ui.py  — reemplazar solo esta función
-
 def sidebar_user_info(user, maintenance_extra=None):
     """
     Sidebar con avatar, nombre, email y utilidades de mantenimiento.
@@ -344,7 +338,7 @@ def sidebar_user_info(user, maintenance_extra=None):
     """
     with st.sidebar:
         with st.container():
-            c1, c2 = st.columns([1, 3], vertical_alignment="center")
+            c1, c2 = st.columns([1, 3])
             with c1:
                 if getattr(user, "picture", None):
                     try:
@@ -369,7 +363,7 @@ def sidebar_user_info(user, maintenance_extra=None):
         if callable(maintenance_extra):
             maintenance_extra()
 
-        # Botón para limpiar paquete externo
+        # Botón para limpiar paquete externo cacheado
         if st.button(
             "Borrar caché del paquete externo (.ext_pkgs/)",
             key="btn_clean_extpkgs",
@@ -382,14 +376,14 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-            if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
-    st.logout()
-
+        # IMPORTANTE: sin on_click
+        if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
+            st.logout()
 
 
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
-    # IMPORTANTE: No uses on_click=st.login
+    # IMPORTANTE: sin on_click
     if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
         st.login()
