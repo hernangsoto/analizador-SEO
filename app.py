@@ -1,7 +1,7 @@
 # app.py
 from __future__ import annotations
 
-# --- OAuth en localhost + tolerancia de scope (útil en Streamlit Cloud + redirect http://localhost)
+# --- Permisos OAuth en localhost + tolerancia de scope (útil para Streamlit Cloud + localhost redirect)
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -36,8 +36,7 @@ apply_page_style(
     use_gradient=False,
     band_height_px=110,
 )
-
-# Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
+# Logo fijo (no desaparece) y autoalineación con contenedor principal
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
@@ -48,10 +47,9 @@ render_brand_header_once(
     z_index=3000,        # por delante del header nativo
     container_max_px=1200,
 )
-# Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
-# ====== Estilos globales (botones, pills y links de acción) ======
+# ====== Estilos globales: botones morados + links estilo texto + “caja verde” con link dentro ======
 st.markdown("""
 <style>
 /* Botones morado #8e7cc3 */
@@ -61,54 +59,54 @@ st.markdown("""
   color: #fff !important;
   border-radius: 8px !important;
 }
-.stButton > button:hover, .stDownloadButton > button:hover {
-  filter: brightness(0.93);
-}
+.stButton > button:hover, .stDownloadButton > button:hover { filter: brightness(0.93); }
 
-/* Pills (resúmenes colapsados) en #b4a7d6 */
-.pill {
-  display: inline-block;
-  background: #b4a7d6;
-  color: #111;
-  padding: 10px 14px;
-  border-radius: 9999px;
-  font-weight: 500;
-}
-.pill .muted { opacity: .9; }
-
-/* Enlaces-acción que parecen texto, integrados en la UI */
+/* Link-acción (para "Cambiar ...") con apariencia de enlace */
 .linkbox button {
   background: transparent !important;
   border: none !important;
   padding: 0 !important;
-  color: #5c417c !important;
+  color: #1a73e8 !important;        /* azul link */
   text-decoration: underline !important;
   box-shadow: none !important;
 }
+
+/* Caja de éxito verde personalizada (para tener el link adentro) */
+.success-card {
+  background: #d1fae5;            /* verde claro */
+  border: 1px solid #10b981;      /* borde verde */
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px 0;
+}
+.success-card .sc-text { flex: 1 1 auto; font-weight: 600; color: #065f46; }
+.success-card .sc-action { flex: 0 0 auto; }
+.success-card .sc-action button { color: #065f46 !important; text-decoration: underline !important; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("Analizador SEO 🚀")
 
-
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
+
 _ext = ensure_external_package()
-USING_EXT = bool(
-    _ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen")
-)
-if USING_EXT:
+USING_EXT = bool(_ext and hasattr(_ext, "run_core_update") and hasattr(_ext, "run_evergreen"))
+if USING_EXT and hasattr(_ext, "run_auditoria"):
     run_core_update = _ext.run_core_update
     run_evergreen = _ext.run_evergreen
-    # Auditoría de tráfico:
-    run_traffic_audit = getattr(_ext, "run_traffic_audit", None)
+    run_auditoria = _ext.run_auditoria
+    USING_EXT = True
 else:
-    # Fallback local (si no tenés las funciones en modules.analysis, dejá None)
     from modules.analysis import run_core_update, run_evergreen  # type: ignore
+    # auditoría puede estar en el paquete externo; si no, intentamos fallback local
     try:
-        from modules.analysis import run_traffic_audit  # type: ignore
+        from modules.analysis import run_auditoria  # type: ignore
     except Exception:
-        run_traffic_audit = None
+        run_auditoria = None  # si no existe, avisaremos al ejecutar
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
@@ -204,35 +202,44 @@ def params_for_evergreen():
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
 
-def params_for_traffic_audit():
+# --- Ayuda: explicación del “período” para Auditoría ---
+def _explica_periodo(freq: str, custom_days: int | None = None) -> str:
+    if freq == "Semanal":
+        return "Un **período** = 7 días consecutivos. Se toma como referencia hoy menos el lag elegido."
+    if freq == "Quincenal":
+        return "Un **período** = 15 días consecutivos."
+    if freq == "Mensual":
+        return "Un **período** = 1 mes calendario completo que contiene el día de referencia (hoy - lag), y los meses anteriores."
+    # Personalizado
+    return f"Un **período** = {custom_days or 7} días consecutivos."
+
+
+def params_for_auditoria():
     st.markdown("#### Parámetros (Auditoría de tráfico)")
-    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, 3, key="lag_audit")
 
-    periodo_kind = st.selectbox(
-        "Período base",
-        ["Semanal", "Quincenal", "Mensual", "Personalizado"],
-        index=0, key="audit_kind",
-    )
+    modo = st.selectbox("Frecuencia del período", ["Semanal", "Quincenal", "Mensual", "Personalizado"], index=0, key="aud_modo")
+    tipo = st.selectbox("Origen de datos", ["Search", "Discover", "Search y Discover"], index=2, key="aud_tipo")
+    seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="aud_seccion") or None
+    alcance = st.selectbox("Ámbito", ["Global", "País"], index=0, key="aud_ambito")
+
+    country = None
+    if alcance == "País":
+        country = st.text_input("ISO-3 del país (ej: ARG, MEX, ESP)", value="", key="aud_iso3").strip().upper() or None
+
+    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, 3, key="aud_lag")
+
     custom_days = None
-    if periodo_kind == "Personalizado":
-        custom_days = st.number_input("Días por período", min_value=1, value=7, key="audit_days")
+    if modo == "Personalizado":
+        custom_days = st.number_input("Duración del período personalizado (en días)", min_value=2, max_value=120, value=7, key="aud_custom_days")
 
-    tipo_datos = st.selectbox(
-        "Fuente de datos",
-        ["Search", "Discover", "Search y Discover"],
-        index=2, key="audit_tipo",
+    periods_back = st.number_input(
+        "¿Cuántos períodos **previos** querés comparar?",
+        min_value=1, max_value=24, value=4, step=1, key="aud_periods_back",
+        help="Por defecto 4. El análisis abarcará el período actual + N períodos previos."
     )
 
-    pais_choice = st.selectbox(
-        "Ámbito geográfico",
-        ["Global", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
-        index=0, key="audit_geo",
-    )
-    pais = None if pais_choice == "Global" else pais_choice
-
-    seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="audit_section") or None
-
-    return lag_days, periodo_kind, custom_days, tipo_datos, pais, seccion
+    st.caption(_explica_periodo(modo, custom_days))
+    return modo, tipo, seccion, alcance, country, lag_days, (custom_days or 0), periods_back
 
 
 # ============== App ==============
@@ -252,18 +259,18 @@ def maintenance_extra_ui():
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
 # Estados de pasos
-st.session_state.setdefault("step1_done", False)       # OAuth PERSONAL (Drive/Sheets)
-st.session_state.setdefault("step2_done", False)       # Carpeta destino
-st.session_state.setdefault("step3_src_done", False)   # OAuth SC (Acceso / Acceso Medios)
+st.session_state.setdefault("step1_done", False)   # PERSONAL
+st.session_state.setdefault("step2_done", False)   # CARPETA
+st.session_state.setdefault("step3_done", False)   # SOURCE (SC)
 
-# --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
+# ---------- PASO 1: OAuth PERSONAL (Drive/Sheets) ----------
 creds_dest = None
 if not st.session_state["step1_done"]:
-    # pick_destination_oauth ya muestra su propio título/pasos
+    # Renderiza UI interna del módulo (sin duplicar título aquí)
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
-    # Guardar y colapsar
+    # Guardamos y colapsamos
     st.session_state["step1_done"] = True
     st.session_state["creds_dest"] = {
         "token": creds_dest.token,
@@ -275,33 +282,46 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, reconstruimos clientes y mostramos RESUMEN como pill
+# Resumen “caja verde” de paso 1 + link interno
 drive_service = None
 gs_client = None
 _me = None
-
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
-
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-    col_l, col_r = st.columns([6, 1])
-    with col_l:
-        st.markdown(f'<div class="pill">Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong></div>', unsafe_allow_html=True)
-    with col_r:
-        st.markdown('<div class="linkbox" style="text-align:right;">', unsafe_allow_html=True)
-        if st.button("(Cambiar mail personal)", key="link_change_personal"):
-            for k in ("creds_dest", "oauth_dest", "step1_done"):
-                st.session_state.pop(k, None)
-            st.session_state["step2_done"] = False
-            st.session_state.pop("dest_folder_id", None)
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
-# --- PASO 2: Carpeta destino (opcional) ---
-# Evitamos duplicar títulos: NO mostramos nuestro propio subheader; pick_destination muestra el suyo.
+    # Caja verde con link “Cambiar mail personal” adentro
+    colA, colB = st.columns([1, 1], gap="small")
+    with colA:
+        st.markdown(
+            f"""
+            <div class="success-card">
+              <div class="sc-text">Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong></div>
+              <div class="sc-action"><div class="linkbox">
+                <form>
+                  <button name="link_change_personal" type="submit">Cambiar mail personal</button>
+                </form>
+              </div></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    # “Captura” del submit como si fuera un botón
+    if st.query_params.get("link_change_personal") or st.session_state.get("link_change_personal"):
+        for k in ("creds_dest", "oauth_dest", "step1_done"):
+            st.session_state.pop(k, None)
+        st.session_state["step2_done"] = False
+        st.session_state.pop("dest_folder_id", None)
+        st.session_state["link_change_personal"] = False
+        st.rerun()
+    # Botón invisible para manejar el “submit” del form como evento
+    st.session_state["link_change_personal"] = st.button(" ", key="__ghost1__", help="ghost", disabled=True)
+
+# ---------- PASO 2: Carpeta destino (opcional) ----------
 if not st.session_state["step2_done"]:
+    st.subheader("2) Destino de la copia (opcional)")
     # UI para elegir carpeta (usa la cuenta personal ya conectada)
     dest_folder_id = pick_destination(drive_service, _me)  # guarda internamente en session_state["dest_folder_id"]
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
@@ -311,23 +331,33 @@ if not st.session_state["step2_done"]:
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    col_l2, col_r2 = st.columns([6, 1])
-    with col_l2:
-        st.markdown(f'<div class="pill">Destino de la copia: <strong>{pretty}</strong></div>', unsafe_allow_html=True)
-    with col_r2:
-        st.markdown('<div class="linkbox" style="text-align:right;">', unsafe_allow_html=True)
-        if st.button("(Cambiar carpeta)", key="link_change_folder"):
-            st.session_state["step2_done"] = False
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Caja verde con link “Cambiar carpeta” adentro
+    st.markdown(
+        f"""
+        <div class="success-card">
+          <div class="sc-text">Destino de la copia: <strong>{pretty}</strong></div>
+          <div class="sc-action"><div class="linkbox">
+            <form>
+              <button name="link_change_folder" type="submit">Cambiar carpeta</button>
+            </form>
+          </div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.query_params.get("link_change_folder") or st.session_state.get("link_change_folder"):
+        st.session_state["step2_done"] = False
+        st.session_state["link_change_folder"] = False
+        st.rerun()
+    st.session_state["link_change_folder"] = st.button(" ", key="__ghost2__", help="ghost", disabled=True)
 
-# --- PASO 3: Conectar Search Console (fuente de datos: Acceso / Acceso Medios) ---
+# ---------- PASO 3: Conectar Search Console (fuente de datos) ----------
 creds_src = None
-if not st.session_state["step3_src_done"]:
+if not st.session_state["step3_done"]:
+    # La UI de pick_source_oauth incluye el selector ACCESO/ACCESO_MEDIOS y autorización
     creds_src = pick_source_oauth()
     if not creds_src:
         st.stop()
-    # Guardar y colapsar
     st.session_state["creds_src"] = {
         "token": creds_src.token,
         "refresh_token": getattr(creds_src, "refresh_token", None),
@@ -336,80 +366,71 @@ if not st.session_state["step3_src_done"]:
         "client_secret": creds_src.client_secret,
         "scopes": creds_src.scopes,
     }
-    # Guardamos etiqueta de cuenta seleccionada (si el módulo la puso en session_state)
-    src_label = st.session_state.get("oauth_src", {}).get("account", "Cuenta conectada")
-    st.session_state["src_account_label"] = src_label
-    st.session_state["step3_src_done"] = True
+    st.session_state["step3_done"] = True
     st.rerun()
+else:
+    # Resumen del paso 3 (no sabemos email de SC si es multi-tenant, mostramos client_id)
+    client_id = (st.session_state.get("creds_src") or {}).get("client_id", "—")
+    st.markdown(
+        f"""
+        <div class="success-card">
+          <div class="sc-text">Fuente de datos (Search Console): <strong>conectada</strong></div>
+          <div class="sc-action"><div class="linkbox">
+            <form>
+              <button name="link_change_sc" type="submit">Cambiar cuenta SC</button>
+            </form>
+          </div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.query_params.get("link_change_sc") or st.session_state.get("link_change_sc"):
+        for k in ("creds_src", "oauth_src", "step3_done"):
+            st.session_state.pop(k, None)
+        st.session_state["link_change_sc"] = False
+        st.rerun()
+    st.session_state["link_change_sc"] = st.button(" ", key="__ghost3__", help="ghost", disabled=True)
 
-# Resumen del paso 3 ya colapsado
-if st.session_state["step3_src_done"] and st.session_state.get("creds_src"):
-    src_label = st.session_state.get("src_account_label", "Cuenta conectada")
-    col_l3, col_r3 = st.columns([6, 1])
-    with col_l3:
-        st.markdown(f'<div class="pill">Cuenta de Search Console: <strong>{src_label}</strong></div>', unsafe_allow_html=True)
-    with col_r3:
-        st.markdown('<div class="linkbox" style="text-align:right;">', unsafe_allow_html=True)
-        if st.button("(Cambiar cuenta SC)", key="link_change_sc"):
-            for k in ("creds_src", "oauth_src", "step3_src_done", "src_account_label"):
-                st.session_state.pop(k, None)
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# Cliente de Search Console (fuente)
+# Cliente SC listo
 creds_src = Credentials(**st.session_state["creds_src"])
 sc_service = ensure_sc_client(creds_src)
 
-# --- PASO 4: sitio + análisis ---
+# ---------- PASO 4: sitio ----------
 site_url = pick_site(sc_service)
+
+# ---------- PASO 5: análisis ----------
 analisis = pick_analysis()
 
-# --- PASO 5: ejecutar ---
+# ---------- PASO 6: ejecutar ----------
 if analisis == "4":
     params = params_for_core_update()
     if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        sid = run_core_update(
-            sc_service, drive_service, gs_client,
-            site_url, params,
-            st.session_state.get("dest_folder_id")
-        )
+        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id"))
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
-        share_controls(drive_service, sid, default_email=(getattr(_me, "get", None) and _me.get("emailAddress")) or None)
+        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 elif analisis == "5":
     params = params_for_evergreen()
     if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        sid = run_evergreen(
-            sc_service, drive_service, gs_client,
-            site_url, params,
-            st.session_state.get("dest_folder_id")
-        )
+        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id"))
         st.success("¡Listo! Tu documento está creado.")
         st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
         st.session_state["last_file_id"] = sid
-        share_controls(drive_service, sid, default_email=(getattr(_me, "get", None) and _me.get("emailAddress")) or None)
+        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 elif analisis == "6":
-    params = params_for_traffic_audit()
-    if st.button("🧭 Ejecutar auditoría de tráfico", type="primary"):
-        if run_traffic_audit is None:
-            st.error("Este análisis no está disponible localmente. Instalá/actualizá el paquete externo.")
-        else:
-            # Si querés usar template override por secrets: templates.traffic_audit
-            # template_id = st.secrets.get("templates", {}).get("traffic_audit")
-            template_id = None
-            sid = run_traffic_audit(
-                sc_service, drive_service, gs_client,
-                site_url, params,
-                st.session_state.get("dest_folder_id"),
-                template_id=template_id,
-            )
-            st.success("¡Listo! Tu documento está creado.")
+    if run_auditoria is None:
+        st.error("Este despliegue no incluye `run_auditoria` (paquete externo o fallback local).")
+    else:
+        params = params_for_auditoria()
+        if st.button("🧪 Ejecutar Auditoría de tráfico", type="primary"):
+            sid = run_auditoria(sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id"))
+            st.success("¡Listo! Tu documento de Auditoría está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             st.session_state["last_file_id"] = sid
-            share_controls(drive_service, sid, default_email=(getattr(_me, "get", None) and _me.get("emailAddress")) or None)
+            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
