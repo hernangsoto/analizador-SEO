@@ -93,69 +93,40 @@ st.title("Analizador SEO 🚀")
 
 # ====== Utils / paquete externo ======
 from modules.utils import debug_log, ensure_external_package
+_ext = ensure_external_package()
 
-USING_EXT = False
-HAVE_AUDITORIA = False
-
-# Inicializamos referencias (se asignarán más abajo)
+# Externos disponibles
 run_core_update = None
 run_evergreen = None
 run_traffic_audit = None
 
-_ext = ensure_external_package()
 if _ext:
-    USING_EXT = True
-
-    # Core Update
     run_core_update = getattr(_ext, "run_core_update", None)
-    if run_core_update is None:
-        try:
-            from modules.analysis import run_core_update as _local_core_update  # type: ignore
-            run_core_update = _local_core_update
-        except Exception:
-            pass
-
-    # Evergreen
     run_evergreen = getattr(_ext, "run_evergreen", None)
-    if run_evergreen is None:
-        try:
-            from modules.analysis import run_evergreen as _local_run_evergreen  # type: ignore
-            run_evergreen = _local_run_evergreen
-        except Exception:
-            pass
-
-    # Auditoría: aceptar run_traffic_audit o alias run_auditoria
     run_traffic_audit = getattr(_ext, "run_traffic_audit", None)
-    if run_traffic_audit is None:
-        run_traffic_audit = getattr(_ext, "run_auditoria", None)
-    if run_traffic_audit is None:
-        try:
-            from modules.analysis import run_traffic_audit as _local_run_traffic_audit  # type: ignore
-            run_traffic_audit = _local_run_traffic_audit
-        except Exception:
-            pass
-    HAVE_AUDITORIA = run_traffic_audit is not None
 
-else:
-    # Sin paquete externo → usar implementaciones locales disponibles
+# Fallback locales (solo si no vienen del paquete)
+if run_core_update is None or run_evergreen is None:
     try:
-        from modules.analysis import run_core_update as _local_core_update  # type: ignore
-        run_core_update = _local_core_update
+        from modules.analysis import run_core_update as _rcu, run_evergreen as _rev  # type: ignore
+        run_core_update = run_core_update or _rcu
+        run_evergreen = run_evergreen or _rev
     except Exception:
         pass
 
-    try:
-        from modules.analysis import run_evergreen as _local_run_evergreen  # type: ignore
-        run_evergreen = _local_run_evergreen
-    except Exception:
-        pass
+USING_EXT = bool(_ext)
 
-    try:
-        from modules.analysis import run_traffic_audit as _local_run_traffic_audit  # type: ignore
-        run_traffic_audit = _local_run_traffic_audit
-        HAVE_AUDITORIA = True
-    except Exception:
-        HAVE_AUDITORIA = False
+# Helper indicador de progreso
+def run_with_indicator(titulo: str, fn, *args, **kwargs):
+    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
+    if hasattr(st, "status"):
+        with st.status(mensaje, expanded=True) as status:
+            res = fn(*args, **kwargs)
+            status.update(label="✅ Informe generado", state="complete")
+            return res
+    else:
+        with st.spinner(mensaje):
+            return fn(*args, **kwargs)
 
 # ====== OAuth / Clientes ======
 from modules.auth import pick_destination_oauth, pick_source_oauth
@@ -189,22 +160,26 @@ def pick_site(sc_service):
     return site_url
 
 
-def pick_analysis():
+def pick_analysis(include_auditoria: bool):
     st.subheader("5) Elegí el tipo de análisis")
-    options = [
+    opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
         "2. Análisis de tráfico general (🚧 próximamente)",
         "3. Análisis de secciones (🚧 próximamente)",
         "4. Análisis de impacto de Core Update ✅",
         "5. Análisis de tráfico evergreen ✅",
     ]
-    # Mostrar SIEMPRE la auditoría; marcar si requiere paquete externo
-    if HAVE_AUDITORIA:
-        options.append("6. Auditoría de tráfico ✅")
-    else:
-        options.append("6. Auditoría de tráfico (requiere paquete externo)")
-    choice = st.radio("Tipos disponibles:", options, index=3, key="analysis_choice")
-    return choice.split(".")[0]  # "4" | "5" | "6"
+    if include_auditoria:
+        opciones.append("6. Auditoría de tráfico ✅")
+
+    key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
+    if key.startswith("4."):
+        return "4"
+    if key.startswith("5."):
+        return "5"
+    if key.startswith("6."):
+        return "6"
+    return "0"
 
 
 LAG_DAYS_DEFAULT = 3
@@ -258,25 +233,27 @@ def params_for_evergreen():
 def params_for_auditoria():
     st.markdown("#### Parámetros (Auditoría de tráfico)")
     st.caption(
-        "Un **período** es la unidad de tiempo de la auditoría. "
-        "Se toma el período **actual** (respetando el *lag* para evitar días incompletos) "
-        "y **N períodos previos** para comparar."
+        "Un **período** es la ventana que se usa para auditar y comparar. "
+        "Podés elegir **Semanal (7 días)**, **Quincenal (15 días)**, **Mensual (mes calendario)** "
+        "o un **Personalizado (N días)**. Se comparan la ventana actual + N previas."
     )
-    modo = st.selectbox("Modo de período", ["Semanal", "Quincenal", "Mensual", "Personalizado"], key="aud_modo")
-    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, 3, key="aud_lag")
-    periods_back = st.number_input("¿Cuántos períodos previos querés comparar?", 1, 12, 4, key="aud_prev")
+    modo = st.selectbox("Modo de período", ["Semanal", "Quincenal", "Mensual", "Personalizado"], index=0, key="aud_modo")
     custom_days = None
     if modo == "Personalizado":
-        custom_days = st.number_input("Cantidad de días del período personalizado", 2, 90, 7, key="aud_days")
+        custom_days = st.number_input("Días del período personalizado", 2, 90, 7, key="aud_custom_days")
 
-    tipo = st.selectbox("Origen", ["Search", "Discover", "Search y Discover"], key="aud_tipo")
-    seccion = st.text_input("¿Sección? (vacío = todo el sitio)", value="", key="aud_sec") or None
-    alcance = st.selectbox("Ámbito", ["Global", "País"], key="aud_alc")
+    tipo = st.selectbox("Origen", ["Search", "Discover", "Search y Discover"], index=2, key="aud_tipo")
+    seccion = st.text_input("Sección (path, ej: /vida/). Vacío = todo el sitio", value="", key="aud_sec") or None
+
+    alcance = st.selectbox("Ámbito", ["Global", "País"], index=0, key="aud_ambito")
     country = None
     if alcance == "País":
-        country = st.text_input("ISO-3 del país (ej. ARG, ESP, USA)", value="ARG", key="aud_country").upper().strip()
+        country = st.selectbox("País (ISO-3)", ["ARG","MEX","ESP","USA","COL","PER","CHL","URY"], index=0, key="aud_pais")
 
-    # orden de params como espera el runner externo
+    periods_back = st.number_input("¿Cuántos periodos previos querés comparar?", 1, 12, 4, key="aud_prev")
+    st.caption("Ej.: Semanal = 1 semana actual + N semanas previas. Mensual = 1 mes actual + N meses previos, etc.")
+    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="aud_lag")
+
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
 
 
@@ -382,7 +359,6 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
     st.subheader("2) Destino de la copia (opcional)")
-    # show_header=False evita doble título dentro de pick_destination
     dest_folder_id = pick_destination(drive_service, _me, show_header=False)
     st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
     if st.button("Siguiente ⏭️", key="btn_next_step2"):
@@ -391,7 +367,6 @@ if not st.session_state["step2_done"]:
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    # Resumen en caja verde + LINK (no botón) para cambiar carpeta
     st.markdown(
         f'''
         <div class="success-inline">
@@ -405,11 +380,9 @@ else:
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 sc_service = None
 if not st.session_state["step3_done"]:
-    # Renderiza UI de SC (elige ACCESO / ACCESO_MEDIOS y autoriza)
     creds_src = pick_source_oauth()
     if not creds_src:
         st.stop()
-    # Guardar y colapsar
     st.session_state["creds_src"] = {
         "token": creds_src.token,
         "refresh_token": getattr(creds_src, "refresh_token", None),
@@ -418,13 +391,11 @@ if not st.session_state["step3_done"]:
         "client_secret": creds_src.client_secret,
         "scopes": creds_src.scopes,
     }
-    # Guardamos también qué cuenta se eligió (el helper suele poblar oauth_src.account)
     src_account = (st.session_state.get("oauth_src") or {}).get("account") or "ACCESO"
     st.session_state["src_account_label"] = src_account
     st.session_state["step3_done"] = True
     st.rerun()
 else:
-    # Ya autenticado en SC → construir cliente y mostrar resumen en caja verde
     creds_src = Credentials(**st.session_state["creds_src"])
     sc_service = ensure_sc_client(creds_src)
     src_label = st.session_state.get("src_account_label") or "ACCESO"
@@ -440,42 +411,56 @@ else:
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
-analisis = pick_analysis()
+include_auditoria = run_traffic_audit is not None
+analisis = pick_analysis(include_auditoria)
 
 # --- Ejecutar ---
 if analisis == "4":
-    params = params_for_core_update()
-    if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-        sid = run_core_update(sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id"))
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-elif analisis == "5":
-    params = params_for_evergreen()
-    if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-        sid = run_evergreen(sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id"))
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        st.session_state["last_file_id"] = sid
-        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-elif analisis == "6":
-    params = params_for_auditoria()
-    if not HAVE_AUDITORIA or run_traffic_audit is None:
-        st.warning("Esta opción requiere el paquete externo con `run_traffic_audit` (o alias `run_auditoria`). "
-                   "Actualizá tu repo externo y limpiá la caché (.ext_pkgs).")
+    if run_core_update is None:
+        st.warning("Este despliegue no incluye run_core_update.")
     else:
-        if st.button("📋 Ejecutar auditoría de tráfico", type="primary"):
-            sid = run_traffic_audit(
-                sc_service, drive_service, gs_client,
-                site_url, params, st.session_state.get("dest_folder_id")
+        params = params_for_core_update()
+        if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+            sid = run_with_indicator(
+                "Procesando Core Update",
+                run_core_update, sc_service, drive_service, gs_client, site_url, params,
+                st.session_state.get("dest_folder_id")
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             st.session_state["last_file_id"] = sid
             share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
+elif analisis == "5":
+    if run_evergreen is None:
+        st.warning("Este despliegue no incluye run_evergreen.")
+    else:
+        params = params_for_evergreen()
+        if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
+            sid = run_with_indicator(
+                "Procesando Evergreen",
+                run_evergreen, sc_service, drive_service, gs_client, site_url, params,
+                st.session_state.get("dest_folder_id")
+            )
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            st.session_state["last_file_id"] = sid
+            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+elif analisis == "6":
+    if run_traffic_audit is None:
+        st.warning("Este despliegue no incluye run_traffic_audit.")
+    else:
+        params = params_for_auditoria()
+        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary"):
+            sid = run_with_indicator(
+                "Procesando Auditoría de tráfico",
+                run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
+                st.session_state.get("dest_folder_id")
+            )
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            st.session_state["last_file_id"] = sid
+            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
