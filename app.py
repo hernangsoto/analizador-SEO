@@ -96,6 +96,8 @@ from modules.utils import debug_log, ensure_external_package
 
 USING_EXT = False
 HAVE_AUDITORIA = False
+
+# Inicializamos referencias (se asignarán más abajo)
 run_core_update = None
 run_evergreen = None
 run_traffic_audit = None
@@ -103,21 +105,55 @@ run_traffic_audit = None
 _ext = ensure_external_package()
 if _ext:
     USING_EXT = True
-    if hasattr(_ext, "run_core_update"):
-        run_core_update = _ext.run_core_update
-    if hasattr(_ext, "run_evergreen"):
-        run_evergreen = _ext.run_evergreen
+
+    # Core Update
+    run_core_update = getattr(_ext, "run_core_update", None)
+    if run_core_update is None:
+        try:
+            from modules.analysis import run_core_update as _local_core_update  # type: ignore
+            run_core_update = _local_core_update
+        except Exception:
+            pass
+
+    # Evergreen
+    run_evergreen = getattr(_ext, "run_evergreen", None)
+    if run_evergreen is None:
+        try:
+            from modules.analysis import run_evergreen as _local_run_evergreen  # type: ignore
+            run_evergreen = _local_run_evergreen
+        except Exception:
+            pass
+
     # Auditoría: aceptar run_traffic_audit o alias run_auditoria
-    if hasattr(_ext, "run_traffic_audit") or hasattr(_ext, "run_auditoria"):
-        HAVE_AUDITORIA = True
-        run_traffic_audit = getattr(_ext, "run_traffic_audit", getattr(_ext, "run_auditoria"))
+    run_traffic_audit = getattr(_ext, "run_traffic_audit", None)
+    if run_traffic_audit is None:
+        run_traffic_audit = getattr(_ext, "run_auditoria", None)
+    if run_traffic_audit is None:
+        try:
+            from modules.analysis import run_traffic_audit as _local_run_traffic_audit  # type: ignore
+            run_traffic_audit = _local_run_traffic_audit
+        except Exception:
+            pass
+    HAVE_AUDITORIA = run_traffic_audit is not None
+
 else:
-    # Fallback local
-    from modules.analysis import run_core_update, run_evergreen  # type: ignore
+    # Sin paquete externo → usar implementaciones locales disponibles
+    try:
+        from modules.analysis import run_core_update as _local_core_update  # type: ignore
+        run_core_update = _local_core_update
+    except Exception:
+        pass
+
+    try:
+        from modules.analysis import run_evergreen as _local_run_evergreen  # type: ignore
+        run_evergreen = _local_run_evergreen
+    except Exception:
+        pass
+
     try:
         from modules.analysis import run_traffic_audit as _local_run_traffic_audit  # type: ignore
-        HAVE_AUDITORIA = True
         run_traffic_audit = _local_run_traffic_audit
+        HAVE_AUDITORIA = True
     except Exception:
         HAVE_AUDITORIA = False
 
