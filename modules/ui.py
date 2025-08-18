@@ -409,31 +409,34 @@ def sidebar_user_info(user, maintenance_extra=None):
 
 def login_screen():
     st.header("Esta aplicación es privada.")
-    st.subheader("Por favor, inicia sesión.")
+    st.subheader("Iniciá sesión para continuar.")
 
     mode = _auth_mode()
 
     if mode == "streamlit":
-        # Botón de login real (si el despliegue tiene auth de Streamlit habilitada)
-        if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
-            try:
-                st.login()
-                # Refresca el script tras login exitoso
-                st.rerun()
-            except StreamlitAuthError:
-                st.error(
-                    "El inicio de sesión de Streamlit no está habilitado o falló en este despliegue. "
-                    "Si estás en local/Community Cloud sin auth, usa el acceso temporal de pruebas."
-                )
+        # Login nativo (si el despliegue tiene auth de Streamlit habilitada)
+        try:
+            st.login()
+            st.caption("Si no aparece el diálogo, recargá la página o abrí en ventana privada.")
+        except StreamlitAuthError:
+            st.error(
+                "El inicio de sesión de Streamlit no está habilitado o falló en este despliegue.",
+                icon="🚫",
+            )
+            st.markdown(
+                "- Verificá **Manage app → Settings → Who can view this app** = *Only specific people*.\n"
+                "- Guardá los cambios (**Save changes**) y hacé **Reboot app**.\n"
+                "- En *Secrets*, dejá `[auth].mode = \"streamlit\"`.\n"
+                "- Probá en ventana privada o limpiando cookies."
+            )
+        st.divider()
+        if st.button("Entrar en modo pruebas (bypass)", use_container_width=True):
+            st.session_state["_auth_bypass"] = True
+            st.rerun()
+        return
 
-        st.caption("Si no puedes usar el login real, podés continuar en modo pruebas.")
-        if st.button("Continuar sin login (solo pruebas)", key="btn_bypass"):
-            st.session_state["_auth_bypass"] = True
-            st.rerun()
-    else:
-        # Modo bypass por defecto: no intentamos llamar a st.login()
-        st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
-        if st.button("Continuar (modo pruebas)", key="btn_bypass_only"):
-            st.session_state["_auth_bypass"] = True
-            # reemplazo de experimental_rerun()
-            st.rerun()
+    # BYPASS (sin auth de Streamlit)
+    st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
+    if st.button("Continuar (modo pruebas)", use_container_width=True):
+        st.session_state["_auth_bypass"] = True
+        st.rerun()
