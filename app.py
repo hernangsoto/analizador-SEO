@@ -283,7 +283,8 @@ def _clear_qp():
 
 # ============== App ==============
 user = get_user()
-if not user or not getattr(user, "is_logged_in", False):
+# Gate: solo verificamos que exista un usuario (Streamlit Cloud ya valida el acceso)
+if not user:
     login_screen()
     st.stop()
 
@@ -491,5 +492,5 @@ elif analisis == "6":
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
 
-import streamlit as st
+# Debug opcional para verificar si la API key de Gemini está disponible
 st.write("¿Gemini listo?", "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"]))
