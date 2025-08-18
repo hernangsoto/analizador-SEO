@@ -68,13 +68,14 @@ def apply_page_style(
             --app-header-height: {header_height_px}px;
             background: {css_bg} !important;
         }}
+        /* Header nativo por detrás del banner (logo va arriba con z-index mayor) */
         header[data-testid="stHeader"] {{
             background: {header_bg} !important;
             color: #fff !important;
             min-height: var(--app-header-height);
             height: var(--app-header-height);
             box-shadow: none !important;
-            z-index: 1000 !important;
+            z-index: 1200 !important;
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
@@ -316,6 +317,73 @@ def enable_brand_auto_align() -> None:
 
 
 # =============================
+# Estilos globales reusables (botones / pills / caja success)
+# =============================
+
+def apply_action_styles(primary: str = "#8e7cc3", pill_bg: str = "#b4a7d6") -> None:
+    """
+    Inyecta estilos globales:
+    - Botones primarios (morados por defecto).
+    - Pill compacta (para resúmenes colapsados).
+    - Caja de éxito inline (.success-inline) verde suave.
+    """
+    st.markdown(
+        f"""
+        <style>
+        /* Botones primarios */
+        .stButton > button, .stDownloadButton > button {{
+          background: {primary} !important;
+          border-color: {primary} !important;
+          color: #fff !important;
+          border-radius: 8px !important;
+        }}
+        .stButton > button:hover, .stDownloadButton > button:hover {{
+          filter: brightness(0.93);
+        }}
+
+        /* Píldora compacta */
+        .pill-compact {{
+          background: {pill_bg};
+          color: #1f1f1f;
+          padding: 6px 10px;
+          border-radius: 20px;
+          display: inline-flex;
+          gap: .35rem;
+          align-items: center;
+          font-size: 0.95rem;
+          font-weight: 500;
+        }}
+        .pill-compact a {{
+          color: #4a3c7a;
+          text-decoration: underline;
+          font-weight: 600;
+        }}
+
+        /* Caja "success" inline (verde) */
+        .success-inline {{
+          background: #e6f4ea;
+          border: 1px solid #a5d6a7;
+          color: #1e4620;
+          padding: 10px 14px;
+          border-radius: 8px;
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: .5rem;
+        }}
+        .success-inline a {{
+          color: #0b8043;
+          text-decoration: underline;
+          font-weight: 600;
+        }}
+        .success-inline strong {{ margin-left: .25rem; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# =============================
 # Helpers de usuario / Sidebar
 # =============================
 
@@ -376,7 +444,7 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-        # IMPORTANTE: sin on_click
+        # IMPORTANTE: sin on_click (evita error de auth)
         if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
             st.logout()
 
@@ -384,6 +452,6 @@ def sidebar_user_info(user, maintenance_extra=None):
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
-    # IMPORTANTE: sin on_click
+    # IMPORTANTE: sin on_click (evita error de auth)
     if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
         st.login()
