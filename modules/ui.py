@@ -101,17 +101,13 @@ def render_brand_header(
     nudge_px: int = 0,                  # ↑↓  (+ baja, − sube)
     z_index: int = 3000,                # por delante del header
     x_align: str = "left",              # "left" | "center" | "right"
-    x_offset_px: int = 0,               # →←  (si left: + mueve a derecha; si right: + a izquierda)
-    container_max_px: int = 1200,       # ancho del contenido para alinear
+    x_offset_px: int = 0,               # →←
+    container_max_px: int = 1200,
 ) -> None:
-    """
-    Dibuja el logo como capa limpia, sin recuadro ni sombras.
-    """
+    """Dibuja el logo como capa limpia, sin recuadro ni sombras."""
     src = _inline_logo_src(logo_url)
-    # Dimensiones: mejor fijar altura para preservar proporción.
     dim_css = f"height:{height_px}px !important; width:auto !important; max-width:100% !important;"
 
-    # top calculado (base + nudge)
     base = "var(--app-header-height)" if top_offset_px is None else f"{top_offset_px}px"
     if nudge_px == 0:
         top_css = base
@@ -120,17 +116,15 @@ def render_brand_header(
     else:
         top_css = f"calc({base} - {abs(nudge_px)}px)"
 
-    # alineación horizontal
     justify = {"left": "flex-start", "center": "center", "right": "flex-end"}.get(x_align, "flex-start")
     if x_align == "left":
         img_margin = f"margin-left:{x_offset_px}px;"
     elif x_align == "right":
         img_margin = f"margin-right:{x_offset_px}px;"
     else:
-        img_margin = ""  # center
+        img_margin = ""
 
     if pinned:
-        # Capa fija full-width; left/width dinámicos para seguir al .block-container
         st.markdown(
             f"""
             <style>
@@ -141,7 +135,7 @@ def render_brand_header(
               width: var(--brand-width, 100%);
               z-index: {z_index};
               background: transparent !important;
-              pointer-events: none; /* no bloquea clicks del header */
+              pointer-events: none;
               transition: left .18s ease, width .18s ease;
             }}
             .brand-fixed .brand-inner {{
@@ -168,7 +162,6 @@ def render_brand_header(
             unsafe_allow_html=True,
         )
     else:
-        # Variante sticky (fluye con el contenido)
         st.markdown(
             f"""
             <style>
@@ -210,10 +203,7 @@ def render_brand_header_once(
     x_offset_px: int = 0,
     container_max_px: int = 1200,
 ) -> None:
-    """
-    Renderiza el banner una sola vez por 'firma' de parámetros.
-    Cambiás un parámetro → se re-renderiza automáticamente.
-    """
+    """Renderiza el banner una sola vez por 'firma' de parámetros."""
     sig = (
         logo_url, width_px, height_px, band_bg, top_offset_px,
         pinned, nudge_px, z_index, x_align, x_offset_px, container_max_px
@@ -238,12 +228,10 @@ def render_brand_header_once(
 
 
 def reset_brand_banner() -> None:
-    """Forza el re-render del banner la próxima vez que se invoque."""
     st.session_state.pop("_brand_sig", None)
 
 
 def hide_old_logo_instances() -> None:
-    """Intenta ocultar logos del header por defecto del tema/Streamlit."""
     st.markdown(
         """
         <style>
@@ -256,43 +244,22 @@ def hide_old_logo_instances() -> None:
 
 
 def enable_brand_auto_align() -> None:
-    """
-    Sincroniza --brand-left y --brand-width con el bounding box del .block-container.
-    Funciona en resize y al abrir/cerrar la sidebar.
-    El iframe/sensor queda totalmente oculto (height=0, opacity=0).
-    """
-    # Refuerzo CSS para la posición/ancho del logo fijo
+    """Actualiza --brand-left / --brand-width con el ancho del contenedor."""
     st.markdown(
         """
         <style>
-        .brand-fixed {
-          left: var(--brand-left, 0px) !important;
-          width: var(--brand-width, 100%) !important;
-        }
-        /* Ocultar por completo el iframe sensor */
-        iframe.stIFrame[srcdoc*="--brand-left"] {
-          width: 0 !important;
-          height: 0 !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-          border: 0 !important;
-          display: block !important;
-          margin: 0 !important;
-          padding: 0 !important;
-        }
-        iframe.stIFrame[srcdoc*="--brand-left"] + div { display: none !important; }
+        .brand-fixed { left: var(--brand-left, 0px) !important; width: var(--brand-width, 100%) !important; }
+        iframe.stIFrame[srcdoc*="--brand-left"] { width:0 !important; height:0 !important; opacity:0 !important; pointer-events:none !important; border:0 !important; display:block !important; margin:0 !important; padding:0 !important; }
+        iframe.stIFrame[srcdoc*="--brand-left"] + div { display:none !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-    # Iframe/sensor que mide el contenedor y actualiza variables CSS
     components.html(
         """
         <script>
         (function() {
           const doc = window.parent.document;
-
           function updateVars() {
             const bc = doc.querySelector('.block-container');
             if (!bc) return;
@@ -300,15 +267,9 @@ def enable_brand_auto_align() -> None:
             doc.documentElement.style.setProperty('--brand-left',  r.left + 'px');
             doc.documentElement.style.setProperty('--brand-width', r.width + 'px');
           }
-
-          // Observa cambios en el layout (sidebar, colapsos, etc.)
           const obs = new MutationObserver(() => updateVars());
-          obs.observe(doc.body, { attributes: true, childList: true, subtree: true });
-
-          // Resize de ventana
+          obs.observe(doc.body, { attributes:true, childList:true, subtree:true });
           window.addEventListener('resize', updateVars);
-
-          // Primera medición
           updateVars();
         })();
         </script>
@@ -322,8 +283,15 @@ def enable_brand_auto_align() -> None:
 # =============================
 
 def _auth_mode() -> str:
-    # "streamlit" para usar st.login/st.logout; cualquier otra cosa => bypass
-    return st.secrets.get("auth", {}).get("mode", "bypass").lower().strip()
+    """
+    Devuelve el modo de autenticación configurado por Secrets.
+    Valores: "streamlit" (recomendado en Cloud) o "bypass".
+    """
+    auth = st.secrets.get("auth", {})
+    return str(auth.get("mode", "streamlit")).lower().strip()
+
+def _allow_bypass() -> bool:
+    return bool(st.secrets.get("auth", {}).get("allow_bypass", True))
 
 
 def get_user():
@@ -348,8 +316,6 @@ def get_first_name(full_name: str | None) -> str:
 def sidebar_user_info(user, maintenance_extra=None):
     """
     Sidebar con avatar, nombre, email y utilidades de mantenimiento.
-    Podés inyectar controles extra dentro de 'Mantenimiento' pasando
-    un callback en maintenance_extra().
     """
     with st.sidebar:
         with st.container():
@@ -374,16 +340,10 @@ def sidebar_user_info(user, maintenance_extra=None):
         st.divider()
         st.markdown("**🧹 Mantenimiento**")
 
-        # 🔌 Elementos extra dentro de "Mantenimiento"
         if callable(maintenance_extra):
             maintenance_extra()
 
-        # Botón para limpiar paquete externo cacheado
-        if st.button(
-            "Borrar caché del paquete externo (.ext_pkgs/)",
-            key="btn_clean_extpkgs",
-            use_container_width=True,
-        ):
+        if st.button("Borrar caché del paquete externo (.ext_pkgs/)", key="btn_clean_extpkgs", use_container_width=True):
             try:
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
                 st.success("✅ Caché borrada. Hacé *Rerun* para reinstalar el paquete externo.")
@@ -391,52 +351,53 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-        # Cerrar sesión: solo si el modo es "streamlit"
+        # Cerrar sesión (solo si el entorno lo soporta)
         if _auth_mode() == "streamlit":
             if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
                 try:
                     st.logout()
                 except StreamlitAuthError:
                     st.error("No fue posible cerrar sesión en este despliegue.")
-                # Fuerza refresco de la UI después de logout
                 st.rerun()
         else:
-            # En bypass, ofrecer limpiar la sesión de pruebas
             if st.button("Salir del modo de pruebas", key="btn_exit_bypass", use_container_width=True):
                 st.session_state.pop("_auth_bypass", None)
                 st.rerun()
 
 
 def login_screen():
+    """
+    Pantalla de login:
+    - En Cloud con “Only specific people can view this app”, el login ocurre ANTES de cargar el script.
+      Por eso NO llamamos st.login() aquí. Solo damos instrucciones y un botón de reintento.
+    - Si permitís bypass (auth.allow_bypass=true), mostramos un botón para modo pruebas.
+    """
     st.header("Esta aplicación es privada.")
     st.subheader("Iniciá sesión para continuar.")
 
     mode = _auth_mode()
+    allow_bypass = _allow_bypass()
 
     if mode == "streamlit":
-        # Login nativo (si el despliegue tiene auth de Streamlit habilitada)
-        try:
-            st.login()
-            st.caption("Si no aparece el diálogo, recargá la página o abrí en ventana privada.")
-        except StreamlitAuthError:
-            st.error(
-                "El inicio de sesión de Streamlit no está habilitado o falló en este despliegue.",
-                icon="🚫",
-            )
-            st.markdown(
-                "- Verificá **Manage app → Settings → Who can view this app** = *Only specific people*.\n"
-                "- Guardá los cambios (**Save changes**) y hacé **Reboot app**.\n"
-                "- En *Secrets*, dejá `[auth].mode = \"streamlit\"`.\n"
-                "- Probá en ventana privada o limpiando cookies."
-            )
-        st.divider()
-        if st.button("Entrar en modo pruebas (bypass)", use_container_width=True):
+        st.error("El inicio de sesión de Streamlit no está habilitado o falló en este despliegue.")
+        st.markdown(
+            """
+- Verificá **Manage app → Sharing → Who can view this app = Only specific people** y agregá tus emails.
+- Guardá (Save changes) y hacé **Reboot app**.
+- Probá en **ventana privada** o limpiando cookies.
+            """
+        )
+        if st.button("🔄 Reintentar", key="btn_retry_login"):
+            st.rerun()
+
+        if allow_bypass:
+            st.caption("¿Solo querés probar la UI ahora mismo?")
+            if st.button("Continuar sin login (modo pruebas)", key="btn_bypass"):
+                st.session_state["_auth_bypass"] = True
+                st.rerun()
+
+    else:
+        st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
+        if st.button("Continuar (modo pruebas)", key="btn_bypass_only"):
             st.session_state["_auth_bypass"] = True
             st.rerun()
-        return
-
-    # BYPASS (sin auth de Streamlit)
-    st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
-    if st.button("Continuar (modo pruebas)", use_container_width=True):
-        st.session_state["_auth_bypass"] = True
-        st.rerun()
