@@ -3,247 +3,326 @@ from __future__ import annotations
 
 import os
 import re
-import unicodedata
-from typing import Iterable, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# -----------------------------
-# Helpers básicos (gspread)
-# -----------------------------
+# --------------------------------------------------------------------------------------
+# Configuración de Gemini
+# --------------------------------------------------------------------------------------
 
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
-    s = re.sub(r"\s+", " ", s.replace("|", " ").strip()).lower()
-    s = re.sub(r"[^a-z0-9 ]", "", s).replace(" ", "")
-    return s
+def _get_gemini_api_key() -> Optional[str]:
+    # Soporta dos ubicaciones en secrets
+    key = st.secrets.get("GEMINI_API_KEY")
+    if not key:
+        key = st.secrets.get("gemini", {}).get("api_key")
+    if not key:
+        # Fallback a variable de entorno (opcional)
+        key = os.environ.get("GEMINI_API_KEY")
+    return key
 
-def _get_ws(sh, names: Iterable[str]) -> Optional[object]:
-    targets = {_norm(n) for n in names if n}
-    for ws in sh.worksheets():
-        if _norm(ws.title) in targets:
+def _get_gemini_model_name() -> str:
+    return st.secrets.get("gemini", {}).get("model", "gemini-1.5-flash")
+
+def _load_gemini():
+    try:
+        import google.generativeai as genai  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "Falta el paquete 'google-generativeai'. Instalá con: "
+            "`pip install google-generativeai`"
+        ) from e
+    api_key = _get_gemini_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "No encontré la API key de Gemini. "
+            "Definí `GEMINI_API_KEY` en Streamlit Secrets (o en [gemini].api_key)."
+        )
+    genai.configure(api_key=api_key)
+    return genai
+
+def is_gemini_configured() -> bool:
+    try:
+        _load_gemini()
+        return True
+    except Exception:
+        return False
+
+# --------------------------------------------------------------------------------------
+# Helpers de lectura (gspread client + Google Sheet)
+# --------------------------------------------------------------------------------------
+
+def _ws_try(sheet, names: List[str]):
+    """
+    Devuelve la primera worksheet cuyo título matchee alguno de 'names' (flexible).
+    """
+    def _norm(s: str) -> str:
+        s = s.lower()
+        s = re.sub(r"[|]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        s = re.sub(r"[^a-z0-9 ]", "", s)
+        return s.replace(" ", "")
+
+    wanted = {_norm(n) for n in names if n}
+    for ws in sheet.worksheets():
+        t = _norm(ws.title)
+        if t in wanted or any(t in w or w in t for w in wanted):
             return ws
     return None
 
-def _read_table(ws, start_cell: str = "A1", max_rows: int = 1000, max_cols: int = 10) -> pd.DataFrame:
-    """Lee un bloque desde start_cell, recorta filas/cols vacías y devuelve DataFrame."""
-    # Range amplio para no traer toda la hoja
-    end_col = chr(ord("A") + max_cols - 1)
-    rng = f"{start_cell}:{end_col}{max_rows}"
-    values = ws.get(rng) or []
-    if not values:
-        return pd.DataFrame()
-    # La primera fila es el header; recorta columnas vacías al final
-    # y filas 100% vacías.
-    # Normaliza ancho
-    width = max(len(r) for r in values)
-    values = [r + [""] * (width - len(r)) for r in values]
-    # Quita tail vacío
-    def not_all_empty(row): return any(str(c).strip() != "" for c in row)
-    values = [r for r in values if not_all_empty(r)]
-    if not values:
-        return pd.DataFrame()
-
-    header, rows = values[0], values[1:]
-    df = pd.DataFrame(rows, columns=header)
-    # Quita columnas completamente vacías
-    df = df.loc[:, (df.astype(str).applymap(lambda x: x.strip()) != "").any()]
+def _read_table(ws, start_row: int, n_cols: int, max_rows: int = 5000) -> pd.DataFrame:
+    """
+    Lee un bloque tipo tabla comenzando en start_row, recorta en fila vacía.
+    Asume que no hay encabezado en start_row (son datos directos).
+    """
+    values = ws.get_all_values()
+    # Normaliza índice base-1 de Sheets a base-0 de Python
+    data = values[start_row - 1 : start_row - 1 + max_rows]
+    def _is_blank_row(row):
+        return not any(str(x).strip() for x in row[:n_cols])
+    out = []
+    for r in data:
+        row = (r + [""] * n_cols)[:n_cols]
+        if _is_blank_row(row):
+            break
+        out.append(row)
+    df = pd.DataFrame(out)
     return df
 
-def _to_float(s) -> float:
+def _to_num(x):
     try:
-        if s is None: return 0.0
-        if isinstance(s, (int, float)): return float(s)
-        s = str(s).replace("%", "").replace(",", ".").strip()
-        return float(s) if s else 0.0
+        # soporta "1,234.5" o "1.234,5" básicos
+        s = str(x).strip()
+        if s == "" or s.lower() in ("nan", "none", "null"):
+            return 0.0
+        # reemplazos simples de separadores
+        if "," in s and "." in s:
+            if s.find(".") < s.find(","):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+        return float(s)
     except Exception:
-        return 0.0
+        try:
+            return float(x)
+        except Exception:
+            return 0.0
 
-def _to_date(s):
-    try:
-        return pd.to_datetime(s).date()
-    except Exception:
-        return s
+# --------------------------------------------------------------------------------------
+# Construcción del prompt y llamada a Gemini
+# --------------------------------------------------------------------------------------
 
-# -----------------------------
-# Gemini client
-# -----------------------------
+def _build_prompt_traffic_audit(config: Dict[str, Any],
+                                totales_df: Optional[pd.DataFrame],
+                                search_daily: Optional[pd.DataFrame],
+                                discover_daily: Optional[pd.DataFrame],
+                                top15_search: Optional[pd.DataFrame],
+                                top15_discover: Optional[pd.DataFrame]) -> str:
+    """
+    Arma un prompt compacto en español para que Gemini redacte el resumen.
+    """
+    def _df_to_md(df: Optional[pd.DataFrame], max_rows=50) -> str:
+        if df is None or df.empty:
+            return "_(sin datos)_"
+        d = df.head(max_rows).copy()
+        # Evita tablas enormes
+        return d.to_markdown(index=False)
 
-def _get_gemini_model(model_name: str = "gemini-1.5-flash"):
-    """Devuelve un cliente de Gemini ya configurado o None si no hay API key."""
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None, "Falta configurar GEMINI_API_KEY en secrets o variables de entorno."
-    import google.generativeai as genai  # import lazy
-    genai.configure(api_key=api_key)
-    try:
-        model = genai.GenerativeModel(model_name)
-        return model, None
-    except Exception as e:
-        return None, f"No pude iniciar Gemini: {e}"
+    cfg_lines = []
+    for k in ["Sitio Analizado", "Modo de período", "Períodos PREVIOS incluidos",
+              "Lag de datos (días)", "Origen de datos", "Sección", "Ámbito", "País",
+              "Rango total (para diarios)"]:
+        v = config.get(k, "")
+        cfg_lines.append(f"- **{k}**: {v}")
+    cfg_md = "\n".join(cfg_lines)
 
-# -----------------------------
-# Lectura de datos del Sheet
-# -----------------------------
+    prompt = f"""
+Eres **Nomadic Bot 🤖**, un analista SEO que responde en español de forma clara y accionable.
+Te doy datos extraídos de Search Console para una **Auditoría de tráfico**.
 
-def _read_blocks_for_audit(gs_client, sid: str):
-    """Intenta leer los bloques estándar que produce el análisis de Auditoría."""
-    sh = gs_client.open_by_key(sid)
+## Contexto
+{cfg_md}
 
-    ws_tot = _get_ws(sh, ["Totales por período", "Totales por periodo", "Trafico por periodo"])
-    ws_top15 = _get_ws(sh, ["Top 15", "Top-15", "Top15"])
-    ws_s_daily = _get_ws(sh, ["Search | Datos Diarios", "Search Datos Diarios"])
-    ws_d_daily = _get_ws(sh, ["Discover | Datos Diarios", "Discover Datos Diarios"])
-    ws_s_pages = _get_ws(sh, ["Search | Páginas por período", "Search Paginas por periodo"])
-    ws_d_pages = _get_ws(sh, ["Discover | Páginas por período", "Discover Paginas por periodo"])
+## Totales por período
+{_df_to_md(totales_df)}
 
-    # Totales por período (desde fila 2)
-    df_tot = pd.DataFrame()
-    header_txt = ""
-    if ws_tot:
-        header = ws_tot.get("A1:A1")
-        header_txt = (header[0][0] if header and header[0] else "") or ""
-        df_tot = _read_table(ws_tot, start_cell="A2", max_rows=500, max_cols=6)
-        # Normaliza nombres si vienen distintos
-        df_tot.columns = [c.strip().lower() for c in df_tot.columns]
-        df_tot.rename(columns={
-            "periodo":"periodo", "inicio":"inicio", "fin":"fin",
-            "clics":"clics", "impresiones":"impresiones", "ctr":"ctr"
-        }, inplace=True)
+## Datos diarios (Search)
+{_df_to_md(search_daily)}
 
-        # Cast
-        if not df_tot.empty:
-            for col in ("clics","impresiones","ctr"):
-                if col in df_tot.columns:
-                    df_tot[col] = df_tot[col].map(_to_float)
-            for col in ("inicio","fin"):
-                if col in df_tot.columns:
-                    df_tot[col] = df_tot[col].map(_to_date)
+## Datos diarios (Discover)
+{_df_to_md(discover_daily)}
 
-    # Top 15 — dos bloques posibles
-    df_top_search = pd.DataFrame()
-    df_top_disc   = pd.DataFrame()
-    if ws_top15:
-        # Search: filas 3..18
-        df_ts = _read_table(ws_top15, start_cell="A3", max_rows=18, max_cols=6)
-        # Discover: filas 21..36
-        df_td = _read_table(ws_top15, start_cell="A21", max_rows=36, max_cols=6)
-        for d in (df_ts, df_td):
-            d.columns = [c.strip().lower() for c in d.columns]
-            d.rename(columns={"sección":"seccion","posición":"posicion"}, inplace=True)
-            for col in ("clics","impresiones","ctr","posicion"):
-                if col in d.columns: d[col] = d[col].map(_to_float)
-        df_top_search, df_top_disc = df_ts, df_td
+## Top 15 páginas (Search)
+{_df_to_md(top15_search, max_rows=15)}
 
-    # Diarios
-    df_s_daily = _read_table(ws_s_daily, start_cell="A2", max_rows=5000, max_cols=3) if ws_s_daily else pd.DataFrame()
-    df_d_daily = _read_table(ws_d_daily, start_cell="A2", max_rows=5000, max_cols=3) if ws_d_daily else pd.DataFrame()
-    for d in (df_s_daily, df_d_daily):
-        if not d.empty:
-            d.columns = [c.strip().lower() for c in d.columns]
-            for col in ("clics","impresiones"):
-                if col in d.columns: d[col] = d[col].map(_to_float)
-            if "fecha" in d.columns: d["fecha"] = d["fecha"].map(_to_date)
+## Top 15 páginas (Discover)
+{_df_to_md(top15_discover, max_rows=15)}
 
-    # Pages por período (para insights extra)
-    df_s_pages = _read_table(ws_s_pages, start_cell="A2", max_rows=25000, max_cols=5) if ws_s_pages else pd.DataFrame()
-    df_d_pages = _read_table(ws_d_pages, start_cell="A2", max_rows=25000, max_cols=5) if ws_d_pages else pd.DataFrame()
-    for d in (df_s_pages, df_d_pages):
-        if not d.empty:
-            d.columns = [c.strip().lower() for c in d.columns]
-            for col in ("clics","impresiones","ctr"):
-                if col in d.columns: d[col] = d[col].map(_to_float)
-
-    return {
-        "header": header_txt,
-        "totales": df_tot,
-        "top_search": df_top_search,
-        "top_discover": df_top_disc,
-        "search_daily": df_s_daily,
-        "discover_daily": df_d_daily,
-        "search_pages": df_s_pages,
-        "discover_pages": df_d_pages,
-    }
-
-# -----------------------------
-# Construcción de prompt
-# -----------------------------
-
-def _mk_small_table(df: pd.DataFrame, max_rows=10) -> str:
-    if df is None or df.empty:
-        return "_(sin datos)_"
-    head = df.head(max_rows).copy()
-    # Limita columnas útiles
-    if len(head.columns) > 8:
-        head = head.iloc[:, :8]
-    # To markdown simple
-    return head.to_markdown(index=False)
-
-def _build_prompt_audit(site_url: str, modo: str, tipo: str, blocks: dict, periods_back: int) -> str:
-    """Crea un prompt compacto en español a partir de los bloques leídos del Sheet."""
-    tot = blocks["totales"]
-    cur_txt = ""
-    if not tot.empty and {"inicio","fin"}.issubset(tot.columns):
-        cur_txt = f"{tot.iloc[0]['inicio']} → {tot.iloc[0]['fin']}"
-    head_label = blocks["header"] or "Totales por período"
-
-    return f"""
-Actúa como un analista SEO senior. Resume de forma breve y accionable (máx. 220–280 palabras)
-los hallazgos del siguiente informe de **Auditoría de tráfico** para *{site_url}*.
-Responde **en español (tono profesional, claro)**, con bullets, y una sección final de “Próximos pasos”.
-
-**Contexto del análisis**
-- Modo del período: {modo}
-- Fuente(s): {tipo}
-- Periodos previos incluidos: {periods_back}
-- Período actual: {cur_txt}
-
-**Totales por período** ({head_label})
-{_mk_small_table(tot, 8)}
-
-**Top 15 Search (clics) – actual**
-{_mk_small_table(blocks["top_search"], 10)}
-
-**Top 15 Discover (clics) – actual**
-{_mk_small_table(blocks["top_discover"], 10)}
-
-**Serie diaria Search (fecha, clics, impresiones) – agregado**
-{_mk_small_table(blocks["search_daily"], 12)}
-
-**Serie diaria Discover (fecha, clics, impresiones) – agregado**
-{_mk_small_table(blocks["discover_daily"], 12)}
-
-Instrucciones:
-1) Compara el período actual vs. el promedio de los previos (clics, impresiones, CTR) y destaca variaciones relevantes (con signo y ~%).
-2) Identifica 3–5 **ganadores/perdedores** (URLs o secciones) y posibles causas (ej. estacionalidad, ranking/CTR, cobertura Discover).
-3) Propón **3–6 próximos pasos** (rápidos y mediano plazo) con foco en impacto SEO.
-4) NO uses tablas, solo bullets y frases cortas. Evita jergas. Nombra “Nomadic Bot 🤖” al encabezado.
+### Instrucciones
+1) Da un **panorama general** de rendimiento del período actual vs previos (crecimiento/caída, CTR, estacionalidad).
+2) Lista **oportunidades y riesgos** (páginas o secciones con señales claras).
+3) Propón **acciones concretas** (on-page, contenidos, enlazado interno, quick wins).
+4) Si hay Search y Discover, **diferencia** el aporte de cada canal.
+5) Mantén el tono profesional, breve y estructurado con viñetas y subtítulos.
 """
+    return prompt
 
-# -----------------------------
-# Entrada pública
-# -----------------------------
+def _call_gemini(prompt: str) -> str:
+    genai = _load_gemini()
+    model_name = _get_gemini_model_name()
+    model = genai.GenerativeModel(model_name)
+    resp = model.generate_content(prompt)
+    try:
+        text = (resp.text or "").strip()
+    except Exception:
+        # SDKs antiguos devuelven candidates
+        try:
+            text = (resp.candidates[0].content.parts[0].text or "").strip()  # type: ignore
+        except Exception:
+            text = ""
+    return text or "No se pudo generar el resumen en este intento."
 
-def nomadic_ai_summary_audit(gs_client, sid: str, *, site_url: str, modo: str, tipo: str, periods_back: int) -> str:
+# --------------------------------------------------------------------------------------
+# Summary principal (Auditoría de tráfico)
+# --------------------------------------------------------------------------------------
+
+def summarize_traffic_audit_from_sheet(gs_client, spreadsheet_id: str) -> str:
     """
-    Lee el Google Sheet de Auditoría de tráfico (sid) y devuelve un texto en español
-    con el resumen generado por Gemini. Maneja faltantes con gracia.
+    Lee las pestañas del template de Auditoría de tráfico y genera
+    un resumen con Gemini (Nomadic Bot 🤖). Devuelve **Markdown**.
     """
-    model, err = _get_gemini_model()
-    if not model:
-        return f"⚠️ No se pudo iniciar Gemini: {err}"
+    try:
+        sh = gs_client.open_by_key(spreadsheet_id)
+    except Exception as e:
+        return f"❌ No pude abrir el Sheet ({spreadsheet_id}): {e}"
 
-    blocks = _read_blocks_for_audit(gs_client, sid)
-    prompt = _build_prompt_audit(site_url=site_url, modo=modo, tipo=tipo, blocks=blocks, periods_back=periods_back)
+    # 1) Configuración
+    config_ws = _ws_try(sh, ["Configuración", "Configuracion", "Settings"])
+    config_dict: Dict[str, Any] = {}
+    if config_ws:
+        vals = config_ws.get_all_values()
+        # esperamos key/valor a partir de la fila 2 (fila 1 suele ser encabezado)
+        for row in vals[1:]:
+            if len(row) >= 2 and (row[0] or row[1]):
+                config_dict[row[0].strip()] = row[1].strip()
+    else:
+        config_dict["Sitio Analizado"] = "(desconocido)"
+
+    # 2) Totales por período (primer bloque desde fila 2, hasta fila en blanco)
+    tot_ws = _ws_try(sh, ["Totales por período", "Totales por periodo", "Trafico por periodo"])
+    tot_df = None
+    if tot_ws:
+        tdf = _read_table(tot_ws, start_row=2, n_cols=6, max_rows=3000)
+        if not tdf.empty:
+            tdf.columns = ["periodo", "inicio", "fin", "clics", "impresiones", "ctr"]
+            for c in ["clics", "impresiones", "ctr"]:
+                tdf[c] = tdf[c].apply(_to_num)
+            tot_df = tdf
+
+    # 3) Datos diarios
+    sd_ws = _ws_try(sh, ["Search | Datos Diarios", "Search Datos Diarios"])
+    sd_df = None
+    if sd_ws:
+        sdf = _read_table(sd_ws, start_row=2, n_cols=3, max_rows=4000)
+        if not sdf.empty:
+            sdf.columns = ["fecha", "clics", "impresiones"]
+            sdf["clics"] = sdf["clics"].apply(_to_num)
+            sdf["impresiones"] = sdf["impresiones"].apply(_to_num)
+            sd_df = sdf
+
+    dd_ws = _ws_try(sh, ["Discover | Datos Diarios", "Discover Datos Diarios"])
+    dd_df = None
+    if dd_ws:
+        ddf = _read_table(dd_ws, start_row=2, n_cols=3, max_rows=4000)
+        if not ddf.empty:
+            ddf.columns = ["fecha", "clics", "impresiones"]
+            ddf["clics"] = ddf["clics"].apply(_to_num)
+            ddf["impresiones"] = ddf["impresiones"].apply(_to_num)
+            dd_df = ddf
+
+    # 4) Top 15 (Search en fila 3, Discover en fila 21 según tu template)
+    top_ws = _ws_try(sh, ["Top 15", "Top-15", "Top15"])
+    top_s_df = None
+    top_d_df = None
+    if top_ws:
+        # Search
+        tdf_s = _read_table(top_ws, start_row=3, n_cols=6, max_rows=20)
+        if not tdf_s.empty:
+            tdf_s.columns = ["url", "sección", "clics", "impresiones", "ctr", "posición"]
+            for c in ["clics", "impresiones", "ctr", "posición"]:
+                tdf_s[c] = tdf_s[c].apply(_to_num)
+            top_s_df = tdf_s
+        # Discover
+        tdf_d = _read_table(top_ws, start_row=21, n_cols=6, max_rows=20)
+        if not tdf_d.empty:
+            tdf_d.columns = ["url", "sección", "clics", "impresiones", "ctr", "posición"]
+            for c in ["clics", "impresiones", "ctr", "posición"]:
+                tdf_d[c] = tdf_d[c].apply(_to_num)
+            top_d_df = tdf_d
+
+    # 5) Prompt + Gemini
+    prompt = _build_prompt_traffic_audit(config=config_dict,
+                                         totales_df=tot_df,
+                                         search_daily=sd_df,
+                                         discover_daily=dd_df,
+                                         top15_search=top_s_df,
+                                         top15_discover=top_d_df)
 
     try:
-        resp = model.generate_content(prompt)
-        text = (resp.text or "").strip()
-        if not text:
-            return "⚠️ Gemini no devolvió contenido."
-        # Etiqueta con marca
-        return f"### Nomadic Bot 🤖 — Resumen de Auditoría\n\n{text}"
+        summary = _call_gemini(prompt)
     except Exception as e:
-        return f"⚠️ Error al generar el resumen con Gemini: {e}"
+        return f"❌ No pude generar el resumen con Gemini: {e}"
+
+    # 6) Caja con título (opcional estilizado)
+    head = "### 🤖 Nomadic Bot — Resumen de Auditoría de tráfico\n"
+    return head + "\n" + summary
+
+# --------------------------------------------------------------------------------------
+# Render helper (Streamlit)
+# --------------------------------------------------------------------------------------
+
+def render_summary_box(markdown_text: str) -> None:
+    """
+    Renderiza el resumen en una caja neutra.
+    """
+    if not markdown_text:
+        return
+    st.markdown(
+        """
+        <style>
+        .nbot-box {
+          border: 1px solid #E5E7EB;
+          background: #F9FAFB;
+          border-radius: 10px;
+          padding: 16px 18px;
+          margin: 6px 0 18px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<div class="nbot-box">{markdown_text}</div>', unsafe_allow_html=True)
+
+# --------------------------------------------------------------------------------------
+# Hooks de alto nivel para distintos informes (si luego amplías)
+# --------------------------------------------------------------------------------------
+
+def summarize_sheet_auto(gs_client, spreadsheet_id: str, kind: str = "audit") -> str:
+    """
+    Router simple para distintos tipos de sheet (por ahora 'audit').
+    """
+    if kind == "audit":
+        return summarize_traffic_audit_from_sheet(gs_client, spreadsheet_id)
+    # Podrías añadir: 'evergreen', 'core_update', etc.
+    return "Por ahora solo está implementado el resumen para Auditoría de tráfico."
+
+# --------------------------------------------------------------------------------------
+# Uso (ejemplo desde app.py)
+# --------------------------------------------------------------------------------------
+# from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
+# if is_gemini_configured() and st.session_state.get("last_file_id"):
+#     md = summarize_sheet_auto(gs_client, st.session_state["last_file_id"], kind="audit")
+#     render_summary_box(md)
