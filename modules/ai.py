@@ -3,10 +3,17 @@ from __future__ import annotations
 
 import os
 import re
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+
+# Intento opcional de usar tabulate; si no está, hacemos fallback manual
+try:
+    from tabulate import tabulate as _tabulate  # type: ignore
+except Exception:
+    _tabulate = None
 
 # --------------------------------------------------------------------------------------
 # Configuración de Gemini
@@ -112,6 +119,63 @@ def _to_num(x):
             return 0.0
 
 # --------------------------------------------------------------------------------------
+# Conversión DataFrame -> Markdown (con fallback si no hay tabulate)
+# --------------------------------------------------------------------------------------
+
+def _df_to_md(d: Optional[pd.DataFrame], max_rows: int = 60) -> str:
+    """
+    Convierte un DataFrame a tabla Markdown.
+    - Usa 'tabulate' si está disponible.
+    - Si no, genera una tabla Markdown manualmente.
+    - Limita filas para no inflar el prompt del modelo.
+    """
+    if d is None or d.empty:
+        return "_(sin datos)_"
+
+    df = d.copy()
+    if max_rows and len(df) > max_rows:
+        df = df.head(max_rows)
+
+    def _fmt(v):
+        if v is None:
+            return ""
+        # pandas NaN / NaT
+        try:
+            if pd.isna(v):
+                return ""
+        except Exception:
+            pass
+        # fechas
+        if isinstance(v, pd.Timestamp):
+            try:
+                return v.date().isoformat()
+            except Exception:
+                return v.isoformat()
+        # floats seguros
+        if isinstance(v, float):
+            if not math.isfinite(v):
+                return ""
+            s = f"{v:.4f}".rstrip("0").rstrip(".")
+            return s if s != "-0" else "0"
+        return str(v)
+
+    data = [[_fmt(v) for v in row] for row in df.itertuples(index=False)]
+
+    if _tabulate:
+        # formato tipo GitHub
+        return _tabulate(data, headers=list(df.columns), tablefmt="github")
+
+    # Fallback manual a Markdown
+    headers = [str(c) for c in df.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in data:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+# --------------------------------------------------------------------------------------
 # Construcción del prompt y llamada a Gemini
 # --------------------------------------------------------------------------------------
 
@@ -124,13 +188,6 @@ def _build_prompt_traffic_audit(config: Dict[str, Any],
     """
     Arma un prompt compacto en español para que Gemini redacte el resumen.
     """
-    def _df_to_md(df: Optional[pd.DataFrame], max_rows=50) -> str:
-        if df is None or df.empty:
-            return "_(sin datos)_"
-        d = df.head(max_rows).copy()
-        # Evita tablas enormes
-        return d.to_markdown(index=False)
-
     cfg_lines = []
     for k in ["Sitio Analizado", "Modo de período", "Períodos PREVIOS incluidos",
               "Lag de datos (días)", "Origen de datos", "Sección", "Ámbito", "País",
