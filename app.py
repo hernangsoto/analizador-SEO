@@ -490,3 +490,6 @@ elif analisis == "6":
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
+
+import streamlit as st
+st.write("¿Gemini listo?", "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"]))
