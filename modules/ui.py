@@ -4,10 +4,12 @@ from __future__ import annotations
 import base64
 import shutil
 from urllib.parse import quote
+from types import SimpleNamespace
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components  # para enable_brand_auto_align()
+import streamlit.components.v1 as components
+from streamlit.errors import StreamlitAuthError
 
 
 # =============================
@@ -68,14 +70,13 @@ def apply_page_style(
             --app-header-height: {header_height_px}px;
             background: {css_bg} !important;
         }}
-        /* Header nativo por detrás del banner (logo va arriba con z-index mayor) */
         header[data-testid="stHeader"] {{
             background: {header_bg} !important;
             color: #fff !important;
             min-height: var(--app-header-height);
             height: var(--app-header-height);
             box-shadow: none !important;
-            z-index: 1200 !important;
+            z-index: 1000 !important;
         }}
         header [data-testid="stToolbar"] * {{
             color: #fff !important;
@@ -317,79 +318,20 @@ def enable_brand_auto_align() -> None:
 
 
 # =============================
-# Estilos globales reusables (botones / pills / caja success)
-# =============================
-
-def apply_action_styles(primary: str = "#8e7cc3", pill_bg: str = "#b4a7d6") -> None:
-    """
-    Inyecta estilos globales:
-    - Botones primarios (morados por defecto).
-    - Pill compacta (para resúmenes colapsados).
-    - Caja de éxito inline (.success-inline) verde suave.
-    """
-    st.markdown(
-        f"""
-        <style>
-        /* Botones primarios */
-        .stButton > button, .stDownloadButton > button {{
-          background: {primary} !important;
-          border-color: {primary} !important;
-          color: #fff !important;
-          border-radius: 8px !important;
-        }}
-        .stButton > button:hover, .stDownloadButton > button:hover {{
-          filter: brightness(0.93);
-        }}
-
-        /* Píldora compacta */
-        .pill-compact {{
-          background: {pill_bg};
-          color: #1f1f1f;
-          padding: 6px 10px;
-          border-radius: 20px;
-          display: inline-flex;
-          gap: .35rem;
-          align-items: center;
-          font-size: 0.95rem;
-          font-weight: 500;
-        }}
-        .pill-compact a {{
-          color: #4a3c7a;
-          text-decoration: underline;
-          font-weight: 600;
-        }}
-
-        /* Caja "success" inline (verde) */
-        .success-inline {{
-          background: #e6f4ea;
-          border: 1px solid #a5d6a7;
-          color: #1e4620;
-          padding: 10px 14px;
-          border-radius: 8px;
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: .5rem;
-        }}
-        .success-inline a {{
-          color: #0b8043;
-          text-decoration: underline;
-          font-weight: 600;
-        }}
-        .success-inline strong {{ margin-left: .25rem; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# =============================
 # Helpers de usuario / Sidebar
 # =============================
 
 def get_user():
-    """Devuelve la info del usuario autenticado (st.user o experimental_user)."""
-    return getattr(st, "user", getattr(st, "experimental_user", None))
+    """
+    Devuelve el usuario autenticado (st.user o experimental_user).
+    Si no hay auth habilitada, permite bypass temporal para pruebas.
+    """
+    u = getattr(st, "user", getattr(st, "experimental_user", None))
+    if u:
+        return u
+    if st.session_state.get("_auth_bypass"):
+        return SimpleNamespace(is_logged_in=True, name="Invitado", email="—", picture=None)
+    return None
 
 
 def get_first_name(full_name: str | None) -> str:
@@ -444,14 +386,29 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-        # IMPORTANTE: sin on_click (evita error de auth)
+        # Cerrar sesión (si hay auth real). En entornos sin auth, avisamos.
         if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
-            st.logout()
+            try:
+                st.logout()
+            except StreamlitAuthError:
+                st.info("La función de cerrar sesión no está disponible en este despliegue (sin auth).")
 
 
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
-    # IMPORTANTE: sin on_click (evita error de auth)
+
+    # Botón de login real (si el despliegue tiene auth de Streamlit habilitada)
     if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
-        st.login()
+        try:
+            st.login()
+        except StreamlitAuthError:
+            st.error(
+                "El inicio de sesión de Streamlit no está habilitado en este despliegue. "
+                "Si estás en local/Community Cloud sin auth, usa el acceso temporal de pruebas."
+            )
+
+    # Opción de continuar sin login (útil para móviles y entornos sin auth)
+    if st.button("Continuar sin login (solo pruebas)", key="btn_bypass"):
+        st.session_state["_auth_bypass"] = True
+        st.rerun()
