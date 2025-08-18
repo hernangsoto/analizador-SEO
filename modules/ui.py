@@ -321,10 +321,15 @@ def enable_brand_auto_align() -> None:
 # Helpers de usuario / Sidebar
 # =============================
 
+def _auth_mode() -> str:
+    # "streamlit" para usar st.login/st.logout; cualquier otra cosa => bypass
+    return st.secrets.get("auth", {}).get("mode", "bypass").lower().strip()
+
+
 def get_user():
     """
     Devuelve el usuario autenticado (st.user o experimental_user).
-    Si no hay auth habilitada, permite bypass temporal para pruebas.
+    Si no hay auth habilitada y está activado el bypass, devuelve un usuario dummy.
     """
     u = getattr(st, "user", getattr(st, "experimental_user", None))
     if u:
@@ -386,29 +391,44 @@ def sidebar_user_info(user, maintenance_extra=None):
                 st.error(f"No pude borrar .ext_pkgs: {e}")
 
         st.divider()
-        # Cerrar sesión (si hay auth real). En entornos sin auth, avisamos.
-        if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
-            try:
-                st.logout()
-            except StreamlitAuthError:
-                st.info("La función de cerrar sesión no está disponible en este despliegue (sin auth).")
+        # Cerrar sesión: solo si el modo es "streamlit"
+        if _auth_mode() == "streamlit":
+            if st.button(":material/logout: Cerrar sesión", key="btn_logout", use_container_width=True):
+                try:
+                    st.logout()
+                except StreamlitAuthError:
+                    st.error("No fue posible cerrar sesión en este despliegue.")
+        else:
+            # En bypass, ofrecer limpiar la sesión de pruebas
+            if st.button("Salir del modo de pruebas", key="btn_exit_bypass", use_container_width=True):
+                st.session_state.pop("_auth_bypass", None)
+                st.experimental_rerun()
 
 
 def login_screen():
     st.header("Esta aplicación es privada.")
     st.subheader("Por favor, inicia sesión.")
 
-    # Botón de login real (si el despliegue tiene auth de Streamlit habilitada)
-    if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
-        try:
-            st.login()
-        except StreamlitAuthError:
-            st.error(
-                "El inicio de sesión de Streamlit no está habilitado en este despliegue. "
-                "Si estás en local/Community Cloud sin auth, usa el acceso temporal de pruebas."
-            )
+    mode = _auth_mode()
 
-    # Opción de continuar sin login (útil para móviles y entornos sin auth)
-    if st.button("Continuar sin login (solo pruebas)", key="btn_bypass"):
-        st.session_state["_auth_bypass"] = True
-        st.rerun()
+    if mode == "streamlit":
+        # Botón de login real (si el despliegue tiene auth de Streamlit habilitada)
+        if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
+            try:
+                st.login()
+            except StreamlitAuthError:
+                st.error(
+                    "El inicio de sesión de Streamlit no está habilitado o falló en este despliegue. "
+                    "Si estás en local/Community Cloud sin auth, usa el acceso temporal de pruebas."
+                )
+
+        st.caption("Si no puedes usar el login real, podés continuar en modo pruebas.")
+        if st.button("Continuar sin login (solo pruebas)", key="btn_bypass"):
+            st.session_state["_auth_bypass"] = True
+            st.experimental_rerun()
+    else:
+        # Modo bypass por defecto: no intentamos llamar a st.login()
+        st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
+        if st.button("Continuar (modo pruebas)", key="btn_bypass_only"):
+            st.session_state["_auth_bypass"] = True
+            st.experimental_rerun()
