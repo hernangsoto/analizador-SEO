@@ -71,7 +71,6 @@ def creds_to_dict(creds: Credentials) -> dict:
 def get_cached_personal_creds() -> Optional[Credentials]:
     """
     Devuelve Credentials de la CUENTA PERSONAL (Drive/Sheets) si está cacheado.
-    Fix: usar token_store.load / as_credentials (no .get()).
     """
     # Preferir construir Credentials directamente desde el token_store
     creds = token_store.as_credentials("creds_dest")
@@ -110,12 +109,12 @@ def pick_destination_oauth():
 
     # Construye el flow y auth_url solo si no existe ya
     if "oauth_dest" not in st.session_state:
-        from .utils import build_flow_drive  # tu helper que arma Flow con scopes de Drive/Sheets
+        from .utils import build_flow_drive  # helper con scopes de Drive/Sheets
         flow = build_flow_drive(acct_for_dest)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes="false",
+            include_granted_scopes=True,
         )
         st.session_state["oauth_dest"] = {
             "account_key": acct_for_dest,
@@ -171,14 +170,10 @@ def pick_destination_oauth():
                 flow: Flow = od["flow"]
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
-                st.session_state["creds_dest"] = {
-                    "token": creds.token,
-                    "refresh_token": getattr(creds, "refresh_token", None),
-                    "token_uri": creds.token_uri,
-                    "client_id": creds.client_id,
-                    "client_secret": creds.client_secret,
-                    "scopes": creds.scopes,
-                }
+                data = creds_to_dict(creds)
+                # Guardar en ambos para consistencia
+                st.session_state["creds_dest"] = data
+                token_store.save("creds_dest", data)
                 st.success("Cuenta PERSONAL conectada.")
             except Exception as e:
                 st.error("No se pudo conectar la cuenta PERSONAL. Reintentá autorización y pegá la URL completa.")
@@ -190,12 +185,16 @@ def pick_destination_oauth():
             # Limpia solo lo relacionado al flujo personal
             st.session_state.pop("oauth_dest", None)
             st.session_state.pop("creds_dest", None)
+            token_store.clear("creds_dest")
             st.success("Restaurado. Volvé a hacer clic en 'Autorizar Drive/Sheets'.")
             st.stop()
 
     # Rehidratar desde cache si ya está autenticado
     if not creds and st.session_state.get("creds_dest"):
-        creds = Credentials(**st.session_state["creds_dest"])
+        try:
+            creds = Credentials(**st.session_state["creds_dest"])
+        except Exception:
+            creds = token_store.as_credentials("creds_dest")
 
     return creds
 
@@ -205,7 +204,8 @@ def pick_destination_oauth():
 # =============================
 def pick_source_oauth() -> Optional[Credentials]:
     """
-    Autentica la cuenta FUENTE para Search Console (ACCESO o ACCESO_MEDIOS).
+    Autentica la cuenta FUENTE para Search Console (ACCESO o ACCESO_MEDIOS),
+    validando también el parámetro 'state' para evitar CSRF.
     """
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
 
@@ -221,12 +221,13 @@ def pick_source_oauth() -> Optional[Credentials]:
     if st.session_state.get("oauth_src", {}).get("account") != acct:
         st.session_state.pop("oauth_src", None)
 
+    # Construye flow + auth_url si no existe
     if "oauth_src" not in st.session_state:
         flow = build_flow(acct, SCOPES_GSC)
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes="false",
+            include_granted_scopes=True,
         )
         st.session_state["oauth_src"] = {
             "account": acct,
@@ -246,23 +247,55 @@ def pick_source_oauth() -> Optional[Credentials]:
         placeholder="http://localhost/?code=...&state=...",
     )
 
+    col1, col2 = st.columns([1, 1])
     creds = None
-    if st.button("Conectar Search Console", type="secondary"):
-        if not url.strip():
-            st.error("Pegá la URL completa de redirección (incluye code y state).")
-            st.stop()
-        try:
-            flow: Flow = osrc["flow"]
-            flow.fetch_token(authorization_response=url.strip())
-            creds = flow.credentials
-            token_store.save("creds_src", creds_to_dict(creds))
-            st.success("Cuenta SC conectada.")
-        except Exception as e:
-            st.session_state.pop("oauth_src", None)
-            st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
-            st.caption(f"Detalle técnico: {e}")
 
-    # Leer de cache si ya guardamos en este mismo run
+    with col1:
+        if st.button("Conectar Search Console", type="secondary"):
+            if not url.strip():
+                st.error("Pegá la URL completa de redirección (incluye code y state).")
+                st.stop()
+
+            # --- Validar 'state' explícitamente antes de fetch_token ---
+            try:
+                qs = parse_qs(urlsplit(url.strip()).query)
+                returned_state = (qs.get("state") or [""])[0]
+            except Exception:
+                returned_state = ""
+
+            if not returned_state:
+                st.error("La URL pegada no contiene parámetro 'state'. Verificá que sea la URL completa.")
+                st.stop()
+
+            expected_state = osrc.get("state")
+            if returned_state != expected_state:
+                st.error(
+                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
+                    f"state esperado: `{expected_state}`\n"
+                    f"state recibido: `{returned_state}`"
+                )
+                st.info("Hacé clic en **Reiniciar Paso 2** y repetí la autorización (un solo click).")
+                st.stop()
+
+            try:
+                flow: Flow = osrc["flow"]
+                flow.fetch_token(authorization_response=url.strip())
+                creds = flow.credentials
+                data = creds_to_dict(creds)
+                token_store.save("creds_src", data)
+                st.success("Cuenta SC conectada.")
+            except Exception as e:
+                st.error("No se pudo conectar Search Console. Reintentá autorización y pegá la URL completa.")
+                st.caption(f"Detalle técnico: {e}")
+
+    with col2:
+        if st.button("Reiniciar Paso 2", key="btn_reset_src"):
+            st.session_state.pop("oauth_src", None)
+            token_store.clear("creds_src")
+            st.success("Restaurado. Volvé a hacer clic en 'Autorizar acceso a Search Console'.")
+            st.stop()
+
+    # Rehidratar si ya guardamos en este mismo run
     if not creds:
         creds_dict = token_store.load("creds_src")
         if creds_dict:
