@@ -398,6 +398,8 @@ def sidebar_user_info(user, maintenance_extra=None):
                     st.logout()
                 except StreamlitAuthError:
                     st.error("No fue posible cerrar sesión en este despliegue.")
+                # Fuerza refresco de la UI después de logout
+                st.rerun()
         else:
             # En bypass, ofrecer limpiar la sesión de pruebas
             if st.button("Salir del modo de pruebas", key="btn_exit_bypass", use_container_width=True):
@@ -416,6 +418,8 @@ def login_screen():
         if st.button(":material/login: Iniciar sesión con Google", key="btn_login"):
             try:
                 st.login()
+                # Refresca el script tras login exitoso
+                st.rerun()
             except StreamlitAuthError:
                 st.error(
                     "El inicio de sesión de Streamlit no está habilitado o falló en este despliegue. "
@@ -431,4 +435,5 @@ def login_screen():
         st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
         if st.button("Continuar (modo pruebas)", key="btn_bypass_only"):
             st.session_state["_auth_bypass"] = True
-            st.experimental_rerun()
+            # reemplazo de experimental_rerun()
+            st.rerun()
