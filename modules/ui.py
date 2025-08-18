@@ -402,7 +402,7 @@ def sidebar_user_info(user, maintenance_extra=None):
             # En bypass, ofrecer limpiar la sesión de pruebas
             if st.button("Salir del modo de pruebas", key="btn_exit_bypass", use_container_width=True):
                 st.session_state.pop("_auth_bypass", None)
-                st.experimental_rerun()
+                st.rerun()
 
 
 def login_screen():
@@ -425,7 +425,7 @@ def login_screen():
         st.caption("Si no puedes usar el login real, podés continuar en modo pruebas.")
         if st.button("Continuar sin login (solo pruebas)", key="btn_bypass"):
             st.session_state["_auth_bypass"] = True
-            st.experimental_rerun()
+            st.rerun()
     else:
         # Modo bypass por defecto: no intentamos llamar a st.login()
         st.info("Autenticación desactivada en este despliegue. Podés continuar en modo pruebas.")
