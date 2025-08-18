@@ -101,8 +101,8 @@ run_evergreen = None
 run_traffic_audit = None
 
 if _ext:
-    run_core_update = getattr(_ext, "run_core_update", None)
-    run_evergreen = getattr(_ext, "run_evergreen", None)
+    run_core_update   = getattr(_ext, "run_core_update", None)
+    run_evergreen     = getattr(_ext, "run_evergreen", None)
     run_traffic_audit = getattr(_ext, "run_traffic_audit", None)
 
 # Fallback locales (solo si no vienen del paquete)
@@ -110,7 +110,15 @@ if run_core_update is None or run_evergreen is None:
     try:
         from modules.analysis import run_core_update as _rcu, run_evergreen as _rev  # type: ignore
         run_core_update = run_core_update or _rcu
-        run_evergreen = run_evergreen or _rev
+        run_evergreen   = run_evergreen   or _rev
+    except Exception:
+        pass
+
+# Intentar fallback local para auditoría si existiese
+if run_traffic_audit is None:
+    try:
+        from modules.analysis import run_traffic_audit as _rta  # type: ignore
+        run_traffic_audit = _rta
     except Exception:
         pass
 
@@ -138,6 +146,8 @@ from modules.drive import (
 )
 from modules.gsc import ensure_sc_client
 
+# ====== IA (Nomadic Bot 🤖 / Gemini) ======
+from modules.ai import nomadic_ai_summary_audit
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
@@ -462,5 +472,27 @@ elif analisis == "6":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             st.session_state["last_file_id"] = sid
             share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # ===== Resumen con IA (Nomadic Bot 🤖) =====
+            # params = (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
+            modo, tipo, _seccion, _alcance, _country, _lag, _custom, periods_back = params
+            st.divider()
+            use_ai = st.toggle(
+                "Generar resumen con IA (Nomadic Bot 🤖)",
+                value=True,
+                help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
+            )
+            if use_ai:
+                with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
+                    summary_md = nomadic_ai_summary_audit(
+                        gs_client,
+                        sid,
+                        site_url=site_url,
+                        modo=modo,
+                        tipo=tipo,
+                        periods_back=periods_back,
+                    )
+                st.markdown(summary_md)
+
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
