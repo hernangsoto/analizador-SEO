@@ -111,7 +111,7 @@ from modules.auth import (
     build_flow,
     pick_destination_oauth,
     pick_source_oauth,
-    SCOPES_DRIVE,            # <-- añadimos para pedir Drive/Sheets en Paso 0
+    SCOPES_DRIVE,            # <-- pedimos Drive/Sheets en Paso 0
 )
 from modules.drive import (
     ensure_drive_clients,
@@ -149,7 +149,16 @@ def _oauth_flow_store():
 
 # ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC + Drive/Sheets) para identidad y credenciales destino
+#   - Restringido a @nomadic.agency (sugerido con hd y validado post-login)
 # ------------------------------------------------------------
+def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
+    # agrega hd=nomadic.agency para forzar el selector a ese dominio
+    sep = "&" if "?" in auth_url else "?"
+    return f"{auth_url}{sep}hd={domain}"
+
+def _email_is_nomadic(email: str | None) -> bool:
+    return bool(email and email.lower().endswith("@nomadic.agency"))
+
 def step0_google_identity():
     """
     ¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic.
@@ -189,6 +198,7 @@ def step0_google_identity():
                 access_type="offline",                # refresh_token
                 include_granted_scopes="true",
             )
+            auth_url = _append_hd(auth_url)  # ← forzar dominio
             st.session_state["oauth_oidc"] = {
                 "flow_state": state,
                 "use_redirect": True,
@@ -206,6 +216,7 @@ def step0_google_identity():
                 access_type="offline",
                 include_granted_scopes="true",
             )
+            auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
                 "flow_state": state,
                 "use_redirect": False,
@@ -232,16 +243,49 @@ def step0_google_identity():
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
+    def _finalize_identity(creds, info):
+        ident = {
+            "name": info.get("name") or info.get("email") or "Invitado",
+            "email": info.get("email") or "—",
+            "picture": info.get("picture"),
+        }
+        # Enforce dominio @nomadic.agency (chequea también claim 'hd' si está presente)
+        hd_ok = (info.get("hd") == "nomadic.agency") if info.get("hd") else False
+        if not (_email_is_nomadic(ident["email"]) or hd_ok):
+            st.error("Debes iniciar sesión con un correo **@nomadic.agency**.")
+            # Limpiar y volver a mostrar el botón
+            st.session_state.pop("_google_identity", None)
+            st.session_state.pop("creds_dest", None)
+            st.session_state.pop("step1_done", None)
+            _clear_qp()
+            st.stop()
+
+        st.session_state["_google_identity"] = ident
+        # 💾 Guardar credenciales Drive/Sheets para omitir Paso 1
+        st.session_state["creds_dest"] = {
+            "token": creds.token,
+            "refresh_token": getattr(creds, "refresh_token", None),
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+        }
+        st.session_state["step1_done"] = True
+        _clear_qp()
+        st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
+        return ident
+
     if oo.get("use_redirect") and code:
         expected_state = oo.get("flow_state")
         flow = None
 
         # Intentar recuperar el Flow original por 'state'
+        store = _oauth_flow_store()
         if state_in and state_in in store:
             flow = store.pop(state_in)["flow"]
 
         if not flow:
-            st.warning("No pude recuperar el flujo original por 'state' (¿se reinició la app?). Intentando continuar…")
+            st.info("Intentando recuperar sesión…")
             # Reconstituir Flow (web)
             if has_web:
                 from google_auth_oauthlib.flow import Flow
@@ -276,27 +320,7 @@ def step0_google_identity():
                 timeout=10,
             )
             info = resp.json() if resp.status_code == 200 else {}
-            ident = {
-                "name": info.get("name") or info.get("email") or "Invitado",
-                "email": info.get("email") or "—",
-                "picture": info.get("picture"),
-            }
-            st.session_state["_google_identity"] = ident
-
-            # 💾 Guardar también las credenciales de Drive/Sheets para omitir Paso 1
-            st.session_state["creds_dest"] = {
-                "token": creds.token,
-                "refresh_token": getattr(creds, "refresh_token", None),
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": creds.scopes,
-            }
-            st.session_state["step1_done"] = True
-
-            _clear_qp()
-            st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
-            return ident
+            return _finalize_identity(creds, info)
         except Exception as e:
             st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
@@ -334,6 +358,7 @@ def step0_google_identity():
                 try:
                     # Recuperar Flow por state
                     flow_state = oo.get("flow_state")
+                    store = _oauth_flow_store()
                     flow = None
                     if flow_state and flow_state in store:
                         flow = store.pop(flow_state)["flow"]
@@ -349,26 +374,7 @@ def step0_google_identity():
                         timeout=10,
                     )
                     info = resp.json() if resp.status_code == 200 else {}
-                    ident = {
-                        "name": info.get("name") or info.get("email") or "Invitado",
-                        "email": info.get("email") or "—",
-                        "picture": info.get("picture"),
-                    }
-                    st.session_state["_google_identity"] = ident
-
-                    # 💾 Guardar credenciales Drive/Sheets para omitir Paso 1
-                    st.session_state["creds_dest"] = {
-                        "token": creds.token,
-                        "refresh_token": getattr(creds, "refresh_token", None),
-                        "token_uri": creds.token_uri,
-                        "client_id": creds.client_id,
-                        "client_secret": creds.client_secret,
-                        "scopes": creds.scopes,
-                    }
-                    st.session_state["step1_done"] = True
-
-                    st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
-                    return ident
+                    return _finalize_identity(creds, info)
                 except Exception as e:
                     st.error(f"No se pudo verificar identidad: {e}")
                     st.stop()
@@ -622,21 +628,14 @@ if not user:
         login_screen()
         st.stop()
 
-# Sidebar → Mantenimiento (incluye botón para ir al logout)
+# Sidebar → Mantenimiento (sin botón duplicado de logout)
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
-
-    # 🔒 Botón Cerrar sesión (reemplaza el link a ?view=logout)
-    if st.button("🔒 Cerrar sesión", use_container_width=True):
-        try:
-            st.query_params["view"] = "logout"
-        except Exception:
-            st.experimental_set_query_params(view="logout")
-        st.rerun()
+    # (El botón de logout lo deja renderizar sidebar_user_info si corresponde)
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
@@ -788,7 +787,6 @@ analisis = pick_analysis(include_auditoria)
 def _show_google_error(e, where: str = ""):
     """Intenta mostrar el JSON crudo de error que devuelve Google (Sheets/Drive)."""
     raw = ""
-    # gspread suele exponer la respuesta HTTP cruda en e.response.text
     try:
         raw = getattr(e, "response", None).text
     except Exception:
@@ -841,6 +839,27 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
+def _gemini_summary(sid: str, kind: str):
+    st.divider()
+    use_ai = st.toggle(
+        "Generar resumen con IA (Nomadic Bot 🤖)",
+        value=True,
+        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
+    )
+    if use_ai:
+        if is_gemini_configured():
+            try:
+                with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
+                    md = summarize_sheet_auto(gs_client, sid, kind=kind)
+                render_summary_box(md)
+            except Exception:
+                # fallback por si la lib no reconoce el kind
+                with st.spinner("🤖 Generando resumen (modo compatible)…"):
+                    md = summarize_sheet_auto(gs_client, sid)
+                render_summary_box(md)
+        else:
+            st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
+
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -854,11 +873,18 @@ if analisis == "4":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # Compartir (en expander)
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
             st.session_state["last_file_id"] = sid
 
+            # Resumen con IA
+            _gemini_summary(sid, kind="core")
+
 elif analisis == "5":
-    if run_evergreen is None:   # <-- corregido 'is'
+    if run_evergreen is None:
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
@@ -870,8 +896,15 @@ elif analisis == "5":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # Compartir (en expander)
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
             st.session_state["last_file_id"] = sid
+
+            # Resumen con IA
+            _gemini_summary(sid, kind="evergreen")
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -886,23 +919,15 @@ elif analisis == "6":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # Compartir (en expander)
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
             st.session_state["last_file_id"] = sid
 
-            # ===== Resumen con IA (Nomadic Bot 🤖) =====
-            st.divider()
-            use_ai = st.toggle(
-                "Generar resumen con IA (Nomadic Bot 🤖)",
-                value=True,
-                help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
-            )
-            if use_ai:
-                if is_gemini_configured():
-                    with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
-                        md = summarize_sheet_auto(gs_client, sid, kind="audit")
-                    render_summary_box(md)
-                else:
-                    st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
+            # Resumen con IA
+            _gemini_summary(sid, kind="audit")
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
