@@ -929,9 +929,7 @@ def _gemini_summary(sid: str, kind: str):
         with st.spinner("🤖 Generando resumen (modo compatible)…"):
             md = summarize_sheet_auto(gs_client, sid)
         render_summary_box(md)
-        else:
-            st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
-
+        
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
