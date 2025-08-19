@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import shutil
 from urllib.parse import quote
 from types import SimpleNamespace
@@ -315,19 +316,54 @@ def get_first_name(full_name: str | None) -> str:
 
 def _merge_identity(user):
     """
-    Combina datos de st.user y de la identidad de Drive guardada en sesión
-    (st.session_state['_google_identity']) para mostrar nombre, email y foto.
+    Combina datos de la identidad de Google guardada en sesión
+    (st.session_state['_google_identity']) con los de Streamlit.
+    Prioriza: Google → Streamlit → fallbacks.
     """
     gd = st.session_state.get("_google_identity") or {}
-    name = (
-        getattr(user, "name", None)
-        | gd.get("displayName") if False else (getattr(user, "name", None) or gd.get("displayName"))
-    )
-    if not name:
-        name = gd.get("emailAddress") or "Invitado"
+    if not isinstance(gd, dict):
+        gd = {}
 
-    email = getattr(user, "email", None) or gd.get("emailAddress") or "—"
-    picture = getattr(user, "picture", None) or gd.get("photoLink") or None
+    g_name = gd.get("displayName")
+    g_email = gd.get("emailAddress")
+    g_photo = gd.get("photoLink")
+
+    s_name = getattr(user, "name", None)
+    s_email = getattr(user, "email", None)
+    s_photo = getattr(user, "picture", None)
+
+    # Nombre: preferir Google, luego Streamlit, y último fallback al email
+    name = g_name or s_name or g_email or s_email or "Invitado"
+
+    # Email: preferir Google, luego Streamlit
+    email = g_email or s_email or "—"
+
+    # Foto: preferir Google (agregando sz=128 si aplica), luego Streamlit,
+    # luego Unavatar por email, y como último recurso un Gravatar identicon.
+    def _with_size(url: str, size: int = 128) -> str:
+        if not url:
+            return url
+        # Para fotos de Google suele funcionar sz=
+        if "googleusercontent" in url or "google.com" in url:
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}sz={size}"
+        return url
+
+    picture = None
+    if g_photo:
+        picture = _with_size(g_photo, 128)
+    elif s_photo:
+        picture = s_photo
+    elif email and email != "—":
+        picture = f"https://unavatar.io/{email}"
+    else:
+        # Gravatar identicon sin email no tiene sentido, quedará None
+        picture = None
+
+    if not picture and email and email != "—":
+        h = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
+        picture = f"https://www.gravatar.com/avatar/{h}?d=identicon&s=128"
+
     return name, email, picture
 
 
