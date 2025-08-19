@@ -28,14 +28,38 @@ except Exception:
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
 # ====== UI / Branding ======
-from modules.ui import (
-    apply_page_style,
-    render_brand_header_once,
-    enable_brand_auto_align,
-    get_user,
-    sidebar_user_info,
-    login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
-)
+# Intentar importar UI real; si falla, usar stubs mínimos
+try:
+    from modules.ui import (
+        apply_page_style,
+        render_brand_header_once,
+        enable_brand_auto_align,
+        get_user,
+        sidebar_user_info,
+        login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
+    )
+    _UI_OK = True
+except Exception as _ui_err:  # Fallback ligero
+    _UI_OK = False
+    st.warning("UI personalizada no disponible (modules/ui.py). Usando estilos por defecto.")
+    def apply_page_style(**kwargs):  # no-op
+        pass
+    def render_brand_header_once(*args, **kwargs):  # no-op
+        pass
+    def enable_brand_auto_align():  # no-op
+        pass
+    def get_user():
+        return None
+    def sidebar_user_info(user, maintenance_extra=None):
+        with st.sidebar:
+            st.write("Panel")
+            if user and getattr(user, "email", None):
+                st.caption(f"Usuario: {user.email}")
+            if maintenance_extra:
+                maintenance_extra()
+            st.markdown("[Cerrar sesión](?view=logout)")
+    def login_screen():
+        st.info("Iniciá sesión con Google en el Paso 0 (OIDC).")
 
 HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
