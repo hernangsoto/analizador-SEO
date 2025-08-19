@@ -16,6 +16,7 @@ from google.oauth2.credentials import Credentials
 
 # Extras para manejo de errores detallados
 import json
+import inspect
 from gspread.exceptions import APIError as GspreadAPIError
 try:
     from googleapiclient.errors import HttpError
@@ -885,7 +886,72 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-def _gemini_summary(sid: str, kind: str):
+# =======================
+# Resumen con IA (Gemini)
+# =======================
+def _build_gemini_prompt(kind: str, site_url: str | None = None) -> str:
+    sitio = site_url or ""
+    common_rules = """
+- Escribe en español claro, orientado a negocio.
+- Máximo 180–220 palabras totales. Sé concreto.
+- Usa Markdown con secciones cortas y bullets.
+- Evita repetir el contenido de las pestañas; sintetiza insights y acciones.
+- Si no hay datos suficientes, dilo explícitamente y sugiere próximos pasos de medición.
+""".strip()
+
+    if kind == "core":
+        return f"""
+Eres un analista SEO senior. Estás analizando el impacto de un Core Update en {sitio}.
+El Google Sheet incluye pestañas como:
+- “Search | Pre Core Update” y “Search | Post Core Update” (url, clics, impresiones, ctr, posición, sección).
+- “Discover | Pre/Post Core Update” si aplica.
+- “Search/Discover | Datos Diarios” (fecha, clics, impresiones, ctr).
+
+Objetivo: comparar PRE vs POST y entregar un resumen ejecutivo accionable.
+
+Responde en Markdown con:
+**Resumen ejecutivo** (<=120 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
+**Ganadores y Perdedores**: 3–5 URLs por bloque con Δ% clics y posible causa (intención, E-E-A-T, contenido antiguo, cambios on-page).
+**Secciones y patrones**: secciones/temas más afectados, queries afectadas si se inferen por URLs.
+**Acciones**: 4–6 tareas priorizadas (quick wins y tácticas de recuperación).
+
+{common_rules}
+""".strip()
+
+    if kind == "evergreen":
+        return f"""
+Eres un analista SEO senior. Estás evaluando el rendimiento evergreen de {sitio}.
+El Google Sheet incluye:
+- “Search | Datos mensuales” (page, month, clicks, impressions).
+- “Search | Diario total” (date, clicks, impressions, ctr).
+- Opcional “Search | Datos diarios” por URL.
+
+Objetivo: identificar contenido evergreen real, decay de contenido y oportunidades de consolidación/refresh.
+
+Responde en Markdown con:
+**Resumen ejecutivo** (<=120 palabras) destacando tendencia general y estacionalidad si la hay.
+**Top Evergreen**: 5–8 URLs con crecimiento o estabilidad MoM (menciona patrón de varios meses).
+**Contenido en Decay**: 3–5 URLs con caídas sostenidas (cuantifica Δ% últimos 3–4 meses).
+**Oportunidades**: clústers/temas a ampliar, canibalizaciones potenciales, consolidaciones, y 4–6 acciones (refresh, internal linking, FAQ, multimedia).
+
+{common_rules}
+""".strip()
+
+    # audit (por compatibilidad)
+    return f"""
+Eres un analista SEO senior. Estás auditando tráfico de {sitio} (Search/Discover según corresponda) comparando períodos consecutivos.
+
+Responde en Markdown con:
+**Resumen ejecutivo** (<=120 palabras) con la variación de KPIs.
+**Movimientos clave**: 3–5 URLs al alza y 3–5 a la baja con Δ% del período.
+**Hipótesis**: cambios técnicos, frescura, intención, competencia, SERP features.
+**Acciones**: 4–6 tareas priorizadas y medibles.
+
+{common_rules}
+""".strip()
+
+
+def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
@@ -898,6 +964,9 @@ def _gemini_summary(sid: str, kind: str):
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
+
+    # Prompt específico por análisis (core/evergreen/audit)
+    prompt = _build_gemini_prompt(kind, site_url)
 
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
@@ -913,23 +982,45 @@ def _gemini_summary(sid: str, kind: str):
         ]
         return any(n in low for n in needles)
 
+    # Detectar si summarize_sheet_auto acepta prompt= (compatibilidad hacia atrás)
+    supports_prompt = False
+    try:
+        sig = inspect.signature(summarize_sheet_auto)
+        supports_prompt = "prompt" in sig.parameters
+    except Exception:
+        pass
+
     try:
         with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
-            md = summarize_sheet_auto(gs_client, sid, kind=kind)
+            if supports_prompt:
+                md = summarize_sheet_auto(gs_client, sid, kind=kind, prompt=prompt)
+            else:
+                # Compat: algunas versiones sólo aceptan `kind` (o nada)
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
-        # Si la librería devuelve el aviso de “sólo auditoría”, reintentar sin kind (modo compatible)
         if _looks_unsupported(md):
             with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
-                md = summarize_sheet_auto(gs_client, sid)
+                if supports_prompt:
+                    md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
+                else:
+                    md = summarize_sheet_auto(gs_client, sid)
 
         render_summary_box(md)
 
     except Exception:
-        # Fallback por si falla cualquier cosa
+        # Fallback final
         with st.spinner("🤖 Generando resumen (modo compatible)…"):
-            md = summarize_sheet_auto(gs_client, sid)
+            try:
+                if supports_prompt:
+                    md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
+                else:
+                    md = summarize_sheet_auto(gs_client, sid)
+            except Exception:
+                md = "No fue posible generar el resumen automáticamente. Verifica el acceso al Sheet y vuelve a intentarlo."
         render_summary_box(md)
-        
+
+# ============== Flujos por análisis ==============
+
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -950,8 +1041,8 @@ if analisis == "4":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA
-            _gemini_summary(sid, kind="core")
+            # Resumen con IA (prompt específico)
+            _gemini_summary(sid, kind="core", site_url=site_url)
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -973,8 +1064,8 @@ elif analisis == "5":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA
-            _gemini_summary(sid, kind="evergreen")
+            # Resumen con IA (prompt específico)
+            _gemini_summary(sid, kind="evergreen", site_url=site_url)
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -996,8 +1087,8 @@ elif analisis == "6":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA
-            _gemini_summary(sid, kind="audit")
+            # Resumen con IA (prompt específico)
+            _gemini_summary(sid, kind="audit", site_url=site_url)
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
