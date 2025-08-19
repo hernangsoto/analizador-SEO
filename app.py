@@ -1,7 +1,7 @@
 # app.py
 from __future__ import annotations
 
-# --- Permisos OAuth en localhost + tolerancia de scope (útil para Streamlit Cloud + localhost redirect)
+# --- Permisos OAuth en localhost + tolerancia de scope
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -41,11 +41,11 @@ apply_page_style(
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,         # anclado
-    nudge_px=-42,        # vertical fino: negativo = subir; positivo = bajar
-    x_align="left",      # "left" | "center" | "right"
-    x_offset_px=40,      # mover a la derecha si x_align="left"
-    z_index=3000,        # por delante del header nativo
+    pinned=True,
+    nudge_px=-42,      # negativo = subir; positivo = bajar
+    x_align="left",
+    x_offset_px=40,
+    z_index=3000,
     container_max_px=1200,
 )
 # Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
@@ -67,9 +67,9 @@ st.markdown("""
 
 /* Caja verde tipo "success" para resúmenes inline */
 .success-inline {
-  background: #e6f4ea;              /* verde claro */
-  border: 1px solid #a5d6a7;        /* borde verde */
-  color: #1e4620;                   /* texto verde oscuro */
+  background: #e6f4ea;
+  border: 1px solid #a5d6a7;
+  color: #1e4620;
   padding: 10px 14px;
   border-radius: 8px;
   display: flex;
@@ -78,7 +78,7 @@ st.markdown("""
   gap: .5rem;
 }
 .success-inline a {
-  color: #0b8043;                   /* link verde */
+  color: #0b8043;
   text-decoration: underline;
   font-weight: 600;
 }
@@ -352,21 +352,24 @@ gs_client = None
 _me = None
 
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
-    creds_dest = Credentials(**st.session_state["creds_dest"])
-    drive_service, gs_client = ensure_drive_clients(creds_dest)
-    _me = get_google_identity(drive_service)
-    st.session_state["_google_identity"] = _me or {}
-    email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-
-    st.markdown(
-        f'''
-        <div class="success-inline">
-            Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong>
-            <a href="?action=change_personal">(Cambiar mail personal)</a>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
+    try:
+        creds_dest = Credentials(**st.session_state["creds_dest"])
+        drive_service, gs_client = ensure_drive_clients(creds_dest)
+        _me = get_google_identity(drive_service)
+        st.session_state["_google_identity"] = _me or {}
+        email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+        st.markdown(
+            f'''
+            <div class="success-inline">
+                Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong>
+                <a href="?action=change_personal">(Cambiar mail personal)</a>
+            </div>
+            ''',
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"No pude inicializar Drive/Sheets con la cuenta PERSONAL: {e}")
+        st.stop()
 
 # --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
@@ -408,18 +411,22 @@ if not st.session_state["step3_done"]:
     st.session_state["step3_done"] = True
     st.rerun()
 else:
-    creds_src = Credentials(**st.session_state["creds_src"])
-    sc_service = ensure_sc_client(creds_src)
-    src_label = st.session_state.get("src_account_label") or "ACCESO"
-    st.markdown(
-        f'''
-        <div class="success-inline">
-            Cuenta de acceso (Search Console): <strong>{src_label}</strong>
-            <a href="?action=change_src">(Cambiar cuenta de acceso)</a>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
+    try:
+        creds_src = Credentials(**st.session_state["creds_src"])
+        sc_service = ensure_sc_client(creds_src)
+        src_label = st.session_state.get("src_account_label") or "ACCESO"
+        st.markdown(
+            f'''
+            <div class="success-inline">
+                Cuenta de acceso (Search Console): <strong>{src_label}</strong>
+                <a href="?action=change_src">(Cambiar cuenta de acceso)</a>
+            </div>
+            ''',
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"No pude inicializar el cliente de Search Console: {e}")
+        st.stop()
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
@@ -494,4 +501,7 @@ else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
 
 # Debug opcional para verificar si la API key de Gemini está disponible
-st.write("¿Gemini listo?", "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"]))
+st.write(
+    "¿Gemini listo?",
+    "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+)
