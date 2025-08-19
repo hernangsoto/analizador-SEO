@@ -17,6 +17,7 @@ from google.oauth2.credentials import Credentials
 # Extras para manejo de errores detallados
 import json
 import inspect
+import re
 from gspread.exceptions import APIError as GspreadAPIError
 try:
     from googleapiclient.errors import HttpError
@@ -886,9 +887,7 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-# =======================
-# Resumen con IA (Gemini)
-# =======================
+# ===== Prompts específicos por tipo + retitulado =====
 def _build_gemini_prompt(kind: str, site_url: str | None = None) -> str:
     sitio = site_url or ""
     common_rules = """
@@ -910,7 +909,7 @@ El Google Sheet incluye pestañas como:
 Objetivo: comparar PRE vs POST y entregar un resumen ejecutivo accionable.
 
 Responde en Markdown con:
-**Resumen ejecutivo** (<=20 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
+**Resumen ejecutivo** (<=120 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
 **Ganadores y Perdedores**: 3–5 URLs por bloque con Δ% clics y posible causa (intención, E-E-A-T, contenido antiguo, cambios on-page).
 **Secciones y patrones**: secciones/temas más afectados, queries afectadas si se inferen por URLs.
 **Acciones**: 4–6 tareas priorizadas (quick wins y tácticas de recuperación).
@@ -951,6 +950,21 @@ Responde en Markdown con:
 """.strip()
 
 
+def _retitle_md(md: str, new_title: str) -> str:
+    """Reemplaza la primera cabecera (#/##/### ...) por `new_title`, o la inserta si no existe."""
+    if not isinstance(md, str):
+        return md
+    lines = md.splitlines()
+    # primera línea no vacía
+    i0 = next((i for i, l in enumerate(lines) if l.strip()), None)
+    if i0 is None:
+        return f"### {new_title}\n\n{md}"
+    if re.match(r'^\s{0,3}#{1,3}\s+', lines[i0]):
+        lines[i0] = re.sub(r'^\s{0,3}#{1,3}\s+.*$', f'### {new_title}', lines[i0])
+        return "\n".join(lines)
+    return f"### {new_title}\n\n{md}"
+
+# --- Resumen con IA (usa prompt específico y retitula) ---
 def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
     st.divider()
     use_ai = st.toggle(
@@ -965,8 +979,14 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
 
-    # Prompt específico por análisis (core/evergreen/audit)
+    # Prompt específico
     prompt = _build_gemini_prompt(kind, site_url)
+    title_map = {
+        "core": "Resumen — Core Update",
+        "evergreen": "Resumen — Evergreen",
+        "audit": "Resumen — Auditoría de tráfico",
+    }
+    target_title = title_map.get(kind, "Resumen")
 
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
@@ -982,7 +1002,7 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
         ]
         return any(n in low for n in needles)
 
-    # Detectar si summarize_sheet_auto acepta prompt= (compatibilidad hacia atrás)
+    # ¿La función acepta 'prompt'? (compat hacia atrás)
     supports_prompt = False
     try:
         sig = inspect.signature(summarize_sheet_auto)
@@ -993,18 +1013,18 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
     try:
         with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
             if supports_prompt:
-                md = summarize_sheet_auto(gs_client, sid, kind=kind, prompt=prompt)
+                # Forzar nuestro prompt (sin kind para evitar plantillas internas del helper)
+                md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
             else:
-                # Compat: algunas versiones sólo aceptan `kind` (o nada)
+                # Versión antigua: al menos pasamos kind
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
-        if _looks_unsupported(md):
-            with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
-                if supports_prompt:
-                    md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
-                else:
-                    md = summarize_sheet_auto(gs_client, sid)
+            # Si el helper aún “cree” que es auditoría o no soporta, reintentar
+            if _looks_unsupported(md) and supports_prompt:
+                md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
 
+        # Reescribir título para que no diga “Auditoría” cuando es Core/Evergreen
+        md = _retitle_md(md, target_title)
         render_summary_box(md)
 
     except Exception:
@@ -1017,10 +1037,10 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
                     md = summarize_sheet_auto(gs_client, sid)
             except Exception:
                 md = "No fue posible generar el resumen automáticamente. Verifica el acceso al Sheet y vuelve a intentarlo."
+        md = _retitle_md(md, target_title)
         render_summary_box(md)
 
-# ============== Flujos por análisis ==============
-
+# ====== Ramas principales ======
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -1041,7 +1061,7 @@ if analisis == "4":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA (prompt específico)
+            # Resumen con IA
             _gemini_summary(sid, kind="core", site_url=site_url)
 
 elif analisis == "5":
@@ -1064,7 +1084,7 @@ elif analisis == "5":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA (prompt específico)
+            # Resumen con IA
             _gemini_summary(sid, kind="evergreen", site_url=site_url)
 
 elif analisis == "6":
@@ -1087,7 +1107,7 @@ elif analisis == "6":
 
             st.session_state["last_file_id"] = sid
 
-            # Resumen con IA (prompt específico)
+            # Resumen con IA
             _gemini_summary(sid, kind="audit", site_url=site_url)
 
 else:
