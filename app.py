@@ -159,6 +159,22 @@ def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
 def _email_is_nomadic(email: str | None) -> bool:
     return bool(email and email.lower().endswith("@nomadic.agency"))
 
+def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
+    """Llama al endpoint OIDC /userinfo con reintentos ante 5xx de Google."""
+    url = "https://openidconnect.googleapis.com/v1/userinfo"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    for attempt in range(4):
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            # 5xx => reintentar con backoff suave
+            if r.status_code in (500, 502, 503, 504):
+                time.sleep(1.2 * (attempt + 1))
+                continue
+            return r.json() if r.status_code == 200 else {}
+        except requests.RequestException:
+            time.sleep(1.2 * (attempt + 1))
+    return {}
+
 def step0_google_identity():
     """
     ¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic.
@@ -313,13 +329,8 @@ def step0_google_identity():
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
 
-            # Userinfo
-            resp = requests.get(
-                "https://openidconnect.googleapis.com/v1/userinfo",
-                headers={"Authorization": f"Bearer {creds.token}"},
-                timeout=10,
-            )
-            info = resp.json() if resp.status_code == 200 else {}
+            # Userinfo (con reintentos ante 5xx)
+            info = _fetch_userinfo_json_with_retry(creds.token)
             return _finalize_identity(creds, info)
         except Exception as e:
             st.error(f"No se pudo verificar identidad: {e}")
@@ -368,12 +379,9 @@ def step0_google_identity():
                         flow = build_flow(acct_for_dest, scopes_step0)
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
-                    resp = requests.get(
-                        "https://openidconnect.googleapis.com/v1/userinfo",
-                        headers={"Authorization": f"Bearer {creds.token}"},
-                        timeout=10,
-                    )
-                    info = resp.json() if resp.status_code == 200 else {}
+
+                    # Userinfo (con reintentos ante 5xx)
+                    info = _fetch_userinfo_json_with_retry(creds.token)
                     return _finalize_identity(creds, info)
                 except Exception as e:
                     st.error(f"No se pudo verificar identidad: {e}")
@@ -622,7 +630,7 @@ if not user:
             is_logged_in=True,
             name=(ident.get("name") or "Invitado"),
             email=(ident.get("email") or "—"),
-            picture=ident.get("picture"),
+            picture=(ident.get("picture")),
         )
     else:
         login_screen()
@@ -790,23 +798,56 @@ analisis = pick_analysis(include_auditoria)
 
 # ===== Helper para mostrar errores de Google de forma legible =====
 def _show_google_error(e, where: str = ""):
-    """Intenta mostrar el JSON crudo de error que devuelve Google (Sheets/Drive)."""
+    """Muestra errores de Google en forma legible; maneja JSON y HTML (5xx) con mensajes claros."""
+    # Intentar capturar status si es HttpError (googleapiclient)
+    status = None
+    try:
+        status = getattr(getattr(e, "resp", None), "status", None)
+    except Exception:
+        pass
+
+    # Cuerpo crudo (puede ser JSON o HTML)
     raw = ""
     try:
         raw = getattr(e, "response", None).text
     except Exception:
         pass
     if not raw:
+        try:
+            raw_bytes = getattr(e, "content", None)
+            if raw_bytes:
+                raw = raw_bytes.decode("utf-8", "ignore")
+        except Exception:
+            pass
+    if not raw:
         raw = str(e)
 
+    # ¿Parece HTML o un 5xx?
+    raw_l = raw.lower()
+    looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
+    is_5xx = False
+    try:
+        is_5xx = bool(status) and int(status) >= 500
+    except Exception:
+        pass
+
+    if looks_html or is_5xx:
+        st.error(
+            f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
+            "Suele resolverse reintentando en breve. Si persiste, probá más tarde."
+        )
+        with st.expander("Detalle técnico del error"):
+            st.code(raw, language="html")
+        return
+
+    # Intentar formatear JSON (cuando no es HTML ni 5xx)
     try:
         data = json.loads(raw)
         msg = (data.get("error") or {}).get("message") or raw
-        status = (data.get("error") or {}).get("status") or ""
-        st.error(f"Google API error {f'en {where}' if where else ''}: {status} {msg}")
+        st.error(f"Google API error{f' en {where}' if where else ''}: {msg}")
         st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
     except Exception:
-        st.error(f"Google API error {f'en {where}' if where else ''}:")
+        st.error(f"Google API error{f' en {where}' if where else ''}:")
         st.code(raw)
 
 # --- Ejecutar ---
