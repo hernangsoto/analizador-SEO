@@ -242,11 +242,13 @@ def step0_google_identity():
     # UI inicial según modo
     if oo.get("use_redirect"):
         st.markdown(
-            f'<a href="{oo["auth_url"]}" target="_self"><button type="button">Continuar con Google</button></a>',
-            unsafe_allow_html=True
-        )
-        st.caption("Serás redirigido automáticamente de vuelta a esta app luego de autorizar.")
-    else:
+    f'<a href="{oo["auth_url"]}" target="_top" rel="noopener" '
+    f'style="display:inline-block;padding:.6rem 1rem;border-radius:8px;'
+    f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
+    f'Continuar con Google</a>',
+    unsafe_allow_html=True
+)
+st.caption("Serás redirigido a esta app automáticamente después de otorgar permisos.")    else:
         st.info("Modo manual activo (no hay credenciales WEB en [auth]). Podés copiar/pegar la URL, o configurar client_id/client_secret/redirect_uri para modo automático.")
         st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
         with st.expander("Ver/copiar URL de autorización (identidad)"):
