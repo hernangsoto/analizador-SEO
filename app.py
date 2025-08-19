@@ -910,7 +910,7 @@ El Google Sheet incluye pestañas como:
 Objetivo: comparar PRE vs POST y entregar un resumen ejecutivo accionable.
 
 Responde en Markdown con:
-**Resumen ejecutivo** (<=120 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
+**Resumen ejecutivo** (<=20 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
 **Ganadores y Perdedores**: 3–5 URLs por bloque con Δ% clics y posible causa (intención, E-E-A-T, contenido antiguo, cambios on-page).
 **Secciones y patrones**: secciones/temas más afectados, queries afectadas si se inferen por URLs.
 **Acciones**: 4–6 tareas priorizadas (quick wins y tácticas de recuperación).
