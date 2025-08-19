@@ -127,87 +127,151 @@ def _clear_qp():
 
 # ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
+# (con redirección automática si hay auth.redirect_uri; si no, fallback manual)
 # ------------------------------------------------------------
 def step0_google_identity():
     """
     Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
-    Requiere pegar la URL http://localhost devuelta por Google (como en los demás pasos).
+    - Si hay auth.redirect_uri en secrets, abre el flujo OAuth y vuelve a esta app automáticamente.
+    - Si no hay redirect_uri configurada, cae al modo manual (pegar URL) como fallback.
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
-    from modules.auth import build_flow  # import local
     acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+    redirect_uri = (st.secrets.get("auth", {}) or {}).get("redirect_uri")
+    use_redirect = bool(redirect_uri)
+
+    # Crear flow y auth_url (PKCE lo maneja google-auth)
     if "oauth_oidc" not in st.session_state:
         flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
+        if use_redirect:
+            flow.redirect_uri = redirect_uri  # ← evita el copy/paste, vuelve a /oauth2callback
         auth_url, state = flow.authorization_url(
             prompt="select_account",
             access_type="online",
-            include_granted_scopes="true",   # string, no bool
+            include_granted_scopes="true",  # string, no bool
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
             "auth_url": auth_url,
             "state": state,
             "account_key": acct_for_dest,
+            "use_redirect": use_redirect,
+            "redirect_uri": redirect_uri,
         }
 
     oo = st.session_state["oauth_oidc"]
+
+    # Si venimos redirigidos desde Google (code + state en la URL)
+    qp = _get_qp()
+    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
+    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
+
+    if oo["use_redirect"] and code and state_in:
+        # Validar state
+        expected_state = oo.get("state")
+        if state_in != expected_state:
+            st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+            st.stop()
+
+        # Reconstruir la URL EXACTA usada como redirect_uri + query string actual
+        from urllib.parse import urlencode
+        current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+
+        # Intercambiar code por tokens y obtener userinfo
+        try:
+            flow = oo["flow"]
+            flow.fetch_token(authorization_response=current_url)
+            creds = flow.credentials
+
+            resp = requests.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers={"Authorization": f"Bearer {creds.token}"},
+                timeout=10,
+            )
+            info = resp.json() if resp.status_code == 200 else {}
+            ident = {
+                "name": info.get("name") or info.get("email") or "Invitado",
+                "email": info.get("email") or "—",
+                "picture": info.get("picture"),
+            }
+            st.session_state["_google_identity"] = ident
+
+            # Limpiar code/state de la URL para dejar la app prolija
+            _clear_qp()
+
+            st.success(f"Identidad verificada: {ident['email']}")
+            return ident
+        except Exception as e:
+            st.error(f"No se pudo verificar identidad: {e}")
+            st.stop()
+
+    # UI cuando aún no se disparó la redirección (primer render) o estamos en modo manual
     st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
     with st.expander("Ver/copiar URL de autorización (identidad)"):
         st.code(oo["auth_url"])
 
-    url = st.text_input(
-        "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
-        key="auth_response_url_oidc",
-        placeholder="http://localhost/?code=...&state=...",
-    )
+    if not oo["use_redirect"]:
+        # Fallback manual (si no configuraste redirect_uri)
+        url = st.text_input(
+            "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
+            key="auth_response_url_oidc",
+            placeholder="http://localhost/?code=...&state=...",
+        )
 
-    ident = st.session_state.get("_google_identity")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
-            if not url.strip():
-                st.error("Pegá la URL completa de redirección (incluye code y state).")
-                st.stop()
-            # Validar 'state'
-            from urllib.parse import urlsplit, parse_qs
-            try:
-                qs = parse_qs(urlsplit(url.strip()).query)
-                returned_state = (qs.get("state") or [""])[0]
-            except Exception:
-                returned_state = ""
-            expected_state = oo.get("state")
-            if not returned_state or returned_state != expected_state:
-                st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-                st.stop()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
+                if not url.strip():
+                    st.error("Pegá la URL completa de redirección (incluye code y state).")
+                    st.stop()
 
-            # Intercambiar code por tokens y obtener userinfo
-            try:
-                flow = oo["flow"]
-                flow.fetch_token(authorization_response=url.strip())
-                creds = flow.credentials
-                resp = requests.get(
-                    "https://openidconnect.googleapis.com/v1/userinfo",
-                    headers={"Authorization": f"Bearer {creds.token}"},
-                    timeout=10,
-                )
-                info = resp.json() if resp.status_code == 200 else {}
-                ident = {
-                    "name": info.get("name") or info.get("email") or "Invitado",
-                    "email": info.get("email") or "—",
-                    "picture": info.get("picture"),
-                }
-                st.session_state["_google_identity"] = ident
-                st.success(f"Identidad verificada: {ident['email']}")
-            except Exception as e:
-                st.error(f"No se pudo verificar identidad: {e}")
-                st.stop()
+                # Validar 'state' del modo manual
+                from urllib.parse import urlsplit, parse_qs
+                try:
+                    qs = parse_qs(urlsplit(url.strip()).query)
+                    returned_state = (qs.get("state") or [""])[0]
+                except Exception:
+                    returned_state = ""
+                expected_state = oo.get("state")
+                if not returned_state or returned_state != expected_state:
+                    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+                    st.stop()
 
-    with col2:
-        if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
-            st.session_state.pop("oauth_oidc", None)
-            st.session_state.pop("_google_identity", None)
-            st.rerun()
+                try:
+                    flow = oo["flow"]
+                    flow.fetch_token(authorization_response=url.strip())
+                    creds = flow.credentials
+                    resp = requests.get(
+                        "https://openidconnect.googleapis.com/v1/userinfo",
+                        headers={"Authorization": f"Bearer {creds.token}"},
+                        timeout=10,
+                    )
+                    info = resp.json() if resp.status_code == 200 else {}
+                    ident = {
+                        "name": info.get("name") or info.get("email") or "Invitado",
+                        "email": info.get("email") or "—",
+                        "picture": info.get("picture"),
+                    }
+                    st.session_state["_google_identity"] = ident
+                    st.success(f"Identidad verificada: {ident['email']}")
+                    return ident
+                except Exception as e:
+                    st.error(f"No se pudo verificar identidad: {e}")
+                    st.stop()
+
+        with col2:
+            if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
+                st.session_state.pop("oauth_oidc", None)
+                st.session_state.pop("_google_identity", None)
+                st.rerun()
+    else:
+        # Modo redirect: botón que lleva a Google en la MISMA pestaña
+        st.markdown(
+            f'<a href="{oo["auth_url"]}" target="_self"><button type="button">Continuar con Google</button></a>',
+            unsafe_allow_html=True
+        )
+        st.caption("Serás redirigido a esta app automáticamente después de otorgar permisos.")
 
     return st.session_state.get("_google_identity")
 
