@@ -127,69 +127,80 @@ def _clear_qp():
 
 # ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
-# (usa cliente Web si configuras redirect_uri + credenciales web; si no, fallback manual)
+# (usa credenciales WEB de [auth] si existen; si no, fallback manual con "installed")
 # ------------------------------------------------------------
 def step0_google_identity():
     """
-    OIDC (openid email profile) para identidad.
-    - Modo AUTO: requiere en secrets -> [auth] redirect_uri, web_client_id, web_client_secret.
-      Abre Google y redirige de vuelta a esta app sin copy/paste.
-    - Modo MANUAL: si no hay redirect_uri/credenciales web, usa cliente "installed" (localhost)
-      y te pide pegar la URL devuelta por Google.
+    Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
+    - Si en st.secrets['auth'] hay client_id/client_secret/redirect_uri => usa flujo WEB con redirección automática.
+    - Si faltan, usa flujo INSTALLED (localhost) y se pega la URL manualmente.
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
-    from google_auth_oauthlib.flow import Flow  # import local para no tocar modules/auth
+    auth_sec = st.secrets.get("auth", {}) or {}
+    has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
+    redirect_uri = auth_sec.get("redirect_uri")
 
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-    auth_cfg = st.secrets.get("auth", {}) or {}
-    redirect_uri = auth_cfg.get("redirect_uri")
-    web_client_id = auth_cfg.get("web_client_id")
-    web_client_secret = auth_cfg.get("web_client_secret")
-    can_auto = bool(redirect_uri and web_client_id and web_client_secret)
-
-    # Construir Flow según modo
     if "oauth_oidc" not in st.session_state:
-        if can_auto:
-            # Cliente WEB (necesario para redirect_uri ≠ localhost)
+        if has_web:
+            # === Modo WEB (sin copy/paste) ===
             client_secrets = {
                 "web": {
-                    "client_id": web_client_id,
-                    "client_secret": web_client_secret,
+                    "client_id": auth_sec["client_id"],
+                    "client_secret": auth_sec["client_secret"],
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
+                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                     "redirect_uris": [redirect_uri],
                 }
             }
+            from google_auth_oauthlib.flow import Flow
             flow = Flow.from_client_config(client_secrets, scopes=["openid", "email", "profile"])
             flow.redirect_uri = redirect_uri
+            auth_url, state = flow.authorization_url(
+                prompt="select_account",
+                access_type="online",
+                include_granted_scopes="true",  # string
+            )
+            st.session_state["oauth_oidc"] = {
+                "flow": flow,
+                "auth_url": auth_url,
+                "state": state,
+                "use_redirect": True,
+                "redirect_uri": redirect_uri,
+                "mode": "web",
+            }
         else:
-            # Fallback: cliente INSTALLED (localhost) vía util existente
+            # === Fallback INSTALLED (copy/paste) ===
+            acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
             flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
-
-        auth_url, state = flow.authorization_url(
-            prompt="select_account",
-            access_type="online",
-            include_granted_scopes="true",  # string, no bool
-        )
-        st.session_state["oauth_oidc"] = {
-            "flow": flow,
-            "auth_url": auth_url,
-            "state": state,
-            "account_key": acct_for_dest,
-            "use_redirect": bool(can_auto),
-            "redirect_uri": redirect_uri,
-        }
+            # redirect http://localhost ya viene de build_flow()
+            auth_url, state = flow.authorization_url(
+                prompt="select_account",
+                access_type="online",
+                include_granted_scopes="true",
+            )
+            st.session_state["oauth_oidc"] = {
+                "flow": flow,
+                "auth_url": auth_url,
+                "state": state,
+                "use_redirect": False,
+                "redirect_uri": "http://localhost",
+                "mode": "installed",
+            }
     else:
-        # Back-compat y actualización si cambian secrets en caliente
-        oo_prev = st.session_state["oauth_oidc"]
-        if bool(oo_prev.get("use_redirect")) != bool(can_auto) or oo_prev.get("redirect_uri") != redirect_uri:
+        # Sincronizar cambios si modificaste secrets en caliente
+        oo = st.session_state["oauth_oidc"]
+        if has_web and oo.get("mode") != "web":
+            st.session_state.pop("oauth_oidc", None)
+            return step0_google_identity()
+        if (not has_web) and oo.get("mode") != "installed":
             st.session_state.pop("oauth_oidc", None)
             return step0_google_identity()
 
     oo = st.session_state["oauth_oidc"]
 
-    # Si volvemos redirigidos (AUTO): code+state vienen en la URL
+    # Si venimos redirigidos desde Google (solo modo web)
     qp = _get_qp()
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
@@ -200,14 +211,15 @@ def step0_google_identity():
             st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
             st.stop()
 
-        # Construir la URL exacta de retorno (redirect_uri + query actual)
+        # Reconstruir la URL EXACTA de retorno
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+
         try:
             flow = oo["flow"]
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
-
+            # Userinfo
             resp = requests.get(
                 "https://openidconnect.googleapis.com/v1/userinfo",
                 headers={"Authorization": f"Bearer {creds.token}"},
@@ -220,44 +232,33 @@ def step0_google_identity():
                 "picture": info.get("picture"),
             }
             st.session_state["_google_identity"] = ident
-            _clear_qp()  # limpiar code/state
+            _clear_qp()
             st.success(f"Identidad verificada: {ident['email']}")
             return ident
         except Exception as e:
-            # Mensaje claro para redirect_uri_mismatch
-            msg = str(e)
-            if "redirect_uri_mismatch" in msg:
-                st.error(
-                    "Error 400: redirect_uri_mismatch.\n\n"
-                    f"Revisa en Google Cloud → OAuth client (Web) que la Redirect URI **coincida EXACTAMENTE** con:\n\n`{oo['redirect_uri']}`"
-                )
-            else:
-                st.error(f"No se pudo verificar identidad: {e}")
+            st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
 
-    # UI cuando aún no se disparó AUTO o estamos en MANUAL
-    st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
-    with st.expander("Ver/copiar URL de autorización (identidad)"):
-        st.code(oo["auth_url"])
-
+    # UI inicial según modo
     if oo.get("use_redirect"):
         st.markdown(
             f'<a href="{oo["auth_url"]}" target="_self"><button type="button">Continuar con Google</button></a>',
             unsafe_allow_html=True
         )
-        st.caption("Tras conceder permisos, volverás aquí automáticamente.")
+        st.caption("Serás redirigido automáticamente de vuelta a esta app luego de autorizar.")
     else:
-        st.warning(
-            "Modo manual activo (no hay `auth.redirect_uri` + credenciales web en Secrets). "
-            "Podés seguir copiando/pegando la URL o configurar el modo automático."
-        )
+        st.info("Modo manual activo (no hay credenciales WEB en [auth]). Podés copiar/pegar la URL, o configurar client_id/client_secret/redirect_uri para modo automático.")
+        st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
+        with st.expander("Ver/copiar URL de autorización (identidad)"):
+            st.code(oo["auth_url"])
+
         url = st.text_input(
             "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
             key="auth_response_url_oidc",
             placeholder="http://localhost/?code=...&state=...",
         )
-        col1, col2 = st.columns(2)
-        with col1:
+        c1, c2 = st.columns(2)
+        with c1:
             if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
                 if not url.strip():
                     st.error("Pegá la URL completa de redirección (incluye code y state).")
@@ -295,8 +296,7 @@ def step0_google_identity():
                 except Exception as e:
                     st.error(f"No se pudo verificar identidad: {e}")
                     st.stop()
-
-        with col2:
+        with c2:
             if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
                 st.session_state.pop("oauth_oidc", None)
                 st.session_state.pop("_google_identity", None)
