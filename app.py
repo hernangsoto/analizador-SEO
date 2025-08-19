@@ -721,14 +721,19 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
         st.error(f"No pude inicializar Drive/Sheets con la cuenta PERSONAL: {e}")
         st.stop()
 
-# --- PASO 2: Carpeta destino (opcional) ---
+# --- PASO 2: Carpeta destino (opcional) en expander ---
 if not st.session_state["step2_done"]:
-    st.subheader("2) Destino de la copia (opcional)")
-    dest_folder_id = pick_destination(drive_service, _me, show_header=False)
-    st.caption("Si no elegís carpeta, se creará en **Mi unidad**.")
-    if st.button("Siguiente ⏭️", key="btn_next_step2"):
-        st.session_state["step2_done"] = True
-        st.rerun()
+    with st.expander("2) Destino de la copia (opcional)", expanded=False):
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
+                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
+        dest_folder_id = pick_destination(drive_service, _me, show_header=False)
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("Guardar selección", key="btn_save_step2"):
+                st.session_state["step2_done"] = True
+                st.rerun()
+        with c2:
+            st.caption("Podés dejar este paso cerrado para usar **Mi unidad** por defecto.")
 else:
     chosen = st.session_state.get("dest_folder_id")
     pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
