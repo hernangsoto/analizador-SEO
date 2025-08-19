@@ -892,17 +892,43 @@ def _gemini_summary(sid: str, kind: str):
         value=True,
         help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
     )
-    if use_ai:
-        if is_gemini_configured():
-            try:
-                with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
-                    md = summarize_sheet_auto(gs_client, sid, kind=kind)
-                render_summary_box(md)
-            except Exception:
-                # fallback por si la lib no reconoce el kind
-                with st.spinner("🤖 Generando resumen (modo compatible)…"):
-                    md = summarize_sheet_auto(gs_client, sid)
-                render_summary_box(md)
+    if not use_ai:
+        return
+
+    if not is_gemini_configured():
+        st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
+        return
+
+    def _looks_unsupported(md: str) -> bool:
+        if not isinstance(md, str):
+            return False
+        low = md.lower()
+        needles = [
+            "por ahora solo está implementado el resumen para auditoría de tráfico",
+            "solo está implementado el resumen para auditoría",
+            "only the traffic audit summary is implemented",
+            "only audit summary is implemented",
+            "aún no implementado",
+            "not yet implemented",
+        ]
+        return any(n in low for n in needles)
+
+    try:
+        with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
+            md = summarize_sheet_auto(gs_client, sid, kind=kind)
+
+        # Si la librería devuelve el aviso de “sólo auditoría”, reintentar sin kind (modo compatible)
+        if _looks_unsupported(md):
+            with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
+                md = summarize_sheet_auto(gs_client, sid)
+
+        render_summary_box(md)
+
+    except Exception:
+        # Fallback por si falla cualquier cosa
+        with st.spinner("🤖 Generando resumen (modo compatible)…"):
+            md = summarize_sheet_auto(gs_client, sid)
+        render_summary_box(md)
         else:
             st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
 
