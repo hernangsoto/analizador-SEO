@@ -99,7 +99,12 @@ if run_traffic_audit is None:
 USING_EXT = bool(_ext)
 
 # ====== OAuth / Clientes ======
-from modules.auth import build_flow, pick_destination_oauth, pick_source_oauth
+from modules.auth import (
+    build_flow,
+    pick_destination_oauth,
+    pick_source_oauth,
+    SCOPES_DRIVE,            # <-- añadimos para pedir Drive/Sheets en Paso 0
+)
 from modules.drive import (
     ensure_drive_clients,
     get_google_identity,
@@ -135,23 +140,25 @@ def _oauth_flow_store():
     return {}
 
 # ------------------------------------------------------------
-# PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
-# (usa credenciales WEB de [auth] si existen; si no, fallback manual con "installed")
+# PASO 0: Login con Google (OIDC + Drive/Sheets) para identidad y credenciales destino
 # ------------------------------------------------------------
 def step0_google_identity():
     """
-    Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
-    - Si en st.secrets['auth'] hay client_id/client_secret/redirect_uri => usa flujo WEB con redirección automática.
-    - Si faltan, usa flujo INSTALLED (localhost) y se pega la URL manualmente.
-    Se guarda el Flow por 'state' en un almacén global para que la pestaña de retorno
-    pueda recuperar el mismo Flow y evitar errores CSRF si el navegador abrió otra pestaña.
+    ¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic.
+    Pide scopes: openid, email, profile + Drive/Sheets para omitir el Paso 1.
+    - Si en [auth] hay client_id/client_secret/redirect_uri => flujo WEB con redirección automática.
+    - Si faltan, fallback INSTALLED (localhost) con copy/paste.
+    El Flow se guarda por 'state' en un almacén global para evitar CSRF si el navegador abre otra pestaña.
     """
-    st.subheader("0) Iniciar sesión con Google (identidad)")
+    st.subheader("¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic")
 
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
     redirect_uri = auth_sec.get("redirect_uri")
     store = _oauth_flow_store()
+
+    # Scopes Paso 0: identidad + Drive/Sheets
+    scopes_step0 = ["openid", "email", "profile"] + SCOPES_DRIVE
 
     if "oauth_oidc" not in st.session_state:
         if has_web:
@@ -167,28 +174,28 @@ def step0_google_identity():
                 }
             }
             from google_auth_oauthlib.flow import Flow
-            flow = Flow.from_client_config(client_secrets, scopes=["openid", "email", "profile"])
+            flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
             flow.redirect_uri = redirect_uri
             auth_url, state = flow.authorization_url(
-                prompt="select_account",
-                access_type="online",
-                include_granted_scopes="true",  # string
+                prompt="consent select_account",
+                access_type="offline",                # refresh_token
+                include_granted_scopes="true",
             )
             st.session_state["oauth_oidc"] = {
                 "flow_state": state,
                 "use_redirect": True,
                 "redirect_uri": redirect_uri,
                 "mode": "web",
+                "auth_url": auth_url,
             }
-            # Guardar el Flow en almacén global por state
             store[state] = {"flow": flow, "created": time.time(), "mode": "web"}
         else:
             # === Fallback INSTALLED (copy/paste) ===
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-            flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
+            flow = build_flow(acct_for_dest, scopes_step0)  # build_flow ya setea redirect http://localhost
             auth_url, state = flow.authorization_url(
-                prompt="select_account",
-                access_type="online",
+                prompt="consent select_account",
+                access_type="offline",
                 include_granted_scopes="true",
             )
             st.session_state["oauth_oidc"] = {
@@ -196,11 +203,9 @@ def step0_google_identity():
                 "use_redirect": False,
                 "redirect_uri": "http://localhost",
                 "mode": "installed",
+                "auth_url": auth_url,
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "installed"}
-        # Guardamos también la URL para mostrarla sin recalcular
-        st.session_state["oauth_oidc"]["auth_url"] = auth_url
-
     else:
         # Sincronizar cambios si modificaste secrets en caliente
         oo = st.session_state["oauth_oidc"]
@@ -223,14 +228,13 @@ def step0_google_identity():
         expected_state = oo.get("flow_state")
         flow = None
 
-        # 1) Intentar recuperar el Flow original por 'state' del almacén global
+        # Intentar recuperar el Flow original por 'state'
         if state_in and state_in in store:
-            flow = store.pop(state_in)["flow"]  # recuperamos y liberamos
+            flow = store.pop(state_in)["flow"]
 
-        # 2) Si no encontramos, avisamos y continuamos con lo que haya (a veces igual funciona)
         if not flow:
             st.warning("No pude recuperar el flujo original por 'state' (¿se reinició la app?). Intentando continuar…")
-            # Reconstituir un Flow de emergencia (web) — suele funcionar sin PKCE en cliente web
+            # Reconstituir Flow (web)
             if has_web:
                 from google_auth_oauthlib.flow import Flow
                 client_secrets = {
@@ -243,7 +247,7 @@ def step0_google_identity():
                         "redirect_uris": [redirect_uri],
                     }
                 }
-                flow = Flow.from_client_config(client_secrets, scopes=["openid", "email", "profile"])
+                flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
                 flow.redirect_uri = redirect_uri
 
         # Reconstruir la URL EXACTA de retorno
@@ -253,8 +257,10 @@ def step0_google_identity():
         try:
             if expected_state and state_in and state_in != expected_state:
                 st.info("Aviso: el 'state' no coincide con el generado (posible nueva pestaña). Usando flujo recuperado…")
+
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
+
             # Userinfo
             resp = requests.get(
                 "https://openidconnect.googleapis.com/v1/userinfo",
@@ -268,8 +274,20 @@ def step0_google_identity():
                 "picture": info.get("picture"),
             }
             st.session_state["_google_identity"] = ident
+
+            # 💾 Guardar también las credenciales de Drive/Sheets para omitir Paso 1
+            st.session_state["creds_dest"] = {
+                "token": creds.token,
+                "refresh_token": getattr(creds, "refresh_token", None),
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
+            st.session_state["step1_done"] = True
+
             _clear_qp()
-            st.success(f"Identidad verificada: {ident['email']}")
+            st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
             return ident
         except Exception as e:
             st.error(f"No se pudo verificar identidad: {e}")
@@ -306,14 +324,15 @@ def step0_google_identity():
                     st.error("Pegá la URL completa de redirección (incluye code y state).")
                     st.stop()
                 try:
+                    # Recuperar Flow por state
                     flow_state = oo.get("flow_state")
-                    # Recuperar el Flow por state si lo tenemos
                     flow = None
                     if flow_state and flow_state in store:
                         flow = store.pop(flow_state)["flow"]
                     if not flow:
-                        # fallback: usar el flow que está en memoria de esta sesión
-                        flow = build_flow(st.secrets.get("oauth_app_key", "ACCESO"), ["openid", "email", "profile"])
+                        # fallback: nuevo Flow con los mismos scopes
+                        acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+                        flow = build_flow(acct_for_dest, scopes_step0)
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
                     resp = requests.get(
@@ -328,7 +347,19 @@ def step0_google_identity():
                         "picture": info.get("picture"),
                     }
                     st.session_state["_google_identity"] = ident
-                    st.success(f"Identidad verificada: {ident['email']}")
+
+                    # 💾 Guardar credenciales Drive/Sheets para omitir Paso 1
+                    st.session_state["creds_dest"] = {
+                        "token": creds.token,
+                        "refresh_token": getattr(creds, "refresh_token", None),
+                        "token_uri": creds.token_uri,
+                        "client_id": creds.client_id,
+                        "client_secret": creds.client_secret,
+                        "scopes": creds.scopes,
+                    }
+                    st.session_state["step1_done"] = True
+
+                    st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
                     return ident
                 except Exception as e:
                     st.error(f"No se pudo verificar identidad: {e}")
@@ -583,14 +614,21 @@ if not user:
         login_screen()
         st.stop()
 
-# Sidebar → Mantenimiento (incluye acceso a logout)
+# Sidebar → Mantenimiento (incluye botón para ir al logout)
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
-    st.markdown("[🔒 Ir a pantalla de Logout](?view=logout)")
+
+    # 🔒 Botón Cerrar sesión (reemplaza el link a ?view=logout)
+    if st.button("🔒 Cerrar sesión", use_container_width=True):
+        try:
+            st.query_params["view"] = "logout"
+        except Exception:
+            st.experimental_set_query_params(view="logout")
+        st.rerun()
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
@@ -623,6 +661,8 @@ elif _action == "change_src":
 
 
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
+#     OJO: si el Paso 0 ya obtuvo Drive/Sheets, step1_done=True y hay creds_dest,
+#     así que este bloque se omite automáticamente.
 creds_dest = None
 if not st.session_state["step1_done"]:
     id_email = (st.session_state.get("_google_identity") or {}).get("email")
@@ -765,7 +805,7 @@ if analisis == "4":
             st.session_state["last_file_id"] = sid
 
 elif analisis == "5":
-    if run_evergreen is None:
+    if run_evergreen es None:
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
