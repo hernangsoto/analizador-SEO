@@ -355,6 +355,7 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     creds_dest = Credentials(**st.session_state["creds_dest"])
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
+    st.session_state["_google_identity"] = _me or {}
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
 
     st.markdown(
