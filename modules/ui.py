@@ -313,17 +313,38 @@ def get_first_name(full_name: str | None) -> str:
     return full_name.split()[0]
 
 
+def _merge_identity(user):
+    """
+    Combina datos de st.user y de la identidad de Drive guardada en sesión
+    (st.session_state['_google_identity']) para mostrar nombre, email y foto.
+    """
+    gd = st.session_state.get("_google_identity") or {}
+    name = (
+        getattr(user, "name", None)
+        | gd.get("displayName") if False else (getattr(user, "name", None) or gd.get("displayName"))
+    )
+    if not name:
+        name = gd.get("emailAddress") or "Invitado"
+
+    email = getattr(user, "email", None) or gd.get("emailAddress") or "—"
+    picture = getattr(user, "picture", None) or gd.get("photoLink") or None
+    return name, email, picture
+
+
 def sidebar_user_info(user, maintenance_extra=None):
     """
     Sidebar con avatar, nombre, email y utilidades de mantenimiento.
+    Usa fallbacks de identidad si Streamlit no aporta name/picture.
     """
+    name, email, picture = _merge_identity(user)
+
     with st.sidebar:
         with st.container():
             c1, c2 = st.columns([1, 3])
             with c1:
-                if getattr(user, "picture", None):
+                if picture:
                     try:
-                        r = requests.get(user.picture, timeout=10)
+                        r = requests.get(picture, timeout=10)
                         if r.status_code == 200:
                             st.image(r.content, width=64)
                         else:
@@ -331,11 +352,15 @@ def sidebar_user_info(user, maintenance_extra=None):
                     except Exception as e:
                         st.warning(f"Error al cargar la imagen: {e}")
                 else:
-                    st.info("Sin imagen de perfil.")
+                    # Avatar neutro
+                    st.markdown(
+                        '<div style="width:64px;height:64px;border-radius:50%;background:#eee;display:flex;align-items:center;justify-content:center;font-size:22px">🙂</div>',
+                        unsafe_allow_html=True
+                    )
             with c2:
                 st.header("Información del usuario", anchor=False)
-                st.write(f"**Nombre:** {getattr(user, 'name', '—')}")
-                st.write(f"**Correo:** {getattr(user, 'email', '—')}")
+                st.write(f"**Nombre:** {name}")
+                st.write(f"**Correo:** {email}")
 
         st.divider()
         st.markdown("**🧹 Mantenimiento**")
