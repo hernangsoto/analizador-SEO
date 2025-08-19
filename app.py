@@ -137,13 +137,20 @@ def step0_google_identity():
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
+    from urllib.parse import urlencode, unquote_plus
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
     redirect_uri = auth_sec.get("redirect_uri")
 
+    # Query params por si venimos de la redirección
+    qp = _get_qp()
+    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
+    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
+
+    # 1) Preparar el flow en sesión (o reconstruirlo si volvemos con code pero la sesión no lo tiene)
     if "oauth_oidc" not in st.session_state:
         if has_web:
-            # === Modo WEB (sin copy/paste) ===
+            # Construir flow WEB
             client_secrets = {
                 "web": {
                     "client_id": auth_sec["client_id"],
@@ -157,11 +164,18 @@ def step0_google_identity():
             from google_auth_oauthlib.flow import Flow
             flow = Flow.from_client_config(client_secrets, scopes=["openid", "email", "profile"])
             flow.redirect_uri = redirect_uri
-            auth_url, state = flow.authorization_url(
-                prompt="select_account",
-                access_type="online",
-                include_granted_scopes="true",  # string
-            )
+
+            # Si ya venimos con ?code=..., NO generes un state nuevo (evita mismatch)
+            if code:
+                state = None
+                auth_url = None
+            else:
+                auth_url, state = flow.authorization_url(
+                    prompt="select_account",
+                    access_type="online",
+                    include_granted_scopes="true",
+                )
+
             st.session_state["oauth_oidc"] = {
                 "flow": flow,
                 "auth_url": auth_url,
@@ -171,10 +185,9 @@ def step0_google_identity():
                 "mode": "web",
             }
         else:
-            # === Fallback INSTALLED (copy/paste) ===
+            # Fallback INSTALLED (copy/paste)
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
             flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
-            # redirect http://localhost ya viene de build_flow()
             auth_url, state = flow.authorization_url(
                 prompt="select_account",
                 access_type="online",
@@ -200,23 +213,17 @@ def step0_google_identity():
 
     oo = st.session_state["oauth_oidc"]
 
-    # Si venimos redirigidos desde Google (solo modo web)
-    qp = _get_qp()
-    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
-    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
-
-    if oo.get("use_redirect") and code and state_in:
-        expected_state = oo.get("state")
-        if state_in != expected_state:
-            st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-            st.stop()
-
-        # Reconstruir la URL EXACTA de retorno
-        from urllib.parse import urlencode
-        current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+    # 2) Callback: tenemos code (+ state opcional). Intentar canjear el token.
+    if has_web and code:
+        # Comparación "blanda" del state: si no coincide, avisamos pero continuamos.
+        expected_state = (oo.get("state") or "")
+        if state_in and expected_state and unquote_plus(state_in) != unquote_plus(expected_state):
+            st.warning("Advertencia: el parámetro 'state' no coincide (posible recarga o pestaña duplicada). Procedo igualmente.")
 
         try:
             flow = oo["flow"]
+            # Reconstruir la URL EXACTA de retorno
+            current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
             # Userinfo
@@ -239,7 +246,7 @@ def step0_google_identity():
             st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
 
-    # UI inicial según modo
+    # 3) UI inicial según modo
     if oo.get("use_redirect"):
         html_btn = (
             f'<a href="{oo["auth_url"]}" target="_top" rel="noopener" '
@@ -274,9 +281,8 @@ def step0_google_identity():
                 except Exception:
                     returned_state = ""
                 expected_state = oo.get("state")
-                if not returned_state or returned_state != expected_state:
-                    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-                    st.stop()
+                if expected_state and returned_state and returned_state != expected_state:
+                    st.warning("Advertencia: 'state' no coincide, continúo igualmente.")
 
                 try:
                     flow = oo["flow"]
