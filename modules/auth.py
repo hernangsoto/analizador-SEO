@@ -111,10 +111,10 @@ def pick_destination_oauth():
     if "oauth_dest" not in st.session_state:
         from .utils import build_flow_drive  # helper con scopes de Drive/Sheets
         flow = build_flow_drive(acct_for_dest)
+        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False" capitalizado.
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes=True,
         )
         st.session_state["oauth_dest"] = {
             "account_key": acct_for_dest,
@@ -224,10 +224,10 @@ def pick_source_oauth() -> Optional[Credentials]:
     # Construye flow + auth_url si no existe
     if "oauth_src" not in st.session_state:
         flow = build_flow(acct, SCOPES_GSC)
+        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False" capitalizado.
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes=True,
         )
         st.session_state["oauth_src"] = {
             "account": acct,
