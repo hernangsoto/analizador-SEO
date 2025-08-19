@@ -120,13 +120,14 @@ def step0_google_identity():
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
+    from modules.auth import build_flow  # aseguramos import local si el loader cambia
     acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # mismo client_id que usarás en Paso 1
     if "oauth_oidc" not in st.session_state:
         flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
         auth_url, state = flow.authorization_url(
             prompt="select_account",
             access_type="online",
-            include_granted_scopes="true",   # string, no bool
+            include_granted_scopes="true",   # string, no bool (evita error 400)
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
@@ -332,21 +333,39 @@ def _clear_qp():
 
 # ============== App ==============
 
-# Gate: si NO hay usuario de Streamlit, pedimos identidad Google (Paso 0)
+# Preferir Paso 0 (OIDC) si así se indica en secrets
+prefer_oidc = bool(st.secrets.get("auth", {}).get("prefer_oidc", True))
+
+# 1) Identidad Google ya guardada?
+ident = st.session_state.get("_google_identity")
+
+# 2) Usuario de Streamlit (si el sharing es “Only specific people”, puede venir ya logueado)
 user = get_user()
-if not user:
-    ident = st.session_state.get("_google_identity")
+
+# 3) Si había bypass activo y preferimos OIDC, lo limpiamos para mostrar Paso 0
+if prefer_oidc and st.session_state.get("_auth_bypass"):
+    st.session_state.pop("_auth_bypass", None)
+    user = None  # forzamos Paso 0
+
+# 4) Mostrar SIEMPRE Paso 0 si prefer_oidc y aún no hay identidad
+if prefer_oidc and not ident:
+    ident = step0_google_identity()
     if not ident:
-        ident = step0_google_identity()
-        if not ident:
-            st.stop()
-    # Construimos un "usuario" sintético para el resto de la app (sidebar, etc.)
-    user = SimpleNamespace(
-        is_logged_in=True,
-        name=(ident.get("name") or "Invitado"),
-        email=(ident.get("email") or "—"),
-        picture=ident.get("picture"),
-    )
+        st.stop()
+
+# 5) Si no hay user de Streamlit, creamos uno sintético con la identidad OIDC
+if not user:
+    if ident:
+        user = SimpleNamespace(
+            is_logged_in=True,
+            name=(ident.get("name") or "Invitado"),
+            email=(ident.get("email") or "—"),
+            picture=ident.get("picture"),
+        )
+    else:
+        # Último recurso: pantalla de login de Streamlit (no debería ocurrir si prefer_oidc=True)
+        login_screen()
+        st.stop()
 
 # Sidebar → Mantenimiento
 def maintenance_extra_ui():
