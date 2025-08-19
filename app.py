@@ -8,6 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from datetime import date, timedelta
 from types import SimpleNamespace
+import time
 import requests
 import pandas as pd
 import streamlit as st
@@ -126,6 +127,14 @@ def _clear_qp():
         st.experimental_set_query_params()
 
 # ------------------------------------------------------------
+# Almacén global de OAuth Flows (compartido entre pestañas/sesiones)
+# ------------------------------------------------------------
+@st.cache_resource
+def _oauth_flow_store():
+    # state -> {"flow": Flow, "created": ts, "mode": "web"/"installed"}
+    return {}
+
+# ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
 # (usa credenciales WEB de [auth] si existen; si no, fallback manual con "installed")
 # ------------------------------------------------------------
@@ -134,14 +143,15 @@ def step0_google_identity():
     Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
     - Si en st.secrets['auth'] hay client_id/client_secret/redirect_uri => usa flujo WEB con redirección automática.
     - Si faltan, usa flujo INSTALLED (localhost) y se pega la URL manualmente.
-    Además, para evitar falsos CSRF al abrir en nueva pestaña, no frenamos si 'state' no coincide;
-    solo mostramos advertencia y seguimos con el intercambio del token.
+    Se guarda el Flow por 'state' en un almacén global para que la pestaña de retorno
+    pueda recuperar el mismo Flow y evitar errores CSRF si el navegador abrió otra pestaña.
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
     redirect_uri = auth_sec.get("redirect_uri")
+    store = _oauth_flow_store()
 
     if "oauth_oidc" not in st.session_state:
         if has_web:
@@ -165,31 +175,32 @@ def step0_google_identity():
                 include_granted_scopes="true",  # string
             )
             st.session_state["oauth_oidc"] = {
-                "flow": flow,
-                "auth_url": auth_url,
-                "state": state,
+                "flow_state": state,
                 "use_redirect": True,
                 "redirect_uri": redirect_uri,
                 "mode": "web",
             }
+            # Guardar el Flow en almacén global por state
+            store[state] = {"flow": flow, "created": time.time(), "mode": "web"}
         else:
             # === Fallback INSTALLED (copy/paste) ===
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
             flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
-            # redirect http://localhost ya viene de build_flow()
             auth_url, state = flow.authorization_url(
                 prompt="select_account",
                 access_type="online",
                 include_granted_scopes="true",
             )
             st.session_state["oauth_oidc"] = {
-                "flow": flow,
-                "auth_url": auth_url,
-                "state": state,
+                "flow_state": state,
                 "use_redirect": False,
                 "redirect_uri": "http://localhost",
                 "mode": "installed",
             }
+            store[state] = {"flow": flow, "created": time.time(), "mode": "installed"}
+        # Guardamos también la URL para mostrarla sin recalcular
+        st.session_state["oauth_oidc"]["auth_url"] = auth_url
+
     else:
         # Sincronizar cambios si modificaste secrets en caliente
         oo = st.session_state["oauth_oidc"]
@@ -201,6 +212,7 @@ def step0_google_identity():
             return step0_google_identity()
 
     oo = st.session_state["oauth_oidc"]
+    auth_url = oo["auth_url"]
 
     # Si venimos redirigidos desde Google (solo modo web)
     qp = _get_qp()
@@ -208,17 +220,39 @@ def step0_google_identity():
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
     if oo.get("use_redirect") and code:
-        # Nota: no bloqueamos por 'state' distinto; solo avisamos
-        expected_state = oo.get("state")
-        if state_in and expected_state and state_in != expected_state:
-            st.warning("Aviso: el 'state' devuelto no coincide con el generado (posible nueva pestaña). Continuando…")
+        expected_state = oo.get("flow_state")
+        flow = None
+
+        # 1) Intentar recuperar el Flow original por 'state' del almacén global
+        if state_in and state_in in store:
+            flow = store.pop(state_in)["flow"]  # recuperamos y liberamos
+
+        # 2) Si no encontramos, avisamos y continuamos con lo que haya (a veces igual funciona)
+        if not flow:
+            st.warning("No pude recuperar el flujo original por 'state' (¿se reinició la app?). Intentando continuar…")
+            # Reconstituir un Flow de emergencia (web) — suele funcionar sin PKCE en cliente web
+            if has_web:
+                from google_auth_oauthlib.flow import Flow
+                client_secrets = {
+                    "web": {
+                        "client_id": auth_sec["client_id"],
+                        "client_secret": auth_sec["client_secret"],
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                        "redirect_uris": [redirect_uri],
+                    }
+                }
+                flow = Flow.from_client_config(client_secrets, scopes=["openid", "email", "profile"])
+                flow.redirect_uri = redirect_uri
 
         # Reconstruir la URL EXACTA de retorno
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
 
         try:
-            flow = oo["flow"]
+            if expected_state and state_in and state_in != expected_state:
+                st.info("Aviso: el 'state' no coincide con el generado (posible nueva pestaña). Usando flujo recuperado…")
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
             # Userinfo
@@ -244,11 +278,10 @@ def step0_google_identity():
     # UI inicial según modo
     if oo.get("use_redirect"):
         try:
-            # Streamlit 1.31+ tiene link_button; si no, cae al <a>
-            st.link_button("Continuar con Google", oo["auth_url"])
+            st.link_button("Continuar con Google", auth_url)
         except Exception:
             st.markdown(
-                f'<a href="{oo["auth_url"]}" target="_self" rel="noopener" '
+                f'<a href="{auth_url}" target="_self" rel="noopener" '
                 f'style="display:inline-block;padding:.6rem 1rem;border-radius:8px;'
                 f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
                 f'Continuar con Google</a>',
@@ -257,9 +290,9 @@ def step0_google_identity():
         st.caption("Serás redirigido a esta app automáticamente después de otorgar permisos.")
     else:
         st.info("Modo manual activo (no hay credenciales WEB en [auth]). Podés copiar/pegar la URL, o configurar client_id/client_secret/redirect_uri para modo automático.")
-        st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
+        st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({auth_url})")
         with st.expander("Ver/copiar URL de autorización (identidad)"):
-            st.code(oo["auth_url"])
+            st.code(auth_url)
 
         url = st.text_input(
             "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
@@ -272,10 +305,15 @@ def step0_google_identity():
                 if not url.strip():
                     st.error("Pegá la URL completa de redirección (incluye code y state).")
                     st.stop()
-
-                # No bloqueamos por 'state' distinto; seguimos
                 try:
-                    flow = oo["flow"]
+                    flow_state = oo.get("flow_state")
+                    # Recuperar el Flow por state si lo tenemos
+                    flow = None
+                    if flow_state and flow_state in store:
+                        flow = store.pop(flow_state)["flow"]
+                    if not flow:
+                        # fallback: usar el flow que está en memoria de esta sesión
+                        flow = build_flow(st.secrets.get("oauth_app_key", "ACCESO"), ["openid", "email", "profile"])
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
                     resp = requests.get(
