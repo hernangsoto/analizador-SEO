@@ -134,18 +134,19 @@ def step0_google_identity():
     Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
     - Si hay auth.redirect_uri en secrets, abre el flujo OAuth y vuelve a esta app automáticamente.
     - Si no hay redirect_uri configurada, cae al modo manual (pegar URL) como fallback.
+    (Incluye compatibilidad con sesiones previas para evitar KeyError en 'use_redirect')
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
     acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
     redirect_uri = (st.secrets.get("auth", {}) or {}).get("redirect_uri")
-    use_redirect = bool(redirect_uri)
+    default_use_redirect = bool(redirect_uri)
 
-    # Crear flow y auth_url (PKCE lo maneja google-auth)
+    # Crear o refrescar flow y auth_url (PKCE lo maneja google-auth)
     if "oauth_oidc" not in st.session_state:
         flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
-        if use_redirect:
-            flow.redirect_uri = redirect_uri  # ← evita el copy/paste, vuelve a /oauth2callback
+        if default_use_redirect:
+            flow.redirect_uri = redirect_uri  # evita copy/paste
         auth_url, state = flow.authorization_url(
             prompt="select_account",
             access_type="online",
@@ -156,27 +157,51 @@ def step0_google_identity():
             "auth_url": auth_url,
             "state": state,
             "account_key": acct_for_dest,
-            "use_redirect": use_redirect,
+            "use_redirect": default_use_redirect,
             "redirect_uri": redirect_uri,
         }
+    else:
+        # Back-compat & actualización si cambió redirect_uri en secrets
+        oo_prev = st.session_state["oauth_oidc"]
+        need_rebuild = oo_prev.get("redirect_uri") != redirect_uri
+        if need_rebuild:
+            flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
+            if default_use_redirect:
+                flow.redirect_uri = redirect_uri
+            auth_url, state = flow.authorization_url(
+                prompt="select_account",
+                access_type="online",
+                include_granted_scopes="true",
+            )
+            st.session_state["oauth_oidc"] = {
+                "flow": flow,
+                "auth_url": auth_url,
+                "state": state,
+                "account_key": acct_for_dest,
+                "use_redirect": default_use_redirect,
+                "redirect_uri": redirect_uri,
+            }
+        else:
+            # Parche de claves faltantes en sesiones viejas
+            oo_prev.setdefault("use_redirect", default_use_redirect)
+            oo_prev.setdefault("redirect_uri", redirect_uri)
 
     oo = st.session_state["oauth_oidc"]
 
-    # Si venimos redirigidos desde Google (code + state en la URL)
+    # Detectar retorno por redirección (code + state en la URL)
     qp = _get_qp()
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
-    if oo["use_redirect"] and code and state_in:
-        # Validar state
+    if oo.get("use_redirect", default_use_redirect) and code and state_in:
         expected_state = oo.get("state")
-        if state_in != expected_state:
+        if not expected_state or state_in != expected_state:
             st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
             st.stop()
 
         # Reconstruir la URL EXACTA usada como redirect_uri + query string actual
         from urllib.parse import urlencode
-        current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+        current_url = f"{oo.get('redirect_uri', redirect_uri)}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
 
         # Intercambiar code por tokens y obtener userinfo
         try:
@@ -211,7 +236,7 @@ def step0_google_identity():
     with st.expander("Ver/copiar URL de autorización (identidad)"):
         st.code(oo["auth_url"])
 
-    if not oo["use_redirect"]:
+    if not oo.get("use_redirect", default_use_redirect):
         # Fallback manual (si no configuraste redirect_uri)
         url = st.text_input(
             "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
