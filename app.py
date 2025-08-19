@@ -7,6 +7,8 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from datetime import date, timedelta
+from types import SimpleNamespace
+import requests
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
@@ -21,7 +23,7 @@ from modules.ui import (
     enable_brand_auto_align,
     get_user,
     sidebar_user_info,
-    login_screen,
+    login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
 )
 
 HEADER_COLOR = "#5c417c"
@@ -37,55 +39,34 @@ apply_page_style(
     band_height_px=110,
 )
 
-# Logo anclado (fixed), sin recuadro ni sombra, con offsets finos
+# Logo anclado
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
     pinned=True,
-    nudge_px=-42,      # negativo = subir; positivo = bajar
+    nudge_px=-42,
     x_align="left",
     x_offset_px=40,
     z_index=3000,
     container_max_px=1200,
 )
-# Autoalineación con el contenedor (responde a abrir/cerrar sidebar)
 enable_brand_auto_align()
 
 # ====== Estilos globales ======
 st.markdown("""
 <style>
-/* Botones morado #8e7cc3 (para los de acción principal) */
 .stButton > button, .stDownloadButton > button {
-  background: #8e7cc3 !important;
-  border-color: #8e7cc3 !important;
-  color: #fff !important;
-  border-radius: 8px !important;
+  background: #8e7cc3 !important; border-color: #8e7cc3 !important;
+  color: #fff !important; border-radius: 8px !important;
 }
-.stButton > button:hover, .stDownloadButton > button:hover {
-  filter: brightness(0.93);
-}
-
-/* Caja verde tipo "success" para resúmenes inline */
+.stButton > button:hover, .stDownloadButton > button:hover { filter: brightness(0.93); }
 .success-inline {
-  background: #e6f4ea;
-  border: 1px solid #a5d6a7;
-  color: #1e4620;
-  padding: 10px 14px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .5rem;
+  background:#e6f4ea; border:1px solid #a5d6a7; color:#1e4620;
+  padding:10px 14px; border-radius:8px; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
 }
-.success-inline a {
-  color: #0b8043;
-  text-decoration: underline;
-  font-weight: 600;
-}
-.success-inline strong { margin-left: .25rem; }
-
-/* Asegurar que el header nativo no tape nuestro logo */
-header[data-testid="stHeader"] { z-index: 1500 !important; }
+.success-inline a { color:#0b8043; text-decoration:underline; font-weight:600; }
+.success-inline strong { margin-left:.25rem; }
+header[data-testid="stHeader"] { z-index:1500 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -95,17 +76,10 @@ st.title("Analizador SEO 🚀")
 from modules.utils import debug_log, ensure_external_package
 _ext = ensure_external_package()
 
-# Externos disponibles
-run_core_update = None
-run_evergreen = None
-run_traffic_audit = None
+run_core_update = getattr(_ext, "run_core_update", None) if _ext else None
+run_evergreen = getattr(_ext, "run_evergreen", None) if _ext else None
+run_traffic_audit = getattr(_ext, "run_traffic_audit", None) if _ext else None
 
-if _ext:
-    run_core_update   = getattr(_ext, "run_core_update", None)
-    run_evergreen     = getattr(_ext, "run_evergreen", None)
-    run_traffic_audit = getattr(_ext, "run_traffic_audit", None)
-
-# Fallback locales (solo si no vienen del paquete)
 if run_core_update is None or run_evergreen is None:
     try:
         from modules.analysis import run_core_update as _rcu, run_evergreen as _rev  # type: ignore
@@ -114,7 +88,6 @@ if run_core_update is None or run_evergreen is None:
     except Exception:
         pass
 
-# Intentar fallback local para auditoría si existiese
 if run_traffic_audit is None:
     try:
         from modules.analysis import run_traffic_audit as _rta  # type: ignore
@@ -124,30 +97,106 @@ if run_traffic_audit is None:
 
 USING_EXT = bool(_ext)
 
-# Helper indicador de progreso
-def run_with_indicator(titulo: str, fn, *args, **kwargs):
-    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
-    if hasattr(st, "status"):
-        with st.status(mensaje, expanded=True) as status:
-            res = fn(*args, **kwargs)
-            status.update(label="✅ Informe generado", state="complete")
-            return res
-    else:
-        with st.spinner(mensaje):
-            return fn(*args, **kwargs)
-
 # ====== OAuth / Clientes ======
-from modules.auth import pick_destination_oauth, pick_source_oauth
+from modules.auth import build_flow, pick_destination_oauth, pick_source_oauth
 from modules.drive import (
     ensure_drive_clients,
     get_google_identity,
-    pick_destination,     # UI para elegir carpeta (opcional)
+    pick_destination,
     share_controls,
 )
 from modules.gsc import ensure_sc_client
 
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
+
+# ------------------------------------------------------------
+# PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
+# ------------------------------------------------------------
+def step0_google_identity():
+    """
+    Inicia sesión con Google (scopes: openid email profile) para obtener identidad.
+    Requiere pegar la URL http://localhost devuelta por Google (como en los demás pasos).
+    """
+    st.subheader("0) Iniciar sesión con Google (identidad)")
+
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # mismo client_id que usarás en Paso 1
+    if "oauth_oidc" not in st.session_state:
+        flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
+        auth_url, state = flow.authorization_url(
+            prompt="select_account",
+            access_type="online",
+            include_granted_scopes="true",   # string, no bool
+        )
+        st.session_state["oauth_oidc"] = {
+            "flow": flow,
+            "auth_url": auth_url,
+            "state": state,
+            "account_key": acct_for_dest,
+        }
+
+    oo = st.session_state["oauth_oidc"]
+    st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
+    with st.expander("Ver/copiar URL de autorización (identidad)"):
+        st.code(oo["auth_url"])
+
+    url = st.text_input(
+        "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
+        key="auth_response_url_oidc",
+        placeholder="http://localhost/?code=...&state=...",
+    )
+
+    ident = st.session_state.get("_google_identity")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
+            if not url.strip():
+                st.error("Pegá la URL completa de redirección (incluye code y state).")
+                st.stop()
+            # Validar 'state'
+            from urllib.parse import urlsplit, parse_qs
+            try:
+                qs = parse_qs(urlsplit(url.strip()).query)
+                returned_state = (qs.get("state") or [""])[0]
+            except Exception:
+                returned_state = ""
+            expected_state = oo.get("state")
+            if not returned_state or returned_state != expected_state:
+                st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+                st.stop()
+
+            # Intercambiar code por tokens y obtener userinfo
+            try:
+                flow = oo["flow"]
+                flow.fetch_token(authorization_response=url.strip())
+                creds = flow.credentials
+                # userinfo vía OIDC endpoint
+                resp = requests.get(
+                    "https://openidconnect.googleapis.com/v1/userinfo",
+                    headers={"Authorization": f"Bearer {creds.token}"},
+                    timeout=10,
+                )
+                info = {}
+                if resp.status_code == 200:
+                    info = resp.json()
+                ident = {
+                    "name": info.get("name") or info.get("email") or "Invitado",
+                    "email": info.get("email") or "—",
+                    "picture": info.get("picture"),
+                }
+                st.session_state["_google_identity"] = ident
+                st.success(f"Identidad verificada: {ident['email']}")
+            except Exception as e:
+                st.error(f"No se pudo verificar identidad: {e}")
+                st.stop()
+
+    with col2:
+        if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
+            st.session_state.pop("oauth_oidc", None)
+            st.session_state.pop("_google_identity", None)
+            st.rerun()
+
+    return st.session_state.get("_google_identity")
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
@@ -272,7 +321,7 @@ def _get_qp() -> dict:
     try:
         return dict(st.query_params)
     except Exception:
-        return st.experimental_get_query_params()  # fallback viejo
+        return st.experimental_get_query_params()
 
 def _clear_qp():
     try:
@@ -282,13 +331,24 @@ def _clear_qp():
 
 
 # ============== App ==============
-user = get_user()
-# Gate: solo verificamos que exista un usuario (Streamlit Cloud ya valida el acceso)
-if not user:
-    login_screen()
-    st.stop()
 
-# Sidebar → Mantenimiento: mensaje del paquete y modo debug
+# Gate: si NO hay usuario de Streamlit, pedimos identidad Google (Paso 0)
+user = get_user()
+if not user:
+    ident = st.session_state.get("_google_identity")
+    if not ident:
+        ident = step0_google_identity()
+        if not ident:
+            st.stop()
+    # Construimos un "usuario" sintético para el resto de la app (sidebar, etc.)
+    user = SimpleNamespace(
+        is_logged_in=True,
+        name=(ident.get("name") or "Invitado"),
+        email=(ident.get("email") or "—"),
+        picture=ident.get("picture"),
+    )
+
+# Sidebar → Mantenimiento
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -301,9 +361,9 @@ sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 # Estados de pasos
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step2_done", False)
-st.session_state.setdefault("step3_done", False)   # Search Console
+st.session_state.setdefault("step3_done", False)
 
-# === Procesar acciones de links inline (antes de pintar los resúmenes) ===
+# === Acciones de query ===
 _qp = _get_qp()
 _action = _qp.get("action")
 if isinstance(_action, list):
@@ -314,24 +374,32 @@ if _action == "change_personal":
         st.session_state.pop(k, None)
     st.session_state["step2_done"] = False
     st.session_state.pop("dest_folder_id", None)
-    _clear_qp()
-    st.rerun()
+    _clear_qp(); st.rerun()
 
 elif _action == "change_folder":
     st.session_state["step2_done"] = False
-    _clear_qp()
-    st.rerun()
+    _clear_qp(); st.rerun()
 
 elif _action == "change_src":
     for k in ("creds_src", "oauth_src", "step3_done"):
         st.session_state.pop(k, None)
-    _clear_qp()
-    st.rerun()
+    _clear_qp(); st.rerun()
 
 
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
+    # Sugerir usar la misma cuenta del Paso 0
+    id_email = (st.session_state.get("_google_identity") or {}).get("email")
+    if id_email:
+        st.markdown(
+            f'''
+            <div class="success-inline">
+                Sesión iniciada como <strong>{id_email}</strong>. Usá esta misma cuenta al autorizar Drive/Sheets.
+            </div>
+            ''',
+            unsafe_allow_html=True
+        )
     creds_dest = pick_destination_oauth()
     if not creds_dest:
         st.stop()
@@ -346,7 +414,7 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, reconstruimos clientes y mostramos RESUMEN (caja verde + link)
+# Si ya está completo, clientes + resumen
 drive_service = None
 gs_client = None
 _me = None
@@ -356,7 +424,7 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
         creds_dest = Credentials(**st.session_state["creds_dest"])
         drive_service, gs_client = ensure_drive_clients(creds_dest)
         _me = get_google_identity(drive_service)
-        st.session_state["_google_identity"] = _me or {}
+        st.session_state["_google_identity"] = _me or st.session_state.get("_google_identity", {})
         email_txt = (_me or {}).get("emailAddress") or "email desconocido"
         st.markdown(
             f'''
@@ -434,6 +502,17 @@ include_auditoria = run_traffic_audit is not None
 analisis = pick_analysis(include_auditoria)
 
 # --- Ejecutar ---
+def run_with_indicator(titulo: str, fn, *args, **kwargs):
+    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
+    if hasattr(st, "status"):
+        with st.status(mensaje, expanded=True) as status:
+            res = fn(*args, **kwargs)
+            status.update(label="✅ Informe generado", state="complete")
+            return res
+    else:
+        with st.spinner(mensaje):
+            return fn(*args, **kwargs)
+
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -447,8 +526,8 @@ if analisis == "4":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            st.session_state["last_file_id"] = sid
             share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            st.session_state["last_file_id"] = sid
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -463,8 +542,8 @@ elif analisis == "5":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            st.session_state["last_file_id"] = sid
             share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            st.session_state["last_file_id"] = sid
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -479,8 +558,8 @@ elif analisis == "6":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            st.session_state["last_file_id"] = sid
             share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            st.session_state["last_file_id"] = sid
 
             # ===== Resumen con IA (Nomadic Bot 🤖) =====
             st.divider()
