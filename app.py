@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import requests
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components  # <-- necesario para inyectar JS (SID)
+import streamlit.components.v1 as components
 from google.oauth2.credentials import Credentials
 
 # ============== Config base ==============
@@ -256,11 +256,11 @@ def step0_google_identity():
             }
     else:
         # Si cambiaste secrets en caliente, re-sincroniza modo
-        oo = st.session_state["oauth_oidc"]
-        if has_web and oo.get("mode") != "web":
+        oo_prev = st.session_state["oauth_oidc"]
+        if has_web and oo_prev.get("mode") != "web":
             st.session_state.pop("oauth_oidc", None)
             return step0_google_identity()
-        if (not has_web) and oo.get("mode") != "installed":
+        if (not has_web) and oo_prev.get("mode") != "installed":
             st.session_state.pop("oauth_oidc", None)
             return step0_google_identity()
 
@@ -336,14 +336,17 @@ def step0_google_identity():
 
     # 0.d) UI inicial según modo
     if oo.get("use_redirect"):
-        # Botón/link en la MISMA pestaña para evitar tabs nuevas (state compartido igualmente por SID)
-        st.markdown(
-            f'<a href="{oo["auth_url"]}" target="_self" rel="noopener" '
-            f'style="display:inline-block;padding:.6rem 1rem;border-radius:8px;'
-            f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
-            f'Continuar con Google</a>',
-            unsafe_allow_html=True
-        )
+        # Mostrar botón/hipervínculo en la MISMA pestaña
+        try:
+            st.link_button("Continuar con Google", oo["auth_url"])
+        except Exception:
+            st.markdown(
+                f'<a href="{oo["auth_url"]}" target="_self" rel="noopener" '
+                f'style="display:inline-block;padding:.6rem 1rem;border-radius:8px;'
+                f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
+                f'Continuar con Google</a>',
+                unsafe_allow_html=True
+            )
         st.caption("Serás redirigido a esta app automáticamente después de otorgar permisos.")
     else:
         st.info("Modo manual activo (no hay credenciales WEB en [auth]). Podés copiar/pegar la URL, o configurar client_id/client_secret/redirect_uri para modo automático.")
