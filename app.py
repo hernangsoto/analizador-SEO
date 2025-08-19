@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import requests
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components  # <-- necesario para inyectar JS (SID)
 from google.oauth2.credentials import Credentials
 
 # ============== Config base ==============
@@ -125,6 +126,43 @@ def _clear_qp():
     except Exception:
         st.experimental_set_query_params()
 
+# Helper: garantizar un SID de navegador en la URL (para 'state' estable entre pestañas)
+def _ensure_browser_sid() -> str:
+    qp = _get_qp()
+    sid = qp.get("sid")
+    if isinstance(sid, list):
+        sid = sid[0] if sid else None
+    if sid:
+        return sid
+
+    # Inyecta JS: toma/crea SID en localStorage y lo añade a ?sid=...
+    components.html(
+        """
+        <script>
+        (function() {
+          try {
+            var url = new URL(window.location.href);
+            if (!url.searchParams.get('sid')) {
+              var sid = localStorage.getItem('seoapp_sid');
+              if (!sid) {
+                if (window.crypto && crypto.randomUUID) {
+                  sid = crypto.randomUUID();
+                } else {
+                  sid = (Math.random().toString(36).slice(2)) + Date.now().toString(36);
+                }
+                localStorage.setItem('seoapp_sid', sid);
+              }
+              url.searchParams.set('sid', sid);
+              window.location.replace(url.toString());
+            }
+          } catch(e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+    st.stop()  # esperar al reload con ?sid=...
+
 # ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC) para identidad + (opcional) Drive/Sheets
 # (usa credenciales WEB de [auth] si existen; si no, fallback manual con "installed")
@@ -136,8 +174,12 @@ def step0_google_identity():
     y guarda las credenciales como 'creds_dest' para saltar el Paso 1.
     - WEB (redirect) si [auth] tiene client_id/client_secret/redirect_uri
     - INSTALLED (manual copy/paste) si no
+    Además: usa un SID de navegador (localStorage) como 'state' para evitar CSRF al abrir en otra pestaña.
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
+
+    # 0.a) Garantizar 'sid' estable por navegador/origen (compartido entre pestañas)
+    sid = _ensure_browser_sid()
 
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
@@ -152,55 +194,65 @@ def step0_google_identity():
     ]
     SCOPES = OIDC_SCOPES + (DRIVE_SCOPES if include_drive else [])
 
-    # Crear flow y auth_url
+    # 0.b) Crear flow y auth_url con 'state' = sid
+    def _make_flow_and_authurl_web():
+        client_secrets = {
+            "web": {
+                "client_id": auth_sec["client_id"],
+                "client_secret": auth_sec["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": [redirect_uri],
+            }
+        }
+        from google_auth_oauthlib.flow import Flow
+        flow = Flow.from_client_config(client_secrets, scopes=SCOPES)
+        flow.redirect_uri = redirect_uri
+        auth_url, state = flow.authorization_url(
+            state=sid,  # << usamos SID como state estable
+            access_type="offline" if include_drive else "online",
+            prompt="consent select_account" if include_drive else "select_account",
+            include_granted_scopes="true",
+        )
+        return flow, auth_url, state
+
+    def _make_flow_and_authurl_installed():
+        acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+        flow = build_flow(acct_for_dest, SCOPES)
+        # build_flow ya usa redirect http://localhost
+        auth_url, state = flow.authorization_url(
+            state=sid,  # << usamos SID como state estable
+            access_type="offline" if include_drive else "online",
+            prompt="consent select_account" if include_drive else "select_account",
+            include_granted_scopes="true",
+        )
+        return flow, auth_url, state
+
     if "oauth_oidc" not in st.session_state:
         if has_web:
-            # === Modo WEB (sin copy/paste) ===
-            client_secrets = {
-                "web": {
-                    "client_id": auth_sec["client_id"],
-                    "client_secret": auth_sec["client_secret"],
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                    "redirect_uris": [redirect_uri],
-                }
-            }
-            from google_auth_oauthlib.flow import Flow
-            flow = Flow.from_client_config(client_secrets, scopes=SCOPES)
-            flow.redirect_uri = redirect_uri
-            auth_url, state = flow.authorization_url(
-                # Para refresh_token cuando pedimos Drive, pedimos 'offline' + 'consent'
-                access_type="offline" if include_drive else "online",
-                prompt="consent select_account" if include_drive else "select_account",
-                include_granted_scopes="true",
-            )
+            flow, auth_url, state = _make_flow_and_authurl_web()
             st.session_state["oauth_oidc"] = {
                 "flow": flow,
                 "auth_url": auth_url,
-                "state": state,
+                "state": state,            # debería ser igual a sid
                 "use_redirect": True,
                 "redirect_uri": redirect_uri,
                 "mode": "web",
                 "include_drive": include_drive,
+                "scopes": SCOPES,
             }
         else:
-            # === Fallback INSTALLED (copy/paste a http://localhost) ===
-            acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-            flow = build_flow(acct_for_dest, SCOPES)
-            auth_url, state = flow.authorization_url(
-                access_type="offline" if include_drive else "online",
-                prompt="consent select_account" if include_drive else "select_account",
-                include_granted_scopes="true",
-            )
+            flow, auth_url, state = _make_flow_and_authurl_installed()
             st.session_state["oauth_oidc"] = {
                 "flow": flow,
                 "auth_url": auth_url,
-                "state": state,
+                "state": state,            # debería ser igual a sid
                 "use_redirect": False,
                 "redirect_uri": "http://localhost",
                 "mode": "installed",
                 "include_drive": include_drive,
+                "scopes": SCOPES,
             }
     else:
         # Si cambiaste secrets en caliente, re-sincroniza modo
@@ -214,23 +266,31 @@ def step0_google_identity():
 
     oo = st.session_state["oauth_oidc"]
 
-    # Si venimos redirigidos desde Google (solo modo web)
+    # 0.c) Si venimos redirigidos desde Google (solo modo web)
     qp = _get_qp()
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
     if oo.get("use_redirect") and code and state_in:
-        expected_state = oo.get("state")
-        if state_in != expected_state:
-            st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+        # Validación de CSRF: aceptamos si coincide con el SID del navegador
+        if state_in != sid:
+            st.error("CSRF Warning: el 'state' devuelto no coincide con el esperado.")
             st.stop()
 
         # Reconstruir la URL EXACTA de retorno
         from urllib.parse import urlencode
-        current_url = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+        current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
+
+        # Puede que esta pestaña NO tenga el flow en session_state (otra tab lo inició).
+        # En ese caso, lo reconstruimos al vuelo con los mismos scopes.
+        flow = oo.get("flow")
+        if flow is None:
+            if has_web:
+                flow, _, _ = _make_flow_and_authurl_web()
+            else:
+                flow, _, _ = _make_flow_and_authurl_installed()
 
         try:
-            flow = oo["flow"]
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
             # Userinfo
@@ -274,10 +334,11 @@ def step0_google_identity():
             st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
 
-    # UI inicial según modo
+    # 0.d) UI inicial según modo
     if oo.get("use_redirect"):
+        # Botón/link en la MISMA pestaña para evitar tabs nuevas (state compartido igualmente por SID)
         st.markdown(
-            f'<a href="{oo["auth_url"]}" target="_top" rel="noopener" '
+            f'<a href="{oo["auth_url"]}" target="_self" rel="noopener" '
             f'style="display:inline-block;padding:.6rem 1rem;border-radius:8px;'
             f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
             f'Continuar con Google</a>',
@@ -308,13 +369,15 @@ def step0_google_identity():
                     returned_state = (qs.get("state") or [""])[0]
                 except Exception:
                     returned_state = ""
-                expected_state = oo.get("state")
-                if not returned_state or returned_state != expected_state:
-                    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+                # Validar contra el SID (state esperado)
+                if not returned_state or returned_state != sid:
+                    st.error("CSRF Warning: el 'state' devuelto no coincide con el esperado.")
                     st.stop()
 
                 try:
-                    flow = oo["flow"]
+                    flow = oo.get("flow")
+                    if flow is None:
+                        flow, _, _ = _make_flow_and_authurl_installed()
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
                     resp = requests.get(
