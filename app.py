@@ -73,7 +73,7 @@ header[data-testid="stHeader"] { z-index:1500 !important; }
 st.title("Analizador SEO 🚀")
 
 # ====== Utils / paquete externo ======
-from modules.utils import debug_log, ensure_external_package
+from modules.utils import debug_log, ensure_external_package, token_store
 _ext = ensure_external_package()
 
 run_core_update = getattr(_ext, "run_core_update", None) if _ext else None
@@ -111,6 +111,21 @@ from modules.gsc import ensure_sc_client
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 
 # ------------------------------------------------------------
+# Helpers de query params
+# ------------------------------------------------------------
+def _get_qp() -> dict:
+    try:
+        return dict(st.query_params)
+    except Exception:
+        return st.experimental_get_query_params()
+
+def _clear_qp():
+    try:
+        st.query_params.clear()
+    except Exception:
+        st.experimental_set_query_params()
+
+# ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC) para obtener identidad (email/nombre/foto)
 # ------------------------------------------------------------
 def step0_google_identity():
@@ -120,14 +135,14 @@ def step0_google_identity():
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
-    from modules.auth import build_flow  # aseguramos import local si el loader cambia
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")  # mismo client_id que usarás en Paso 1
+    from modules.auth import build_flow  # import local
+    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
     if "oauth_oidc" not in st.session_state:
         flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
         auth_url, state = flow.authorization_url(
             prompt="select_account",
             access_type="online",
-            include_granted_scopes="true",   # string, no bool (evita error 400)
+            include_granted_scopes="true",   # string, no bool
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
@@ -171,15 +186,12 @@ def step0_google_identity():
                 flow = oo["flow"]
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
-                # userinfo vía OIDC endpoint
                 resp = requests.get(
                     "https://openidconnect.googleapis.com/v1/userinfo",
                     headers={"Authorization": f"Bearer {creds.token}"},
                     timeout=10,
                 )
-                info = {}
-                if resp.status_code == 200:
-                    info = resp.json()
+                info = resp.json() if resp.status_code == 200 else {}
                 ident = {
                     "name": info.get("name") or info.get("email") or "Invitado",
                     "email": info.get("email") or "—",
@@ -198,6 +210,87 @@ def step0_google_identity():
             st.rerun()
 
     return st.session_state.get("_google_identity")
+
+# ------------------------------------------------------------
+# Pantalla de LOGOUT: revoca tokens, borra cachés y limpia sesión
+# ------------------------------------------------------------
+def _revoke_google_token(token: str | None) -> None:
+    if not token:
+        return
+    try:
+        requests.post(
+            "https://oauth2.googleapis.com/revoke",
+            params={"token": token},
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+    except Exception:
+        pass  # no hacemos ruido si la revocación falla
+
+def logout_screen():
+    st.header("Cerrar sesión")
+    ident = st.session_state.get("_google_identity") or {}
+    current_email = ident.get("email") or "—"
+    st.write(f"Usuario actual: **{current_email}**")
+
+    revoke = st.checkbox("Revocar permisos de Google (Drive/Sheets y Search Console)", value=True)
+    wipe_pkg = st.checkbox("Borrar caché del paquete externo (.ext_pkgs/)", value=False)
+
+    col1, col2 = st.columns([1,1])
+    with col1:
+        if st.button("🔒 Cerrar sesión y limpiar", type="primary"):
+            # Revocar tokens (si se solicita)
+            if revoke:
+                for key in ("creds_dest", "creds_src"):
+                    data = st.session_state.get(key)
+                    if isinstance(data, dict):
+                        _revoke_google_token(data.get("token") or data.get("refresh_token"))
+
+            # Borrar cachés
+            try: st.cache_data.clear()
+            except Exception: pass
+            try: st.cache_resource.clear()
+            except Exception: pass
+
+            # Borrar paquete externo (opcional)
+            if wipe_pkg:
+                import shutil
+                shutil.rmtree(".ext_pkgs", ignore_errors=True)
+
+            # Limpiar session_state
+            for k in [
+                "_auth_bypass", "_google_identity",
+                "oauth_oidc", "oauth_dest", "oauth_src",
+                "creds_dest", "creds_src",
+                "step1_done", "step2_done", "step3_done",
+                "dest_folder_id", "src_account_label",
+                "site_url_choice", "last_file_id",
+                "DEBUG",
+            ]:
+                st.session_state.pop(k, None)
+
+            # Limpiar token_store
+            try:
+                token_store.clear("creds_dest")
+                token_store.clear("creds_src")
+            except Exception:
+                pass
+
+            # Intentar cerrar sesión de Streamlit (si aplica)
+            try:
+                if hasattr(st, "logout"):
+                    st.logout()
+            except Exception:
+                pass
+
+            st.success("Sesión cerrada y caché limpiada.")
+            st.markdown("➡️ Volver a la app: [Inicio](?)")
+            st.stop()
+
+    with col2:
+        if st.button("Cancelar"):
+            _clear_qp()
+            st.rerun()
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
@@ -317,21 +410,15 @@ def params_for_auditoria():
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
 
 
-# ============== Helpers de query params para links inline ==============
-def _get_qp() -> dict:
-    try:
-        return dict(st.query_params)
-    except Exception:
-        return st.experimental_get_query_params()
-
-def _clear_qp():
-    try:
-        st.query_params.clear()
-    except Exception:
-        st.experimental_set_query_params()
-
-
 # ============== App ==============
+
+# Detectar pantalla de logout por query param
+_view = _get_qp().get("view")
+if isinstance(_view, list):
+    _view = _view[0] if _view else None
+if _view == "logout":
+    logout_screen()
+    st.stop()
 
 # Preferir Paso 0 (OIDC) si así se indica en secrets
 prefer_oidc = bool(st.secrets.get("auth", {}).get("prefer_oidc", True))
@@ -345,7 +432,7 @@ user = get_user()
 # 3) Si había bypass activo y preferimos OIDC, lo limpiamos para mostrar Paso 0
 if prefer_oidc and st.session_state.get("_auth_bypass"):
     st.session_state.pop("_auth_bypass", None)
-    user = None  # forzamos Paso 0
+    user = None
 
 # 4) Mostrar SIEMPRE Paso 0 si prefer_oidc y aún no hay identidad
 if prefer_oidc and not ident:
@@ -363,17 +450,17 @@ if not user:
             picture=ident.get("picture"),
         )
     else:
-        # Último recurso: pantalla de login de Streamlit (no debería ocurrir si prefer_oidc=True)
         login_screen()
         st.stop()
 
-# Sidebar → Mantenimiento
+# Sidebar → Mantenimiento (incluye acceso a logout)
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
+    st.markdown("[🔒 Ir a pantalla de Logout](?view=logout)")
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
@@ -408,7 +495,6 @@ elif _action == "change_src":
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
-    # Sugerir usar la misma cuenta del Paso 0
     id_email = (st.session_state.get("_google_identity") or {}).get("email")
     if id_email:
         st.markdown(
