@@ -14,6 +14,14 @@ import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
 
+# Extras para manejo de errores detallados
+import json
+from gspread.exceptions import APIError as GspreadAPIError
+try:
+    from googleapiclient.errors import HttpError
+except Exception:
+    HttpError = Exception
+
 # ============== Config base ==============
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
@@ -776,17 +784,62 @@ site_url = pick_site(sc_service)
 include_auditoria = run_traffic_audit is not None
 analisis = pick_analysis(include_auditoria)
 
+# ===== Helper para mostrar errores de Google de forma legible =====
+def _show_google_error(e, where: str = ""):
+    """Intenta mostrar el JSON crudo de error que devuelve Google (Sheets/Drive)."""
+    raw = ""
+    # gspread suele exponer la respuesta HTTP cruda en e.response.text
+    try:
+        raw = getattr(e, "response", None).text
+    except Exception:
+        pass
+    if not raw:
+        raw = str(e)
+
+    try:
+        data = json.loads(raw)
+        msg = (data.get("error") or {}).get("message") or raw
+        status = (data.get("error") or {}).get("status") or ""
+        st.error(f"Google API error {f'en {where}' if where else ''}: {status} {msg}")
+        st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
+    except Exception:
+        st.error(f"Google API error {f'en {where}' if where else ''}:")
+        st.code(raw)
+
 # --- Ejecutar ---
 def run_with_indicator(titulo: str, fn, *args, **kwargs):
     mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
     if hasattr(st, "status"):
         with st.status(mensaje, expanded=True) as status:
-            res = fn(*args, **kwargs)
-            status.update(label="✅ Informe generado", state="complete")
-            return res
+            try:
+                res = fn(*args, **kwargs)
+                status.update(label="✅ Informe generado", state="complete")
+                return res
+            except GspreadAPIError as e:
+                status.update(label="❌ Error de Google Sheets", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                status.update(label="❌ Error de Google API", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                status.update(label="❌ Error inesperado", state="error")
+                st.exception(e)
+                st.stop()
     else:
         with st.spinner(mensaje):
-            return fn(*args, **kwargs)
+            try:
+                return fn(*args, **kwargs)
+            except GspreadAPIError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                st.exception(e)
+                st.stop()
 
 if analisis == "4":
     if run_core_update is None:
@@ -805,7 +858,7 @@ if analisis == "4":
             st.session_state["last_file_id"] = sid
 
 elif analisis == "5":
-    if run_evergreen is None:
+    if run_evergreen is None:   # <-- corregido 'is'
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
