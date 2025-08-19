@@ -805,7 +805,7 @@ if analisis == "4":
             st.session_state["last_file_id"] = sid
 
 elif analisis == "5":
-    if run_evergreen es None:
+    if run_evergreen is None:
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
