@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+os.environ.setdefault("GEMINI_MODEL", "gemini-1.5-flash")  # default rápido; podés cambiarlo por PRO si querés
 
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -124,6 +125,7 @@ from modules.gsc import ensure_sc_client
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 import importlib.util, pathlib
+from contextlib import contextmanager
 
 _SUMMARIZE_WITH_PROMPT = None
 _PROMPTS = None
@@ -213,6 +215,120 @@ def _gemini_healthcheck():
         msgs.append(f"Error al importar/configurar Gemini: {repr(e)}")
 
     return ok, msgs
+
+# ---------- Helpers: backoff, detección de rate-limit y multi-key failover ----------
+def _is_quota_error(err: Exception) -> bool:
+    """
+    Devuelve True si el error parece ser de cuota/rate-limit de Gemini.
+    Chequea textos típicos (ResourceExhausted, 429, rate limit).
+    """
+    s = repr(err).lower()
+    needles = [
+        "resourceexhausted",
+        "rate limit", "rate-limit", "ratelimit",
+        "quota", "429", "too many requests",
+        "exceeded your current quota",
+    ]
+    return any(n in s for n in needles)
+
+def _with_backoff(fn, tries: int = 3, base: float = 1.25, max_sleep: float = 12.0):
+    """
+    Ejecuta fn() con reintentos exponenciales ante rate-limit/errores transitorios.
+    """
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if attempt >= tries:
+                break
+            if _is_quota_error(e):
+                sleep_s = min(max_sleep, base ** attempt)
+                time.sleep(sleep_s)
+                continue
+            # No-transitorio: propagar
+            raise
+    raise last
+
+def _collect_gemini_keys() -> list[str]:
+    """
+    Reúne múltiples API keys de Gemini en orden de preferencia.
+    - st.secrets["GEMINI_API_KEYS"] (CSV)
+    - st.secrets["gemini"]["api_keys"] (lista)
+    - os.environ["GEMINI_API_KEYS"] (CSV)
+    - st.secrets["GEMINI_API_KEY"] / st.secrets["gemini"]["api_key"]
+    - os.environ["GEMINI_API_KEY"]
+    """
+    keys: list[str] = []
+    # 1) secrets CSV
+    try:
+        if "GEMINI_API_KEYS" in st.secrets:
+            keys += [k.strip() for k in str(st.secrets["GEMINI_API_KEYS"]).split(",") if k.strip()]
+    except Exception:
+        pass
+    # 2) secrets lista
+    try:
+        if "gemini" in st.secrets and "api_keys" in st.secrets["gemini"]:
+            keys += [str(k).strip() for k in (st.secrets["gemini"]["api_keys"] or []) if str(k).strip()]
+    except Exception:
+        pass
+    # 3) env CSV
+    if os.environ.get("GEMINI_API_KEYS"):
+        keys += [k.strip() for k in os.environ["GEMINI_API_KEYS"].split(",") if k.strip()]
+    # 4) single fallbacks
+    single = None
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            single = str(st.secrets["GEMINI_API_KEY"]).strip()
+        elif "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
+            single = str(st.secrets["gemini"]["api_key"]).strip()
+    except Exception:
+        pass
+    if not single:
+        single = os.environ.get("GEMINI_API_KEY", "").strip()
+    if single:
+        keys.append(single)
+    # dedupe preservando orden
+    seen, out = set(), []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+@contextmanager
+def _gemini_key_context(key: str):
+    """Contexto que setea GEMINI_API_KEY temporalmente."""
+    prev = os.environ.get("GEMINI_API_KEY")
+    try:
+        os.environ["GEMINI_API_KEY"] = key
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = prev
+
+def _with_key_failover(callable_fn, tries_per_key: int = 3):
+    """
+    Ejecuta callable_fn() usando failover de API keys.
+    Para cada key: reintentos con backoff. Si pega rate-limit, rota a la siguiente key.
+    """
+    keys = _collect_gemini_keys()
+    if not keys:
+        raise RuntimeError("No hay API keys de Gemini configuradas.")
+    last_err = None
+    for k in keys:
+        try:
+            with _gemini_key_context(k):
+                return _with_backoff(callable_fn, tries=tries_per_key)
+        except Exception as e:
+            last_err = e
+            if _is_quota_error(e):
+                continue  # probamos próxima key
+            raise  # otro tipo de error -> propagar
+    raise RuntimeError(f"Todas las API keys alcanzaron el rate-limit ({len(keys)} keys). Último error: {repr(last_err)}")
 
 # ---------- Probe de prompts (ver qué prompt se usará antes de ejecutar) ----------
 def _render_prompt_probe(kind: str, force_key: str | None = None):
@@ -1049,7 +1165,7 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-# --- Resumen con IA (prompts por tipo + fallback) ---
+# --- Resumen con IA (prompts por tipo + fallback con failover de keys) ---
 def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     st.divider()
     use_ai = st.toggle(
@@ -1069,6 +1185,12 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
+
+    # Info: cuántas keys hay disponibles (para failover)
+    try:
+        st.caption(f"🔑 Gemini API keys configuradas: {len(_collect_gemini_keys())} (failover activo).")
+    except Exception:
+        pass
 
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
@@ -1101,14 +1223,14 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
         if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
             with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
                 # pasamos kind=prompt_key para que el parser use la lógica del tipo correcto
-                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
+                md = _with_key_failover(lambda: _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used))
         else:
             with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+                md = _with_key_failover(lambda: summarize_sheet_auto(gs_client, sid, kind=kind))
 
         if _looks_unsupported(md):
             with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+                md = _with_key_failover(lambda: summarize_sheet_auto(gs_client, sid, kind=kind))
 
         st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
@@ -1120,7 +1242,7 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
             f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
         )
         with st.spinner("🤖 Usando fallback…"):
-            md = summarize_sheet_auto(gs_client, sid, kind=kind)
+            md = _with_key_failover(lambda: summarize_sheet_auto(gs_client, sid, kind=kind))
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
 
@@ -1211,5 +1333,5 @@ else:
 # Debug opcional para verificar si la API key de Gemini está disponible
 st.write(
     "¿Gemini listo?",
-    "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+    "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets['gemini'])
 )
