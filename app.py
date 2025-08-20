@@ -1,4 +1,5 @@
 # app.py
+# app.py
 from __future__ import annotations
 
 # --- Permisos OAuth en localhost + tolerancia de scope
@@ -16,8 +17,6 @@ from google.oauth2.credentials import Credentials
 
 # Extras para manejo de errores detallados
 import json
-import inspect
-import re
 from gspread.exceptions import APIError as GspreadAPIError
 try:
     from googleapiclient.errors import HttpError
@@ -28,38 +27,14 @@ except Exception:
 st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 
 # ====== UI / Branding ======
-# Intentar importar UI real; si falla, usar stubs mínimos
-try:
-    from modules.ui import (
-        apply_page_style,
-        render_brand_header_once,
-        enable_brand_auto_align,
-        get_user,
-        sidebar_user_info,
-        login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
-    )
-    _UI_OK = True
-except Exception as _ui_err:  # Fallback ligero
-    _UI_OK = False
-    st.warning("UI personalizada no disponible (modules/ui.py). Usando estilos por defecto.")
-    def apply_page_style(**kwargs):  # no-op
-        pass
-    def render_brand_header_once(*args, **kwargs):  # no-op
-        pass
-    def enable_brand_auto_align():  # no-op
-        pass
-    def get_user():
-        return None
-    def sidebar_user_info(user, maintenance_extra=None):
-        with st.sidebar:
-            st.write("Panel")
-            if user and getattr(user, "email", None):
-                st.caption(f"Usuario: {user.email}")
-            if maintenance_extra:
-                maintenance_extra()
-            st.markdown("[Cerrar sesión](?view=logout)")
-    def login_screen():
-        st.info("Iniciá sesión con Google en el Paso 0 (OIDC).")
+from modules.ui import (
+    apply_page_style,
+    render_brand_header_once,
+    enable_brand_auto_align,
+    get_user,
+    sidebar_user_info,
+    login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
+)
 
 HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
@@ -150,6 +125,15 @@ from modules.gsc import ensure_sc_client
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 
+# Prompts específicos (si existe el módulo nuevo)
+_SUMMARIZE_WITH_PROMPT = None
+_PROMPTS = None
+try:
+    from modules.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
+    from modules.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
+except Exception:
+    pass
+
 # ------------------------------------------------------------
 # Helpers de query params
 # ------------------------------------------------------------
@@ -192,7 +176,6 @@ def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
     for attempt in range(4):
         try:
             r = requests.get(url, headers=headers, timeout=10)
-            # 5xx => reintentar con backoff suave
             if r.status_code in (500, 502, 503, 504):
                 time.sleep(1.2 * (attempt + 1))
                 continue
@@ -669,7 +652,6 @@ def maintenance_extra_ui():
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
-    # (El botón de logout lo deja renderizar sidebar_user_info si corresponde)
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
@@ -702,8 +684,6 @@ elif _action == "change_src":
 
 
 # --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
-#     OJO: si el Paso 0 ya obtuvo Drive/Sheets, step1_done=True y hay creds_dest,
-#     así que este bloque se omite automáticamente.
 creds_dest = None
 if not st.session_state["step1_done"]:
     id_email = (st.session_state.get("_google_identity") or {}).get("email")
@@ -911,85 +891,8 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-# ===== Prompts específicos por tipo + retitulado =====
-def _build_gemini_prompt(kind: str, site_url: str | None = None) -> str:
-    sitio = site_url or ""
-    common_rules = """
-- Escribe en español claro, orientado a negocio.
-- Máximo 180–220 palabras totales. Sé concreto.
-- Usa Markdown con secciones cortas y bullets.
-- Evita repetir el contenido de las pestañas; sintetiza insights y acciones.
-- Si no hay datos suficientes, dilo explícitamente y sugiere próximos pasos de medición.
-""".strip()
-
-    if kind == "core":
-        return f"""
-Eres un analista SEO senior. Estás analizando el impacto de un Core Update en {sitio}.
-El Google Sheet incluye pestañas como:
-- “Search | Pre Core Update” y “Search | Post Core Update” (url, clics, impresiones, ctr, posición, sección).
-- “Discover | Pre/Post Core Update” si aplica.
-- “Search/Discover | Datos Diarios” (fecha, clics, impresiones, ctr).
-
-Objetivo: comparar PRE vs POST y entregar un resumen ejecutivo accionable.
-
-Responde en Markdown con:
-**Resumen ejecutivo** (<=120 palabras) con la magnitud del impacto (% clics, impresiones, CTR), y si fue global o por secciones.
-**Ganadores y Perdedores**: 3–5 URLs por bloque con Δ% clics y posible causa (intención, E-E-A-T, contenido antiguo, cambios on-page).
-**Secciones y patrones**: secciones/temas más afectados, queries afectadas si se inferen por URLs.
-**Acciones**: 4–6 tareas priorizadas (quick wins y tácticas de recuperación).
-
-{common_rules}
-""".strip()
-
-    if kind == "evergreen":
-        return f"""
-Eres un analista SEO senior. Estás evaluando el rendimiento evergreen de {sitio}.
-El Google Sheet incluye:
-- “Search | Datos mensuales” (page, month, clicks, impressions).
-- “Search | Diario total” (date, clicks, impressions, ctr).
-- Opcional “Search | Datos diarios” por URL.
-
-Objetivo: identificar contenido evergreen real, decay de contenido y oportunidades de consolidación/refresh.
-
-Responde en Markdown con:
-**Resumen ejecutivo** (<=120 palabras) destacando tendencia general y estacionalidad si la hay.
-**Top Evergreen**: 5–8 URLs con crecimiento o estabilidad MoM (menciona patrón de varios meses).
-**Contenido en Decay**: 3–5 URLs con caídas sostenidas (cuantifica Δ% últimos 3–4 meses).
-**Oportunidades**: clústers/temas a ampliar, canibalizaciones potenciales, consolidaciones, y 4–6 acciones (refresh, internal linking, FAQ, multimedia).
-
-{common_rules}
-""".strip()
-
-    # audit (por compatibilidad)
-    return f"""
-Eres un analista SEO senior. Estás auditando tráfico de {sitio} (Search/Discover según corresponda) comparando períodos consecutivos.
-
-Responde en Markdown con:
-**Resumen ejecutivo** (<=120 palabras) con la variación de KPIs.
-**Movimientos clave**: 3–5 URLs al alza y 3–5 a la baja con Δ% del período.
-**Hipótesis**: cambios técnicos, frescura, intención, competencia, SERP features.
-**Acciones**: 4–6 tareas priorizadas y medibles.
-
-{common_rules}
-""".strip()
-
-
-def _retitle_md(md: str, new_title: str) -> str:
-    """Reemplaza la primera cabecera (#/##/### ...) por `new_title`, o la inserta si no existe."""
-    if not isinstance(md, str):
-        return md
-    lines = md.splitlines()
-    # primera línea no vacía
-    i0 = next((i for i, l in enumerate(lines) if l.strip()), None)
-    if i0 is None:
-        return f"### {new_title}\n\n{md}"
-    if re.match(r'^\s{0,3}#{1,3}\s+', lines[i0]):
-        lines[i0] = re.sub(r'^\s{0,3}#{1,3}\s+.*$', f'### {new_title}', lines[i0])
-        return "\n".join(lines)
-    return f"### {new_title}\n\n{md}"
-
-# --- Resumen con IA (usa prompt específico y retitula) ---
-def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
+# --- Resumen con IA (prompts por tipo + fallback) ---
+def _gemini_summary(sid: str, kind: str):
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
@@ -1002,15 +905,6 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
-
-    # Prompt específico
-    prompt = _build_gemini_prompt(kind, site_url)
-    title_map = {
-        "core": "Resumen — Core Update",
-        "evergreen": "Resumen — Evergreen",
-        "audit": "Resumen — Auditoría de tráfico",
-    }
-    target_title = title_map.get(kind, "Resumen")
 
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
@@ -1026,45 +920,28 @@ def _gemini_summary(sid: str, kind: str, site_url: str | None = None):
         ]
         return any(n in low for n in needles)
 
-    # ¿La función acepta 'prompt'? (compat hacia atrás)
-    supports_prompt = False
     try:
-        sig = inspect.signature(summarize_sheet_auto)
-        supports_prompt = "prompt" in sig.parameters
-    except Exception:
-        pass
-
-    try:
-        with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
-            if supports_prompt:
-                # Forzar nuestro prompt (sin kind para evitar plantillas internas del helper)
-                md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
-            else:
-                # Versión antigua: al menos pasamos kind
+        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and kind in _PROMPTS:
+            prompt = _PROMPTS[kind]
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
+                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=kind, prompt=prompt)
+        else:
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
-            # Si el helper aún “cree” que es auditoría o no soporta, reintentar
-            if _looks_unsupported(md) and supports_prompt:
-                md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
+        if _looks_unsupported(md):
+            with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
+                md = summarize_sheet_auto(gs_client, sid)
 
-        # Reescribir título para que no diga “Auditoría” cuando es Core/Evergreen
-        md = _retitle_md(md, target_title)
         render_summary_box(md)
 
     except Exception:
-        # Fallback final
+        # Fallback por si falla cualquier cosa
         with st.spinner("🤖 Generando resumen (modo compatible)…"):
-            try:
-                if supports_prompt:
-                    md = summarize_sheet_auto(gs_client, sid, prompt=prompt)
-                else:
-                    md = summarize_sheet_auto(gs_client, sid)
-            except Exception:
-                md = "No fue posible generar el resumen automáticamente. Verifica el acceso al Sheet y vuelve a intentarlo."
-        md = _retitle_md(md, target_title)
+            md = summarize_sheet_auto(gs_client, sid)
         render_summary_box(md)
 
-# ====== Ramas principales ======
+# ============== Flujos por análisis ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -1084,9 +961,7 @@ if analisis == "4":
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
             st.session_state["last_file_id"] = sid
-
-            # Resumen con IA
-            _gemini_summary(sid, kind="core", site_url=site_url)
+            _gemini_summary(sid, kind="core")
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1102,14 +977,11 @@ elif analisis == "5":
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
-            # Compartir (en expander)
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
             st.session_state["last_file_id"] = sid
-
-            # Resumen con IA
-            _gemini_summary(sid, kind="evergreen", site_url=site_url)
+            _gemini_summary(sid, kind="evergreen")
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -1125,14 +997,11 @@ elif analisis == "6":
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
-            # Compartir (en expander)
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
             st.session_state["last_file_id"] = sid
-
-            # Resumen con IA
-            _gemini_summary(sid, kind="audit", site_url=site_url)
+            _gemini_summary(sid, kind="audit")
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
