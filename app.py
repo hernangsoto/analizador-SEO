@@ -52,7 +52,7 @@ apply_page_style(
 render_brand_header_once(
     LOGO_URL,
     height_px=27,
-    pinned=True,          # <- fijo/siempre visible
+    pinned=True,
     nudge_px=-42,
     x_align="left",
     x_offset_px=40,
@@ -60,6 +60,20 @@ render_brand_header_once(
     container_max_px=1200,
 )
 enable_brand_auto_align()
+
+# Refuerzo para mantener SIEMPRE visible el logo (evita que desaparezca tras OAuth)
+def _render_nomadic_logo_always():
+    st.markdown(
+        f"""
+        <div id="nomadic-logo-fixed"
+             style="position:fixed; top:14px; left:40px; z-index:4000; pointer-events:none;"
+             aria-hidden="true">
+            <img src="{LOGO_URL}" alt="Nomadic" height="27" style="display:block;"/>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+_render_nomadic_logo_always()
 
 # ====== Estilos globales ======
 st.markdown("""
@@ -77,9 +91,8 @@ st.markdown("""
 .success-inline a { color:#0b8043; text-decoration:underline; font-weight:600; }
 .success-inline strong { margin-left:.25rem; }
 
-/* Asegurar que el logo quede por encima del header y siempre visible */
+/* Asegurar que header no tape el logo */
 header[data-testid="stHeader"] { z-index:1500 !important; }
-.nomadic-brand-pin, .stApp [data-nomadic-brand="pin"] { position:fixed !important; top:14px !important; z-index:3000 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -153,7 +166,7 @@ def _load_prompts():
 
     # 2) Carga por archivo junto al paquete externo que ya trajo ensure_external_package()
     try:
-        if _ext:  # _ext viene de ensure_external_package()
+        if _ext:
             base = pathlib.Path(_ext.__file__).parent
             f = base / "ai_summaries.py"
             if f.exists():
@@ -186,8 +199,6 @@ def _gemini_healthcheck():
     """Verifica SDK, API key y creación de modelo de Gemini."""
     ok = True
     msgs = []
-
-    # API Key presente?
     try:
         has_key = bool(os.environ.get("GEMINI_API_KEY")) or (
             ("GEMINI_API_KEY" in st.secrets)
@@ -197,7 +208,6 @@ def _gemini_healthcheck():
         has_key = False
     msgs.append(f"API key presente: {has_key}")
 
-    # SDK + modelo
     try:
         import google.generativeai as genai  # noqa
         msgs.append(f"google-generativeai importado: True (v={getattr(genai, '__version__', 'desconocida')})")
@@ -609,16 +619,13 @@ def logout_screen():
             except Exception:
                 pass
 
-            # Intentar cerrar sesión de Streamlit (si aplica)
-            try:
-                if hasattr(st, "logout"):
-                    st.logout()
-            except Exception:
-                pass
-
-            # 👉 Volver automáticamente al inicio (Paso 0)
-            _clear_qp()
-            st.rerun()
+            # 🚫 No usar st.logout() para evitar redirección a /~/+/auth/logout
+            # Redirigir manualmente a la home de la app:
+            st.markdown(
+                "<meta http-equiv='refresh' content='0; url=https://hernangsoto.streamlit.app'>",
+                unsafe_allow_html=True
+            )
+            st.stop()
 
     with col2:
         if st.button("Cancelar"):
@@ -968,14 +975,12 @@ analisis = pick_analysis(include_auditoria)
 # ===== Helper para mostrar errores de Google de forma legible =====
 def _show_google_error(e, where: str = ""):
     """Muestra errores de Google en forma legible; maneja JSON y HTML (5xx) con mensajes claros."""
-    # Intentar capturar status si es HttpError (googleapiclient)
     status = None
     try:
         status = getattr(getattr(e, "resp", None), "status", None)
     except Exception:
         pass
 
-    # Cuerpo crudo (puede ser JSON o HTML)
     raw = ""
     try:
         raw = getattr(e, "response", None).text
@@ -991,7 +996,6 @@ def _show_google_error(e, where: str = ""):
     if not raw:
         raw = str(e)
 
-    # ¿Parece HTML o un 5xx?
     raw_l = raw.lower()
     looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
     is_5xx = False
@@ -1009,7 +1013,6 @@ def _show_google_error(e, where: str = ""):
             st.code(raw, language="html")
         return
 
-    # Intentar formatear JSON (cuando no es HTML ni 5xx)
     try:
         data = json.loads(raw)
         msg = (data.get("error") or {}).get("message") or raw
@@ -1106,7 +1109,6 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     try:
         if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
             with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
-                # pasamos kind=prompt_key para que el parser use la lógica del tipo correcto
                 md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
         else:
             with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
@@ -1145,7 +1147,6 @@ if analisis == "4":
                 else:
                     st.caption(f"Fuente actual de prompts: {_AI_SRC}")
 
-                # Diagnóstico del SDK de Gemini (solo debug)
                 with st.expander("🧪 Diagnóstico Gemini", expanded=False):
                     if st.button("Probar SDK Gemini", key="probe_gemini"):
                         ok, msgs = _gemini_healthcheck()
@@ -1168,9 +1169,10 @@ if analisis == "4":
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
-            # Guardar referencia para el panel de resumen con IA
+            # Guardar referencia y ofrecer resumen con IA (toggle por defecto OFF)
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
+            _gemini_summary(sid, kind="core", force_prompt_key="core")
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1191,6 +1193,7 @@ elif analisis == "5":
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
+            _gemini_summary(sid, kind="evergreen")
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -1211,16 +1214,12 @@ elif analisis == "6":
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
+            _gemini_summary(sid, kind="audit")
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
 
-# === Panel persistente: ofrecer resumen con IA para el ÚLTIMO informe generado ===
-if st.session_state.get("last_file_id"):
-    kind = st.session_state.get("last_file_kind") or "core"
-    _gemini_summary(st.session_state["last_file_id"], kind, force_prompt_key=("core" if kind == "core" else None))
-
-# Debug opcional para verificar si la API key de Gemini está disponible (solo debug)
+# Debug opcional (solo si está activo)
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
