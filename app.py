@@ -177,6 +177,43 @@ def _load_prompts():
 # Ejecutar la carga al iniciar
 _load_prompts()
 
+# ---- NUEVO: Healthcheck de Gemini ----
+def _gemini_healthcheck():
+    """Verifica SDK, API key y creación de modelo de Gemini."""
+    ok = True
+    msgs = []
+
+    # API Key presente?
+    try:
+        has_key = bool(os.environ.get("GEMINI_API_KEY")) or (
+            ("GEMINI_API_KEY" in st.secrets)
+            or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+        )
+    except Exception:
+        has_key = False
+    msgs.append(f"API key presente: {has_key}")
+
+    # SDK + modelo
+    try:
+        import google.generativeai as genai  # noqa
+        msgs.append(f"google-generativeai importado: True (v={getattr(genai, '__version__', 'desconocida')})")
+        if has_key:
+            key = os.environ.get("GEMINI_API_KEY") or \
+                  (st.secrets.get("GEMINI_API_KEY")) or \
+                  (st.secrets.get("gemini", {}).get("api_key"))
+            genai.configure(api_key=key)
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
+            _ = genai.GenerativeModel(model_name)
+            msgs.append(f"Modelo instanciado: {model_name}")
+        else:
+            ok = False
+            msgs.append("Falta API key: define GEMINI_API_KEY o [gemini].api_key en secrets.")
+    except Exception as e:
+        ok = False
+        msgs.append(f"Error al importar/configurar Gemini: {repr(e)}")
+
+    return ok, msgs
+
 # ---------- Probe de prompts (ver qué prompt se usará antes de ejecutar) ----------
 def _render_prompt_probe(kind: str, force_key: str | None = None):
     """Muestra qué prompt se usará y su contenido antes de ejecutar nada."""
@@ -1076,8 +1113,13 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
         st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
 
-    except Exception:
-        with st.spinner("🤖 Falla con prompt específico; usando fallback…"):
+    except Exception as e:
+        # ---- NUEVO: mostrar causa real del fallback ----
+        st.error(
+            f"Falló el resumen con prompt específico **({prompt_source})**; "
+            f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
+        )
+        with st.spinner("🤖 Usando fallback…"):
             md = summarize_sheet_auto(gs_client, sid, kind=kind)
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
@@ -1096,6 +1138,16 @@ if analisis == "4":
                 _render_prompt_probe(kind="core", force_key="core")
             else:
                 st.caption(f"Fuente actual de prompts: {_AI_SRC}")
+
+            # ---- NUEVO: Diagnóstico del SDK de Gemini ----
+            with st.expander("🧪 Diagnóstico Gemini", expanded=False):
+                if st.button("Probar SDK Gemini", key="probe_gemini"):
+                    ok, msgs = _gemini_healthcheck()
+                    st.write("\n".join([f"• {m}" for m in msgs]))
+                    if ok:
+                        st.success("Gemini OK: el resumen con prompt debería funcionar.")
+                    else:
+                        st.error("Gemini no está listo: se caerá al fallback.")
 
         if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
             sid = run_with_indicator(
