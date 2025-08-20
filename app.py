@@ -913,7 +913,7 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.stop()
 
 # --- Resumen con IA (prompts por tipo + fallback) ---
-def _gemini_summary(sid: str, kind: str):
+def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
@@ -941,25 +941,39 @@ def _gemini_summary(sid: str, kind: str):
         ]
         return any(n in low for n in needles)
 
+    # Resolver prompt a usar (forzado > por key > fallback auto)
+    prompt_used = None
+    prompt_source = "fallback"
+
     try:
-        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and kind in _PROMPTS:
-            prompt = _PROMPTS[kind]
-            with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
-                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=kind, prompt=prompt)
+        if _SUMMARIZE_WITH_PROMPT and _PROMPTS:
+            key = force_prompt_key or kind
+            if key in _PROMPTS:
+                prompt_used = _PROMPTS[key]
+                prompt_source = f"ai_summaries:{key}"
+    except Exception:
+        pass
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and prompt_used is not None:
+            with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
+                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=kind, prompt=prompt_used)
         else:
-            with st.spinner("🤖 Nomadic Bot está leyendo tu informe y generando un resumen…"):
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo auto)…"):
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
         if _looks_unsupported(md):
             with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
                 md = summarize_sheet_auto(gs_client, sid)
 
+        # Debug visible del prompt elegido
+        st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
 
     except Exception:
-        # Fallback por si falla cualquier cosa
         with st.spinner("🤖 Generando resumen (modo compatible)…"):
             md = summarize_sheet_auto(gs_client, sid)
+        st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
 
 # ============== Flujos por análisis ==============
@@ -982,7 +996,7 @@ if analisis == "4":
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
             st.session_state["last_file_id"] = sid
-            _gemini_summary(sid, kind="core")
+            _gemini_summary(sid, kind="core", force_prompt_key="core")
 
 elif analisis == "5":
     if run_evergreen is None:
