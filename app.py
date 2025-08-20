@@ -124,14 +124,24 @@ from modules.gsc import ensure_sc_client
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 
-# Prompts específicos (si existe el módulo nuevo)
+# --- Prompts específicos (repo privado primero; fallback local) ---
 _SUMMARIZE_WITH_PROMPT = None
 _PROMPTS = None
+_AI_SRC = "none"
+_AI_IMPORT_ERR = None
 try:
-    from modules.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
-    from modules.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
-except Exception:
-    pass
+    # 🔒 Priorizar repo privado seo_analisis_ext
+    from seo_analisis_ext.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
+    from seo_analisis_ext.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
+    _AI_SRC = "external"
+except Exception as e_ext:
+    try:
+        # 🧩 Respaldo local
+        from modules.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
+        from modules.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
+        _AI_SRC = "local"
+    except Exception as e_loc:
+        _AI_IMPORT_ERR = f"external={repr(e_ext)} | local={repr(e_loc)}"
 
 # ------------------------------------------------------------
 # Helpers de query params
@@ -923,6 +933,12 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     if not use_ai:
         return
 
+    # Mostrar fuente de prompts si logramos importar
+    if _AI_IMPORT_ERR:
+        st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
+    elif _AI_SRC != "none":
+        st.caption(f"Fuente de prompts: **{_AI_SRC}**")
+
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
@@ -938,41 +954,41 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
             "only audit summary is implemented",
             "aún no implementado",
             "not yet implemented",
+            "tipo aun no es soportado",
         ]
         return any(n in low for n in needles)
 
-    # Resolver prompt a usar (forzado > por key > fallback auto)
+    # Resolver prompt (forzado > kind > fallback)
     prompt_used = None
+    prompt_key = force_prompt_key or kind
     prompt_source = "fallback"
 
     try:
-        if _SUMMARIZE_WITH_PROMPT and _PROMPTS:
-            key = force_prompt_key or kind
-            if key in _PROMPTS:
-                prompt_used = _PROMPTS[key]
-                prompt_source = f"ai_summaries:{key}"
+        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
+            prompt_used = _PROMPTS[prompt_key]
+            prompt_source = f"{_AI_SRC}:{prompt_key}"
     except Exception:
         pass
 
     try:
-        if _SUMMARIZE_WITH_PROMPT and prompt_used is not None:
+        if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
             with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
-                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=kind, prompt=prompt_used)
+                # pasamos kind=prompt_key para que el parser use la lógica del tipo correcto
+                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
         else:
-            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo auto)…"):
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
         if _looks_unsupported(md):
-            with st.spinner("🤖 El tipo aún no está soportado; reintentando en modo compatible…"):
-                md = summarize_sheet_auto(gs_client, sid)
+            with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
 
-        # Debug visible del prompt elegido
         st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
 
     except Exception:
-        with st.spinner("🤖 Generando resumen (modo compatible)…"):
-            md = summarize_sheet_auto(gs_client, sid)
+        with st.spinner("🤖 Falla con prompt específico; usando fallback…"):
+            md = summarize_sheet_auto(gs_client, sid, kind=kind)
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
 
