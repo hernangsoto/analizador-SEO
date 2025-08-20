@@ -172,6 +172,45 @@ def _load_prompts():
 
 # Ejecutar la carga al iniciar
 _load_prompts()
+
+# ---------- Probe de prompts (ver qué prompt se usará antes de ejecutar) ----------
+def _render_prompt_probe(kind: str, force_key: str | None = None):
+    """Muestra qué prompt se usará y su contenido antes de ejecutar nada."""
+    key = force_key or kind
+    st.markdown("### 🔍 Test de prompt")
+    st.caption(f"Tipo solicitado: **{kind}**  •  Clave buscada: **{key}**")
+
+    if _PROMPTS is None:
+        st.error(f"No pude cargar PROMPTS (fuente: {_AI_SRC}). Usaría fallback automático.")
+        if _AI_IMPORT_ERR:
+            with st.expander("Ver detalle del error de import"):
+                st.code(_AI_IMPORT_ERR)
+        return
+
+    st.caption(f"Fuente de prompts: **{_AI_SRC}**")
+    with st.expander("Claves disponibles en PROMPTS"):
+        try:
+            st.write(", ".join(sorted(list(_PROMPTS.keys()))))
+        except Exception:
+            try:
+                st.write(list(_PROMPTS.keys()))
+            except Exception:
+                st.write("(No se pudieron listar las claves)")
+
+    if key not in _PROMPTS:
+        st.error(f"No hay PROMPTS['{key}']. Se usaría fallback automático.")
+        return
+
+    pc = _PROMPTS[key]
+    st.success(f"✅ Encontrado PROMPTS['{key}']. Este es el prompt que se usará.")
+    st.markdown(f"**title:** {getattr(pc, 'title', '(sin título)')}")
+    st.markdown("**system:**")
+    st.code(getattr(pc, 'system', ''), language="md")
+    bh = getattr(pc, 'bullets_hint', None)
+    if bh:
+        st.markdown("**bullets_hint:**")
+        st.code(bh, language="md")
+
 # ------------------------------------------------------------
 # Helpers de query params
 # ------------------------------------------------------------
@@ -1027,6 +1066,15 @@ if analisis == "4":
         st.warning("Este despliegue no incluye run_core_update.")
     else:
         params = params_for_core_update()
+
+        # 🔎 Probe de prompt (Core Update) antes de ejecutar
+        with st.expander("🔎 Test de prompt (Core Update)", expanded=True):
+            st.caption("Comprobá qué prompt se aplicará antes de ejecutar el análisis.")
+            if st.button("Probar carga de prompt ahora", key="probe_core"):
+                _render_prompt_probe(kind="core", force_key="core")
+            else:
+                st.caption(f"Fuente actual de prompts: {_AI_SRC}")
+
         if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
             sid = run_with_indicator(
                 "Procesando Core Update",
