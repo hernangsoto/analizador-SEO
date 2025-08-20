@@ -1,5 +1,4 @@
 # app.py
-# app.py
 from __future__ import annotations
 
 # --- Permisos OAuth en localhost + tolerancia de scope
@@ -531,13 +530,33 @@ LAG_DAYS_DEFAULT = 3
 
 def params_for_core_update():
     st.markdown("#### Parámetros (Core Update)")
-    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core")
-    fecha_inicio = st.date_input("¿Cuándo inició el Core Update? (YYYY-MM-DD)", key="core_ini")
-    termino = st.radio("¿El Core Update ya terminó?", ["sí", "no"], horizontal=True, key="core_end")
-    fecha_fin = None
-    if termino == "sí":
-        fecha_fin = st.date_input("¿Cuándo finalizó el Core Update? (YYYY-MM-DD)", key="core_fin")
+    lag_days = st.number_input(
+        "Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core"
+    )
+
+    presets = [
+        "Core Update de junio 2025",
+        "Core Update de marzo 2025",
+        "Core Update de diciembre 2024",
+        "Core Update de noviembre 2024",
+        "Core Update de agosto 2024",
+        "Personalizado",
+    ]
+    core_choice = st.selectbox("Core Update", presets, index=0, key="core_choice")
+
+    custom_ini = None
+    custom_fin = None
+    if core_choice == "Personalizado":
+        st.caption("Podés dejar sin fecha de fin si el Core Update sigue en curso.")
+        custom_ini = st.date_input("Fecha de inicio (YYYY-MM-DD)", key="core_custom_ini")
+        termino = st.radio("¿El Core Update ya terminó?", ["sí", "no"], horizontal=True, key="core_custom_endflag")
+        if termino == "sí":
+            custom_fin = st.date_input("Fecha de fin (YYYY-MM-DD)", key="core_custom_fin")
+        else:
+            custom_fin = None
+
     tipo = st.selectbox("Datos a analizar", ["Search", "Discover", "Ambos"], index=2, key="tipo_core")
+
     pais_choice = st.selectbox(
         "¿Filtrar por país? (ISO-3)",
         ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
@@ -546,7 +565,9 @@ def params_for_core_update():
     )
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_core") or None
-    return lag_days, fecha_inicio, termino, fecha_fin, tipo, pais, seccion
+
+    # Nuevo formato que resuelve el preset en seo_analisis_ext.core_update
+    return lag_days, core_choice, custom_ini, custom_fin, tipo, pais, seccion
 
 
 def params_for_evergreen():
