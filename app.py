@@ -123,26 +123,55 @@ from modules.gsc import ensure_sc_client
 
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
+import importlib.util, pathlib
 
-# --- Prompts específicos (repo privado primero; fallback local) ---
 _SUMMARIZE_WITH_PROMPT = None
 _PROMPTS = None
 _AI_SRC = "none"
 _AI_IMPORT_ERR = None
-try:
-    # 🔒 Priorizar repo privado seo_analisis_ext
-    from seo_analisis_ext.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
-    from seo_analisis_ext.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
-    _AI_SRC = "external"
-except Exception as e_ext:
-    try:
-        # 🧩 Respaldo local
-        from modules.ai_summaries import summarize_sheet_with_prompt as _SUMMARIZE_WITH_PROMPT  # type: ignore
-        from modules.ai_summaries import PROMPTS as _PROMPTS  # type: ignore
-        _AI_SRC = "local"
-    except Exception as e_loc:
-        _AI_IMPORT_ERR = f"external={repr(e_ext)} | local={repr(e_loc)}"
 
+def _load_prompts():
+    """Carga PROMPTS y summarize_sheet_with_prompt del repo privado; si falla, usa fallback local."""
+    global _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC, _AI_IMPORT_ERR
+    e_ext = e_file = e_loc = None
+
+    # 1) Import estándar del paquete externo (si está instalado con su nombre)
+    try:
+        from seo_analisis_ext.ai_summaries import summarize_sheet_with_prompt as _s, PROMPTS as _p  # type: ignore
+        _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC = _s, _p, "external"
+        return
+    except Exception as ex:
+        e_ext = ex
+
+    # 2) Carga por archivo junto al paquete externo que ya trajo ensure_external_package()
+    try:
+        if _ext:  # _ext viene de ensure_external_package()
+            base = pathlib.Path(_ext.__file__).parent
+            f = base / "ai_summaries.py"
+            if f.exists():
+                spec = importlib.util.spec_from_file_location("seo_analisis_ext_ai_summaries", f)
+                mod = importlib.util.module_from_spec(spec)  # type: ignore
+                assert spec and spec.loader
+                spec.loader.exec_module(mod)  # type: ignore
+                _SUMMARIZE_WITH_PROMPT = getattr(mod, "summarize_sheet_with_prompt", None)
+                _PROMPTS = getattr(mod, "PROMPTS", None)
+                if _SUMMARIZE_WITH_PROMPT and _PROMPTS:
+                    _AI_SRC = f"external:file:{f.name}"
+                    return
+    except Exception as ef:
+        e_file = ef
+
+    # 3) Fallback local
+    try:
+        from modules.ai_summaries import summarize_sheet_with_prompt as _s, PROMPTS as _p  # type: ignore
+        _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC = _s, _p, "local"
+        return
+    except Exception as el:
+        e_loc = el
+        _AI_IMPORT_ERR = f"external={repr(e_ext)} | file={repr(e_file)} | local={repr(e_loc)}"
+
+# Ejecutar la carga al iniciar
+_load_prompts()
 # ------------------------------------------------------------
 # Helpers de query params
 # ------------------------------------------------------------
