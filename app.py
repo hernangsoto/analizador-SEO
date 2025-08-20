@@ -133,6 +133,10 @@ _AI_IMPORT_ERR = None
 def _load_prompts():
     """Carga PROMPTS y summarize_sheet_with_prompt del repo privado; si falla, usa fallback local."""
     global _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC, _AI_IMPORT_ERR
+    _SUMMARIZE_WITH_PROMPT = None
+    _PROMPTS = None
+    _AI_SRC = "none"
+    _AI_IMPORT_ERR = None
     e_ext = e_file = e_loc = None
 
     # 1) Import estándar del paquete externo (si está instalado con su nombre)
@@ -210,6 +214,24 @@ def _render_prompt_probe(kind: str, force_key: str | None = None):
     if bh:
         st.markdown("**bullets_hint:**")
         st.code(bh, language="md")
+
+# 🧪 Diagnóstico rápido global de prompts + botón de recarga
+with st.expander("🧪 Diagnóstico rápido de prompts (opcional)", expanded=False):
+    try:
+        spec = importlib.util.find_spec("seo_analisis_ext.ai_summaries")
+        st.write("Ubicación de seo_analisis_ext.ai_summaries:", getattr(spec, "origin", "(no encontrada)"))
+    except Exception:
+        st.write("Ubicación de seo_analisis_ext.ai_summaries: (no disponible)")
+
+    st.write("Fuente actual de prompts:", _AI_SRC or "none")
+    if _AI_IMPORT_ERR:
+        st.warning("Fallo al importar prompts. Ver detalle debajo.")
+        with st.expander("Detalle del error de import"):
+            st.code(_AI_IMPORT_ERR)
+
+    if st.button("🔁 Reintentar carga de prompts"):
+        _load_prompts()
+        st.rerun()
 
 # ------------------------------------------------------------
 # Helpers de query params
