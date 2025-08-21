@@ -13,7 +13,6 @@ import requests
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
-from urllib.parse import urlencode, urlparse, parse_qs
 
 # Extras para manejo de errores detallados
 import json
@@ -130,7 +129,7 @@ USING_EXT = bool(_ext)
 from modules.auth import (
     build_flow,
     pick_destination_oauth,
-    # pick_source_oauth,   # ← NO lo usaremos para evitar CSRF/state
+    pick_source_oauth,
     SCOPES_DRIVE,            # <-- Drive/Sheets
 )
 from modules.drive import (
@@ -147,6 +146,7 @@ SCOPES_GSC = ["https://www.googleapis.com/auth/webmasters.readonly"]
 # ====== IA (Nomadic Bot 🤖 / Gemini) ======
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 import importlib.util, pathlib
+import re
 
 _SUMMARIZE_WITH_PROMPT = None
 _PROMPTS = None
@@ -465,6 +465,7 @@ def step0_google_identity():
                 flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
                 flow.redirect_uri = redirect_uri
 
+        from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
 
         try:
@@ -534,77 +535,6 @@ def step0_google_identity():
                 st.rerun()
 
     return st.session_state.get("_google_identity")
-
-# ------------------------------------------------------------
-# Login estable para "Acceso" / "Acceso Medios" (GSC) sin CSRF/state
-# ------------------------------------------------------------
-def connect_src_account(account_key: str, display_name: str):
-    """
-    Inicia OAuth (Installed/localhost) para la cuenta 'Acceso' o 'Acceso Medios'
-    y devuelve google.oauth2.credentials.Credentials si se completa, o None si
-    el usuario todavía no pegó la URL de redirección.
-    """
-    store = _oauth_flow_store()
-    ss_key = "oauth_src"
-
-    # Crear flujo solo una vez por intento / cuenta
-    if ss_key not in st.session_state or (st.session_state[ss_key] or {}).get("for") != account_key:
-        flow = build_flow(account_key, SCOPES_GSC)  # Installed app -> redirect http://localhost
-        auth_url, state = flow.authorization_url(
-            prompt="consent select_account",
-            access_type="offline",
-            include_granted_scopes="true",
-        )
-        # Registrar en el almacén global por state
-        store[state] = {"flow": flow, "created": time.time(), "mode": "installed", "who": f"src:{account_key}"}
-        # Guardar metadatos en session_state (no guardamos el flow aquí)
-        st.session_state[ss_key] = {
-            "for": account_key,
-            "flow_state": state,
-            "auth_url": auth_url,
-            "mode": "installed",
-            "display_name": display_name,
-        }
-
-    # UI de conexión (manual copy/paste)
-    meta = st.session_state[ss_key]
-    st.markdown(f"🔗 **Paso A ({display_name})**: [Autorizar en Google]({meta['auth_url']})")
-    with st.expander("Ver/copiar URL de autorización"):
-        st.code(meta["auth_url"])
-
-    url = st.text_input(
-        f"🔑 Paso B ({display_name}): pegá la URL completa (http://localhost/?code=...&state=...)",
-        key=f"auth_response_url_src_{account_key}",
-        placeholder="http://localhost/?code=...&state=...",
-    )
-    col_a, col_b = st.columns([1,1])
-    with col_a:
-        if st.button(f"Conectar {display_name}", type="primary", key=f"btn_src_connect_{account_key}"):
-            if not url.strip():
-                st.error("Pegá la URL completa de redirección (incluye code y state).")
-                st.stop()
-            # Recuperar el Flow por el 'state' de la URL pegada
-            try:
-                q = parse_qs(urlparse(url.strip()).query)
-                state_in = (q.get("state") or [None])[0]
-                if not state_in:
-                    raise ValueError("No se encontró parámetro 'state' en la URL.")
-                entry = store.pop(state_in, None)
-                if not entry:
-                    raise ValueError("No encontré el flujo asociado a ese 'state'. Reintentá el login.")
-                flow = entry["flow"]
-                flow.fetch_token(authorization_response=url.strip())
-                creds = flow.credentials
-                return creds
-            except Exception as e:
-                st.error(f"No se pudo completar la conexión de {display_name}: {e}")
-                st.stop()
-    with col_b:
-        if st.button("Reiniciar login", key=f"btn_src_reset_{account_key}"):
-            st.session_state.pop(ss_key, None)
-            st.rerun()
-
-    return None
 
 # ------------------------------------------------------------
 # Pantalla de LOGOUT: revoca tokens, borra cachés y limpia sesión
@@ -724,6 +654,32 @@ def pick_analysis(include_auditoria: bool):
 
 LAG_DAYS_DEFAULT = 3
 
+# -------- Helpers de filtros avanzados (Core Update) --------
+def _parse_paths_csv(txt: str) -> list[str]:
+    if not txt:
+        return []
+    items = [p.strip() for p in txt.split(",")]
+    items = [p for p in items if p]
+    # Normalizar: quitar dobles espacios; no forzamos / al inicio/fin para no romper sitios
+    return items
+
+def _build_advanced_filters_payload(
+    sec_mode: str, sec_paths: list[str],
+    sub_enabled: bool, sub_mode: str | None, sub_paths: list[str] | None
+) -> dict | None:
+    payload: dict = {}
+    if sec_mode in ("Incluir solo", "Excluir") and sec_paths:
+        payload["sections"] = {
+            "mode": "include" if sec_mode == "Incluir solo" else "exclude",
+            "paths": sec_paths
+        }
+    if sub_enabled and sub_mode and sub_paths:
+        payload["subsections"] = {
+            "mode": "include" if sub_mode == "Incluir solo" else "exclude",
+            "paths": sub_paths
+        }
+    return payload or None
+
 def params_for_core_update():
     # Renombrado solicitado
     st.markdown("#### Configuración del análisis")
@@ -764,9 +720,55 @@ def params_for_core_update():
         key="pais_core",
     )
     pais = None if pais_choice == "Todos" else pais_choice
-    seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_core") or None
 
-    return lag_days, core_choice, custom_ini, custom_fin, tipo, pais, seccion
+    # ----- NUEVO: filtros avanzados de secciones y subsecciones -----
+    st.markdown("##### Filtro por secciones")
+    sec_mode = st.radio(
+        "¿Cómo aplicar el filtro de sección?",
+        ["No filtrar", "Incluir solo", "Excluir"],
+        index=0, horizontal=True, key="sec_mode_core"
+    )
+    sec_list_txt = st.text_input(
+        "Secciones (separa múltiples rutas con coma, ej.: /vida/, /ciencia/)",
+        value="", key="sec_list_core", placeholder="/vida/, /ciencia/"
+    )
+
+    st.markdown("##### Filtro por subsecciones (opcional)")
+    sub_enabled = st.checkbox("Activar filtro por subsecciones", value=False, key="subsec_en_core")
+    sub_mode = None
+    sub_list_txt = None
+    if sub_enabled:
+        sub_mode = st.radio(
+            "Modo de subsecciones",
+            ["Incluir solo", "Excluir"],
+            index=0, horizontal=True, key="subsec_mode_core"
+        )
+        sub_list_txt = st.text_input(
+            "Subsecciones (separa múltiples rutas con coma, ej.: /vida/salud/, /vida/bienestar/)",
+            value="", key="subsec_list_core", placeholder="/vida/salud/, /vida/bienestar/"
+        )
+
+    # Construimos payload avanzado + compatibilidad con 'seccion' legacy
+    sec_paths = _parse_paths_csv(sec_list_txt)
+    sub_paths = _parse_paths_csv(sub_list_txt) if sub_list_txt is not None else None
+    adv_payload = _build_advanced_filters_payload(sec_mode, sec_paths, sub_enabled, sub_mode, sub_paths)
+
+    # Guardar en sesión para usarlo al ejecutar (env var)
+    st.session_state["core_filters_payload"] = adv_payload
+
+    # Compatibilidad: si es Incluir solo con UNA sección y sin subsecciones -> usamos 'seccion' legacy
+    seccion_legacy = None
+    if adv_payload and "sections" in adv_payload:
+        if adv_payload["sections"]["mode"] == "include" and len(adv_payload["sections"]["paths"]) == 1 and "subsections" not in adv_payload:
+            seccion_legacy = adv_payload["sections"]["paths"][0]
+
+    # Si no hay payload pero el usuario escribió algo "por costumbre", también lo aceptamos
+    if not adv_payload and sec_list_txt.strip():
+        # Si solo una ruta -> legacy; si múltiples -> tomar la primera
+        first = _parse_paths_csv(sec_list_txt)[:1]
+        seccion_legacy = first[0] if first else None
+
+    return lag_days, core_choice, custom_ini, custom_fin, tipo, pais, seccion_legacy
 
 def params_for_evergreen():
     st.markdown("#### Parámetros (Evergreen)")
@@ -1046,11 +1048,12 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.stop()
 
 else:
-    # Modo Acceso / Acceso Medios (sin CSRF)
+    # Modo Acceso / Acceso Medios
     wanted_norm = _norm(sc_choice)  # "acceso" o "accesomedios"
     have_label = st.session_state.get("src_account_label")
     have_norm = _norm(have_label)
 
+    # Si veníamos usando la personal o no hay sesión previa, pedimos login de Acceso/Medios
     need_new_auth = (
         not st.session_state.get("step3_done")
         or (have_norm != wanted_norm)
@@ -1063,12 +1066,23 @@ else:
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        acct_key = "ACCESO" if sc_choice == "Acceso" else "ACCESO_MEDIOS"
-        creds_src_obj = connect_src_account(acct_key, sc_choice)
+        creds_src_obj = pick_source_oauth()  # UI de login SOLO aquí
         if not creds_src_obj:
-            st.stop()  # todavía no terminó el login (esperando que pegue la URL)
+            st.stop()
 
-        # Guardar credenciales y rotular
+        # Validar que el usuario eligió la cuenta correcta dentro del picker
+        picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
+        picked_norm = _norm(picked_label)
+
+        if picked_norm != wanted_norm:
+            st.error(f"Autorizaste **{picked_label}**, pero seleccionaste **{sc_choice}**. Reintentá el login eligiendo la cuenta correcta.")
+            if st.button("Reintentar selección de cuenta", key="retry_wrong_sc_account"):
+                for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+            st.stop()
+
+        # OK: guardar y continuar
         st.session_state["creds_src"] = {
             "token": creds_src_obj.token,
             "refresh_token": getattr(creds_src_obj, "refresh_token", None),
@@ -1077,9 +1091,8 @@ else:
             "client_secret": creds_src_obj.client_secret,
             "scopes": creds_src_obj.scopes,
         }
-        st.session_state["src_account_label"] = sc_choice
+        st.session_state["src_account_label"] = picked_label
         st.session_state["step3_done"] = True
-        st.session_state.pop("oauth_src", None)
         st.rerun()
     else:
         try:
@@ -1198,8 +1211,6 @@ def _extract_medio_name(site_url: str | None) -> str | None:
         return s.split(":", 1)[1].strip() or None
     return None
 
-import re
-
 def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
     """Si site_url es sc-domain:*, antepone '<medio> - ' al nombre del archivo en Drive,
     evitando duplicar guiones y respetando si ya está prefijado.
@@ -1231,7 +1242,7 @@ def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: s
 
 # --- Resumen con IA (prompts por tipo + fallback) ---
 def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    # Toggle por defecto DESACTIVADO y con clave única para evitar duplicados
+    # Toggle por defecto DESACTIVADO + clave única para evitar duplicados
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
@@ -1328,6 +1339,13 @@ if analisis == "4":
                             st.error("Gemini no está listo: se caerá al fallback.")
 
         if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+            # Inyectar filtros avanzados para el job (si existen)
+            adv_payload = st.session_state.get("core_filters_payload")
+            if adv_payload:
+                os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
+            else:
+                os.environ.pop("SEO_ADVANCED_FILTERS", None)
+
             sid = run_with_indicator(
                 "Procesando Core Update",
                 run_core_update, sc_service, drive_service, gs_client, site_url, params,
@@ -1407,7 +1425,7 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
         st.session_state["last_file_id"],
         kind=st.session_state["last_file_kind"],
         force_prompt_key="core" if st.session_state["last_file_kind"] == "core" else None,
-        widget_suffix="persist"
+        widget_suffix="panel"
     )
 
 # Debug opcional (solo si está activo)
