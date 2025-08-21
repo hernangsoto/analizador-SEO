@@ -919,17 +919,21 @@ def _norm(s: str | None) -> str:
 
 sc_service = None
 
-# Renombrado solicitado para el step
 st.subheader("Selecciona la cuenta con acceso a Search Console")
-account_options = ["Cuenta principal (Paso 0)", "Acceso", "Acceso Medios"]
-default_idx = account_options.index(st.session_state.get("sc_account_choice", "Cuenta principal (Paso 0)")) \
-    if st.session_state.get("sc_account_choice", "Cuenta principal (Paso 0)") in account_options else 0
+
+# Orden y texto de opciones: Acceso, Acceso Medios, Acceso en cuenta personal de Nomadic
+account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
+
+# Default: usar lo que esté en sesión; si no, la personal de Nomadic
+_default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
+default_idx = account_options.index(_default_label) if _default_label in account_options else 2
+
 sc_choice = st.selectbox(
     "Elegí la cuenta para consultar datos de Search Console",
     account_options, index=default_idx, key="sc_account_choice"
 )
 
-if sc_choice == "Cuenta principal (Paso 0)":
+if sc_choice == "Acceso en cuenta personal de Nomadic":
     # Usar credenciales del Paso 0 (creds_dest) SI tienen el scope de GSC
     creds_dest_dict = st.session_state.get("creds_dest")
     if not creds_dest_dict:
@@ -937,7 +941,7 @@ if sc_choice == "Cuenta principal (Paso 0)":
         st.stop()
 
     if not _has_gsc_scope(creds_dest_dict.get("scopes")):
-        st.warning("Tu cuenta principal no tiene permisos de Search Console todavía.")
+        st.warning("Tu cuenta personal no tiene permisos de Search Console todavía.")
         c1, c2 = st.columns([1,3])
         with c1:
             if st.button("➕ Añadir permiso de Search Console", key="btn_add_gsc_scope"):
@@ -950,24 +954,24 @@ if sc_choice == "Cuenta principal (Paso 0)":
             st.caption("Se reabrirá el Paso 0 pidiendo también el permiso de Search Console.")
         st.stop()
 
-    # OK: construir cliente GSC con la cuenta principal
+    # OK: construir cliente GSC con la cuenta personal
     try:
         creds_src = Credentials(**creds_dest_dict)
         sc_service = ensure_sc_client(creds_src)
         st.session_state["creds_src"] = creds_dest_dict  # para reutilizar lógica downstream
-        st.session_state["src_account_label"] = "Cuenta principal (Paso 0)"
+        st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
         st.session_state["step3_done"] = True
         st.markdown(
             f'''
             <div class="success-inline">
-                Cuenta de acceso (Search Console): <strong>Cuenta principal (Paso 0)</strong>
+                Cuenta de acceso (Search Console): <strong>Acceso en cuenta personal de Nomadic</strong>
                 <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
             </div>
             ''',
             unsafe_allow_html=True
         )
     except Exception as e:
-        st.error(f"No pude inicializar Search Console con la cuenta principal: {e}")
+        st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 
 else:
@@ -976,7 +980,12 @@ else:
     have_label = st.session_state.get("src_account_label")
     have_norm = _norm(have_label)
 
-    need_new_auth = (not st.session_state.get("step3_done")) or (have_norm != wanted_norm) or (have_norm == _norm("Cuenta principal (Paso 0)"))
+    # Si veníamos usando la personal o no hay sesión previa, pedimos login de Acceso/Medios
+    need_new_auth = (
+        not st.session_state.get("step3_done")
+        or (have_norm != wanted_norm)
+        or (have_norm == _norm("Acceso en cuenta personal de Nomadic"))
+    )
 
     if need_new_auth:
         # Limpiar credenciales previas de otra cuenta
