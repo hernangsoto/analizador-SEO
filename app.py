@@ -610,7 +610,8 @@ def logout_screen():
 
 # ====== Pequeñas utilidades UI (parámetros y selección) ======
 def pick_site(sc_service):
-    st.subheader("4) Elegí el sitio a trabajar (Search Console)")
+    # Renombrado solicitado
+    st.subheader("Elige el sitio a analizar")
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -629,7 +630,8 @@ def pick_site(sc_service):
     return site_url
 
 def pick_analysis(include_auditoria: bool):
-    st.subheader("5) Elegí el tipo de análisis")
+    # Renombrado solicitado
+    st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
         "2. Análisis de tráfico general (🚧 próximamente)",
@@ -652,7 +654,8 @@ def pick_analysis(include_auditoria: bool):
 LAG_DAYS_DEFAULT = 3
 
 def params_for_core_update():
-    st.markdown("#### Parámetros (Core Update)")
+    # Renombrado solicitado
+    st.markdown("#### Configuración del análisis")
     lag_days = st.number_input(
         "Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core"
     )
@@ -678,7 +681,10 @@ def params_for_core_update():
         else:
             custom_fin = None
 
-    tipo = st.selectbox("Datos a analizar", ["Search", "Discover", "Ambos"], index=2, key="tipo_core")
+    # UI muestra "Search + Discover", pero internamente seguimos pasando "Ambos"
+    tipo_display = st.selectbox("Datos a analizar", ["Search", "Discover", "Search + Discover"], index=2, key="tipo_core_display")
+    tipo_map = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}
+    tipo = tipo_map.get(tipo_display, "Ambos")
 
     pais_choice = st.selectbox(
         "¿Filtrar por país? (ISO-3)",
@@ -913,7 +919,8 @@ def _norm(s: str | None) -> str:
 
 sc_service = None
 
-st.subheader("3) Fuente de datos (Search Console)")
+# Renombrado solicitado para el step
+st.subheader("Selecciona la cuenta con acceso a Search Console")
 account_options = ["Cuenta principal (Paso 0)", "Acceso", "Acceso Medios"]
 default_idx = account_options.index(st.session_state.get("sc_account_choice", "Cuenta principal (Paso 0)")) \
     if st.session_state.get("sc_account_choice", "Cuenta principal (Paso 0)") in account_options else 0
@@ -1112,6 +1119,32 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
+# --- Helpers: medio desde sc-domain y renombrado del Sheet ---
+def _extract_medio_name(site_url: str | None) -> str | None:
+    if not site_url:
+        return None
+    s = site_url.strip()
+    if s.lower().startswith("sc-domain:"):
+        # toma lo que sigue a los ":"
+        return s.split(":", 1)[1].strip() or None
+    return None
+
+def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
+    """Si site_url es sc-domain:*, antepone '<medio> - ' al nombre del archivo en Drive."""
+    medio = _extract_medio_name(site_url)
+    if not medio:
+        return
+    try:
+        meta = drive_service.files().get(fileId=file_id, fields="name").execute()
+        current = meta.get("name") or ""
+        if medio in current:
+            return  # ya está incluido
+        new_name = f"{medio} - {current}".strip()
+        drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    except Exception:
+        # Silencioso: no bloquear el flujo por un rename fallido
+        pass
+
 # --- Resumen con IA (prompts por tipo + fallback) ---
 def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
     # Toggle por defecto DESACTIVADO
@@ -1215,6 +1248,9 @@ if analisis == "4":
                 run_core_update, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
+            # Renombrado si el sitio es sc-domain:*
+            _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
@@ -1236,6 +1272,9 @@ elif analisis == "5":
                 run_evergreen, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
+            # Renombrado si el sitio es sc-domain:*
+            _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
@@ -1257,6 +1296,9 @@ elif analisis == "6":
                 run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
+            # Renombrado si el sitio es sc-domain:*
+            _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
@@ -1273,7 +1315,8 @@ else:
 # --- Panel persistente para generar resumen del último informe sin rerun del análisis ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     st.divider()
-    st.subheader("📄 Resumen del último informe")
+    # Renombrado solicitado
+    st.subheader("📄 Resumen del análisis")
     st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
     _gemini_summary(
         st.session_state["last_file_id"],
