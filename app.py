@@ -13,6 +13,7 @@ import requests
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
+from urllib.parse import urlencode, urlparse, parse_qs
 
 # Extras para manejo de errores detallados
 import json
@@ -129,7 +130,7 @@ USING_EXT = bool(_ext)
 from modules.auth import (
     build_flow,
     pick_destination_oauth,
-    pick_source_oauth,
+    # pick_source_oauth,   # ← NO lo usaremos para evitar CSRF/state
     SCOPES_DRIVE,            # <-- Drive/Sheets
 )
 from modules.drive import (
@@ -464,7 +465,6 @@ def step0_google_identity():
                 flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
                 flow.redirect_uri = redirect_uri
 
-        from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
 
         try:
@@ -534,6 +534,77 @@ def step0_google_identity():
                 st.rerun()
 
     return st.session_state.get("_google_identity")
+
+# ------------------------------------------------------------
+# Login estable para "Acceso" / "Acceso Medios" (GSC) sin CSRF/state
+# ------------------------------------------------------------
+def connect_src_account(account_key: str, display_name: str):
+    """
+    Inicia OAuth (Installed/localhost) para la cuenta 'Acceso' o 'Acceso Medios'
+    y devuelve google.oauth2.credentials.Credentials si se completa, o None si
+    el usuario todavía no pegó la URL de redirección.
+    """
+    store = _oauth_flow_store()
+    ss_key = "oauth_src"
+
+    # Crear flujo solo una vez por intento / cuenta
+    if ss_key not in st.session_state or (st.session_state[ss_key] or {}).get("for") != account_key:
+        flow = build_flow(account_key, SCOPES_GSC)  # Installed app -> redirect http://localhost
+        auth_url, state = flow.authorization_url(
+            prompt="consent select_account",
+            access_type="offline",
+            include_granted_scopes="true",
+        )
+        # Registrar en el almacén global por state
+        store[state] = {"flow": flow, "created": time.time(), "mode": "installed", "who": f"src:{account_key}"}
+        # Guardar metadatos en session_state (no guardamos el flow aquí)
+        st.session_state[ss_key] = {
+            "for": account_key,
+            "flow_state": state,
+            "auth_url": auth_url,
+            "mode": "installed",
+            "display_name": display_name,
+        }
+
+    # UI de conexión (manual copy/paste)
+    meta = st.session_state[ss_key]
+    st.markdown(f"🔗 **Paso A ({display_name})**: [Autorizar en Google]({meta['auth_url']})")
+    with st.expander("Ver/copiar URL de autorización"):
+        st.code(meta["auth_url"])
+
+    url = st.text_input(
+        f"🔑 Paso B ({display_name}): pegá la URL completa (http://localhost/?code=...&state=...)",
+        key=f"auth_response_url_src_{account_key}",
+        placeholder="http://localhost/?code=...&state=...",
+    )
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        if st.button(f"Conectar {display_name}", type="primary", key=f"btn_src_connect_{account_key}"):
+            if not url.strip():
+                st.error("Pegá la URL completa de redirección (incluye code y state).")
+                st.stop()
+            # Recuperar el Flow por el 'state' de la URL pegada
+            try:
+                q = parse_qs(urlparse(url.strip()).query)
+                state_in = (q.get("state") or [None])[0]
+                if not state_in:
+                    raise ValueError("No se encontró parámetro 'state' en la URL.")
+                entry = store.pop(state_in, None)
+                if not entry:
+                    raise ValueError("No encontré el flujo asociado a ese 'state'. Reintentá el login.")
+                flow = entry["flow"]
+                flow.fetch_token(authorization_response=url.strip())
+                creds = flow.credentials
+                return creds
+            except Exception as e:
+                st.error(f"No se pudo completar la conexión de {display_name}: {e}")
+                st.stop()
+    with col_b:
+        if st.button("Reiniciar login", key=f"btn_src_reset_{account_key}"):
+            st.session_state.pop(ss_key, None)
+            st.rerun()
+
+    return None
 
 # ------------------------------------------------------------
 # Pantalla de LOGOUT: revoca tokens, borra cachés y limpia sesión
@@ -975,12 +1046,11 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.stop()
 
 else:
-    # Modo Acceso / Acceso Medios
+    # Modo Acceso / Acceso Medios (sin CSRF)
     wanted_norm = _norm(sc_choice)  # "acceso" o "accesomedios"
     have_label = st.session_state.get("src_account_label")
     have_norm = _norm(have_label)
 
-    # Si veníamos usando la personal o no hay sesión previa, pedimos login de Acceso/Medios
     need_new_auth = (
         not st.session_state.get("step3_done")
         or (have_norm != wanted_norm)
@@ -993,23 +1063,12 @@ else:
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        creds_src_obj = pick_source_oauth()  # UI de login SOLO aquí
+        acct_key = "ACCESO" if sc_choice == "Acceso" else "ACCESO_MEDIOS"
+        creds_src_obj = connect_src_account(acct_key, sc_choice)
         if not creds_src_obj:
-            st.stop()
+            st.stop()  # todavía no terminó el login (esperando que pegue la URL)
 
-        # Validar que el usuario eligió la cuenta correcta dentro del picker
-        picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
-        picked_norm = _norm(picked_label)
-
-        if picked_norm != wanted_norm:
-            st.error(f"Autorizaste **{picked_label}**, pero seleccionaste **{sc_choice}**. Reintentá el login eligiendo la cuenta correcta.")
-            if st.button("Reintentar selección de cuenta", key="retry_wrong_sc_account"):
-                for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
-                    st.session_state.pop(k, None)
-                st.rerun()
-            st.stop()
-
-        # OK: guardar y continuar
+        # Guardar credenciales y rotular
         st.session_state["creds_src"] = {
             "token": creds_src_obj.token,
             "refresh_token": getattr(creds_src_obj, "refresh_token", None),
@@ -1018,8 +1077,9 @@ else:
             "client_secret": creds_src_obj.client_secret,
             "scopes": creds_src_obj.scopes,
         }
-        st.session_state["src_account_label"] = picked_label
+        st.session_state["src_account_label"] = sc_choice
         st.session_state["step3_done"] = True
+        st.session_state.pop("oauth_src", None)
         st.rerun()
     else:
         try:
@@ -1170,13 +1230,14 @@ def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: s
         pass
 
 # --- Resumen con IA (prompts por tipo + fallback) ---
-def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
-    # Toggle por defecto DESACTIVADO
+def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
+    # Toggle por defecto DESACTIVADO y con clave única para evitar duplicados
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
         value=False,
-        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
+        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
+        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
     )
     if not use_ai:
         return
@@ -1283,7 +1344,7 @@ if analisis == "4":
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
-            _gemini_summary(sid, kind="core", force_prompt_key="core")
+            _gemini_summary(sid, kind="core", force_prompt_key="core", widget_suffix="after_run")
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1307,7 +1368,7 @@ elif analisis == "5":
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
-            _gemini_summary(sid, kind="evergreen")
+            _gemini_summary(sid, kind="evergreen", widget_suffix="after_run")
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -1331,7 +1392,7 @@ elif analisis == "6":
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
-            _gemini_summary(sid, kind="audit")
+            _gemini_summary(sid, kind="audit", widget_suffix="after_run")
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
@@ -1345,7 +1406,8 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
     _gemini_summary(
         st.session_state["last_file_id"],
         kind=st.session_state["last_file_kind"],
-        force_prompt_key="core" if st.session_state["last_file_kind"] == "core" else None
+        force_prompt_key="core" if st.session_state["last_file_kind"] == "core" else None,
+        widget_suffix="persist"
     )
 
 # Debug opcional (solo si está activo)
