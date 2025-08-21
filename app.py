@@ -42,6 +42,18 @@ LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
 # URL base del app (para enlaces internos que deben ir SIEMPRE a la home)
 APP_HOME = st.secrets.get("app_home_url", "https://hernangsoto.streamlit.app")
 
+# === Modelo de Gemini (default + override por secrets/env) ===
+def _resolve_gemini_model() -> str:
+    return (
+        os.getenv("GEMINI_MODEL")
+        or st.secrets.get("GEMINI_MODEL")
+        or st.secrets.get("gemini", {}).get("model")
+        or "gemini-2.5-flash"
+    )
+
+# Deja el modelo elegido disponible para cualquier módulo que lo lea desde el entorno
+os.environ["GEMINI_MODEL"] = _resolve_gemini_model()
+
 # Estilo general + header nativo
 apply_page_style(
     header_bg=HEADER_COLOR,
@@ -208,7 +220,7 @@ def _gemini_healthcheck():
                   (st.secrets.get("GEMINI_API_KEY")) or \
                   (st.secrets.get("gemini", {}).get("api_key"))
             genai.configure(api_key=key)
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
+            model_name = os.environ.get("GEMINI_MODEL") or _resolve_gemini_model()
             _ = genai.GenerativeModel(model_name)
             msgs.append(f"Modelo instanciado: {model_name}")
         else:
