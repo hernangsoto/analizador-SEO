@@ -83,15 +83,12 @@ st.markdown("""
   color: #fff !important; border-radius: 8px !important;
 }
 .stButton > button:hover, .stDownloadButton > button:hover { filter: brightness(0.93); }
-
 .success-inline {
   background:#e6f4ea; border:1px solid #a5d6a7; color:#1e4620;
   padding:10px 14px; border-radius:8px; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
 }
 .success-inline a { color:#0b8043; text-decoration:underline; font-weight:600; }
 .success-inline strong { margin-left:.25rem; }
-
-/* Asegurar que header no tape el logo */
 header[data-testid="stHeader"] { z-index:1500 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -128,8 +125,14 @@ from modules.auth import (
     build_flow,
     pick_destination_oauth,
     pick_source_oauth,
-    SCOPES_DRIVE,            # <-- pedimos Drive/Sheets en Paso 0
+    SCOPES_DRIVE,            # <-- Drive/Sheets
 )
+# Intentar traer scopes de Search Console desde modules.auth; si no existen, fallback al scope oficial
+try:
+    from modules.auth import SCOPES_SC  # type: ignore
+except Exception:
+    SCOPES_SC = ["https://www.googleapis.com/auth/webmasters.readonly"]
+
 from modules.drive import (
     ensure_drive_clients,
     get_google_identity,
@@ -155,16 +158,12 @@ def _load_prompts():
     _AI_SRC = "none"
     _AI_IMPORT_ERR = None
     e_ext = e_file = e_loc = None
-
-    # 1) Import estándar del paquete externo (si está instalado con su nombre)
     try:
         from seo_analisis_ext.ai_summaries import summarize_sheet_with_prompt as _s, PROMPTS as _p  # type: ignore
         _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC = _s, _p, "external"
         return
     except Exception as ex:
         e_ext = ex
-
-    # 2) Carga por archivo junto al paquete externo que ya trajo ensure_external_package()
     try:
         if _ext:
             base = pathlib.Path(_ext.__file__).parent
@@ -181,8 +180,6 @@ def _load_prompts():
                     return
     except Exception as ef:
         e_file = ef
-
-    # 3) Fallback local
     try:
         from modules.ai_summaries import summarize_sheet_with_prompt as _s, PROMPTS as _p  # type: ignore
         _SUMMARIZE_WITH_PROMPT, _PROMPTS, _AI_SRC = _s, _p, "local"
@@ -191,12 +188,10 @@ def _load_prompts():
         e_loc = el
         _AI_IMPORT_ERR = f"external={repr(e_ext)} | file={repr(e_file)} | local={repr(e_loc)}"
 
-# Ejecutar la carga al iniciar
 _load_prompts()
 
-# ---- Healthcheck de Gemini (solo para debug UI) ----
+# ---- Healthcheck de Gemini (solo debug) ----
 def _gemini_healthcheck():
-    """Verifica SDK, API key y creación de modelo de Gemini."""
     ok = True
     msgs = []
     try:
@@ -207,7 +202,6 @@ def _gemini_healthcheck():
     except Exception:
         has_key = False
     msgs.append(f"API key presente: {has_key}")
-
     try:
         import google.generativeai as genai  # noqa
         msgs.append(f"google-generativeai importado: True (v={getattr(genai, '__version__', 'desconocida')})")
@@ -225,23 +219,19 @@ def _gemini_healthcheck():
     except Exception as e:
         ok = False
         msgs.append(f"Error al importar/configurar Gemini: {repr(e)}")
-
     return ok, msgs
 
-# ---------- Probe de prompts (ver qué prompt se usará antes de ejecutar) ----------
+# ---------- Probe de prompts (ver qué prompt se usará) ----------
 def _render_prompt_probe(kind: str, force_key: str | None = None):
-    """Muestra qué prompt se usará y su contenido antes de ejecutar nada."""
     key = force_key or kind
     st.markdown("### 🔍 Test de prompt")
     st.caption(f"Tipo solicitado: **{kind}**  •  Clave buscada: **{key}**")
-
     if _PROMPTS is None:
         st.error(f"No pude cargar PROMPTS (fuente: {_AI_SRC}). Usaría fallback automático.")
         if _AI_IMPORT_ERR:
             with st.expander("Ver detalle del error de import"):
                 st.code(_AI_IMPORT_ERR)
         return
-
     st.caption(f"Fuente de prompts: **{_AI_SRC}**")
     with st.expander("Claves disponibles en PROMPTS"):
         try:
@@ -251,11 +241,9 @@ def _render_prompt_probe(kind: str, force_key: str | None = None):
                 st.write(list(_PROMPTS.keys()))
             except Exception:
                 st.write("(No se pudieron listar las claves)")
-
     if key not in _PROMPTS:
         st.error(f"No hay PROMPTS['{key}']. Se usaría fallback automático.")
         return
-
     pc = _PROMPTS[key]
     st.success(f"✅ Encontrado PROMPTS['{key}']. Este es el prompt que se usará.")
     st.markdown(f"**title:** {getattr(pc, 'title', '(sin título)')}")
@@ -274,13 +262,11 @@ if st.session_state.get("DEBUG"):
             st.write("Ubicación de seo_analisis_ext.ai_summaries:", getattr(spec, "origin", "(no encontrada)"))
         except Exception:
             st.write("Ubicación de seo_analisis_ext.ai_summaries: (no disponible)")
-
         st.write("Fuente actual de prompts:", _AI_SRC or "none")
         if _AI_IMPORT_ERR:
             st.warning("Fallo al importar prompts. Ver detalle debajo.")
             with st.expander("Detalle del error de import"):
                 st.code(_AI_IMPORT_ERR)
-
         if st.button("🔁 Reintentar carga de prompts"):
             _load_prompts()
             st.rerun()
@@ -309,11 +295,10 @@ def _oauth_flow_store():
     return {}
 
 # ------------------------------------------------------------
-# PASO 0: Login con Google (OIDC + Drive/Sheets) para identidad y credenciales destino
+# PASO 0: Login con Google (OIDC + Drive/Sheets + Search Console)
 #   - Restringido a @nomadic.agency (sugerido con hd y validado post-login)
 # ------------------------------------------------------------
 def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
-    # agrega hd=nomadic.agency para forzar el selector a ese dominio
     sep = "&" if "?" in auth_url else "?"
     return f"{auth_url}{sep}hd={domain}"
 
@@ -321,7 +306,6 @@ def _email_is_nomadic(email: str | None) -> bool:
     return bool(email and email.lower().endswith("@nomadic.agency"))
 
 def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
-    """Llama al endpoint OIDC /userinfo con reintentos ante 5xx de Google."""
     url = "https://openidconnect.googleapis.com/v1/userinfo"
     headers = {"Authorization": f"Bearer {access_token}"}
     for attempt in range(4):
@@ -337,11 +321,8 @@ def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
 
 def step0_google_identity():
     """
-    ¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic.
-    Pide scopes: openid, email, profile + Drive/Sheets para omitir el Paso 1.
-    - Si en [auth] hay client_id/client_secret/redirect_uri => flujo WEB con redirección automática.
-    - Si faltan, fallback INSTALLED (localhost) con copy/paste.
-    El Flow se guarda por 'state' en un almacén global para evitar CSRF si el navegador abre otra pestaña.
+    ¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic
+    y autoriza Drive/Sheets + Search Console.
     """
     st.subheader("¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic")
 
@@ -350,12 +331,12 @@ def step0_google_identity():
     redirect_uri = auth_sec.get("redirect_uri")
     store = _oauth_flow_store()
 
-    # Scopes Paso 0: identidad + Drive/Sheets
-    scopes_step0 = ["openid", "email", "profile"] + SCOPES_DRIVE
+    # Scopes Paso 0: identidad + Drive/Sheets + Search Console
+    scopes_step0 = ["openid", "email", "profile"] + SCOPES_DRIVE + SCOPES_SC
 
     if "oauth_oidc" not in st.session_state:
         if has_web:
-            # === Modo WEB (sin copy/paste) ===
+            # === Modo WEB ===
             client_secrets = {
                 "web": {
                     "client_id": auth_sec["client_id"],
@@ -371,10 +352,10 @@ def step0_google_identity():
             flow.redirect_uri = redirect_uri
             auth_url, state = flow.authorization_url(
                 prompt="consent select_account",
-                access_type="offline",                # refresh_token
+                access_type="offline",
                 include_granted_scopes="true",
             )
-            auth_url = _append_hd(auth_url)  # ← forzar dominio
+            auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
                 "flow_state": state,
                 "use_redirect": True,
@@ -384,9 +365,9 @@ def step0_google_identity():
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "web"}
         else:
-            # === Fallback INSTALLED (copy/paste) ===
+            # === Fallback INSTALLED ===
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-            flow = build_flow(acct_for_dest, scopes_step0)  # build_flow ya setea redirect http://localhost
+            flow = build_flow(acct_for_dest, scopes_step0)
             auth_url, state = flow.authorization_url(
                 prompt="consent select_account",
                 access_type="offline",
@@ -425,11 +406,10 @@ def step0_google_identity():
             "email": info.get("email") or "—",
             "picture": info.get("picture"),
         }
-        # Enforce dominio @nomadic.agency (chequea también claim 'hd' si está presente)
+        # Enforce dominio @nomadic.agency
         hd_ok = (info.get("hd") == "nomadic.agency") if info.get("hd") else False
         if not (_email_is_nomadic(ident["email"]) or hd_ok):
             st.error("Debes iniciar sesión con un correo **@nomadic.agency**.")
-            # Limpiar y volver a mostrar el botón
             st.session_state.pop("_google_identity", None)
             st.session_state.pop("creds_dest", None)
             st.session_state.pop("step1_done", None)
@@ -437,7 +417,7 @@ def step0_google_identity():
             st.stop()
 
         st.session_state["_google_identity"] = ident
-        # 💾 Guardar credenciales Drive/Sheets para omitir Paso 1
+        # 💾 Guardar credenciales (Drive/Sheets + Search Console)
         st.session_state["creds_dest"] = {
             "token": creds.token,
             "refresh_token": getattr(creds, "refresh_token", None),
@@ -448,21 +428,17 @@ def step0_google_identity():
         }
         st.session_state["step1_done"] = True
         _clear_qp()
-        st.success(f"Identidad verificada y Drive/Sheets autorizados: {ident['email']}")
+        st.success(f"Identidad verificada y permisos otorgados: {ident['email']}")
         return ident
 
     if oo.get("use_redirect") and code:
         expected_state = oo.get("flow_state")
         flow = None
-
-        # Intentar recuperar el Flow original por 'state'
         store = _oauth_flow_store()
         if state_in and state_in in store:
             flow = store.pop(state_in)["flow"]
-
         if not flow:
             st.info("Intentando recuperar sesión…")
-            # Reconstituir Flow (web)
             if has_web:
                 from google_auth_oauthlib.flow import Flow
                 client_secrets = {
@@ -477,19 +453,13 @@ def step0_google_identity():
                 }
                 flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
                 flow.redirect_uri = redirect_uri
-
-        # Reconstruir la URL EXACTA de retorno
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
-
         try:
             if expected_state and state_in and state_in != expected_state:
-                st.info("Aviso: el 'state' no coincide con el generado (posible nueva pestaña). Usando flujo recuperado…")
-
+                st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando flujo recuperado…")
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
-
-            # Userinfo (con reintentos ante 5xx)
             info = _fetch_userinfo_json_with_retry(creds.token)
             return _finalize_identity(creds, info)
         except Exception as e:
@@ -510,11 +480,10 @@ def step0_google_identity():
             )
         st.caption("Serás redirigido a esta app automáticamente después de otorgar permisos.")
     else:
-        st.info("Modo manual activo (no hay credenciales WEB en [auth]). Podés copiar/pegar la URL, o configurar client_id/client_secret/redirect_uri para modo automático.")
+        st.info("Modo manual activo (no hay credenciales WEB en [auth]).")
         st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({auth_url})")
         with st.expander("Ver/copiar URL de autorización (identidad)"):
             st.code(auth_url)
-
         url = st.text_input(
             "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
             key="auth_response_url_oidc",
@@ -524,23 +493,19 @@ def step0_google_identity():
         with c1:
             if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
                 if not url.strip():
-                    st.error("Pegá la URL completa de redirección (incluye code y state).")
+                    st.error("Pegá la URL de redirección (incluye code y state).")
                     st.stop()
                 try:
-                    # Recuperar Flow por state
                     flow_state = oo.get("flow_state")
                     store = _oauth_flow_store()
                     flow = None
                     if flow_state and flow_state in store:
                         flow = store.pop(flow_state)["flow"]
                     if not flow:
-                        # fallback: nuevo Flow con los mismos scopes
                         acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
                         flow = build_flow(acct_for_dest, scopes_step0)
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
-
-                    # Userinfo (con reintentos ante 5xx)
                     info = _fetch_userinfo_json_with_retry(creds.token)
                     return _finalize_identity(creds, info)
                 except Exception as e:
@@ -588,18 +553,15 @@ def logout_screen():
                     data = st.session_state.get(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
-
             # Borrar cachés
             try: st.cache_data.clear()
             except Exception: pass
             try: st.cache_resource.clear()
             except Exception: pass
-
             # Borrar paquete externo (opcional)
             if wipe_pkg:
                 import shutil
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
-
             # Limpiar session_state
             for k in [
                 "_auth_bypass", "_google_identity",
@@ -611,16 +573,13 @@ def logout_screen():
                 "DEBUG",
             ]:
                 st.session_state.pop(k, None)
-
             # Limpiar token_store
             try:
                 token_store.clear("creds_dest")
                 token_store.clear("creds_src")
             except Exception:
                 pass
-
-            # 🚫 No usar st.logout() para evitar redirección a /~/+/auth/logout
-            # Redirigir manualmente a la home de la app:
+            # Redirigir manualmente a la home (evita /~/+/auth/logout)
             st.markdown(
                 "<meta http-equiv='refresh' content='0; url=https://hernangsoto.streamlit.app'>",
                 unsafe_allow_html=True
@@ -645,13 +604,11 @@ def pick_site(sc_service):
     if not verified:
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
-
     options = sorted({s["siteUrl"] for s in verified})
     prev = st.session_state.get("site_url_choice")
     index = options.index(prev) if prev in options else 0
     site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
     return site_url
-
 
 def pick_analysis(include_auditoria: bool):
     st.subheader("5) Elegí el tipo de análisis")
@@ -664,7 +621,6 @@ def pick_analysis(include_auditoria: bool):
     ]
     if include_auditoria:
         opciones.append("6. Auditoría de tráfico ✅")
-
     key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
     if key.startswith("4."):
         return "4"
@@ -674,7 +630,6 @@ def pick_analysis(include_auditoria: bool):
         return "6"
     return "0"
 
-
 LAG_DAYS_DEFAULT = 3
 
 def params_for_core_update():
@@ -682,7 +637,6 @@ def params_for_core_update():
     lag_days = st.number_input(
         "Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core"
     )
-
     presets = [
         "Core Update de junio 2025",
         "Core Update de marzo 2025",
@@ -692,7 +646,6 @@ def params_for_core_update():
         "Personalizado",
     ]
     core_choice = st.selectbox("Core Update", presets, index=0, key="core_choice")
-
     custom_ini = None
     custom_fin = None
     if core_choice == "Personalizado":
@@ -703,9 +656,7 @@ def params_for_core_update():
             custom_fin = st.date_input("Fecha de fin (YYYY-MM-DD)", key="core_custom_fin")
         else:
             custom_fin = None
-
     tipo = st.selectbox("Datos a analizar", ["Search", "Discover", "Ambos"], index=2, key="tipo_core")
-
     pais_choice = st.selectbox(
         "¿Filtrar por país? (ISO-3)",
         ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
@@ -714,10 +665,7 @@ def params_for_core_update():
     )
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_core") or None
-
-    # Nuevo formato que resuelve el preset en seo_analisis_ext.core_update
     return lag_days, core_choice, custom_ini, custom_fin, tipo, pais, seccion
-
 
 def params_for_evergreen():
     st.markdown("#### Parámetros (Evergreen)")
@@ -731,8 +679,6 @@ def params_for_evergreen():
     )
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
-
-    # Ventana de 16 meses completos
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
@@ -740,10 +686,8 @@ def params_for_evergreen():
     start_date = start_month_first_day.date()
     end_date = end_month_last_day.date()
     st.info(f"Ventana mensual: {start_date} → {end_date}")
-
     incluir_diario = st.checkbox("Incluir análisis diario por URL (lento)", value=False, key="daily_ev")
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
-
 
 def params_for_auditoria():
     st.markdown("#### Parámetros (Auditoría de tráfico)")
@@ -756,21 +700,16 @@ def params_for_auditoria():
     custom_days = None
     if modo == "Personalizado":
         custom_days = st.number_input("Días del período personalizado", 2, 90, 7, key="aud_custom_days")
-
     tipo = st.selectbox("Origen", ["Search", "Discover", "Search y Discover"], index=2, key="aud_tipo")
     seccion = st.text_input("Sección (path, ej: /vida/). Vacío = todo el sitio", value="", key="aud_sec") or None
-
     alcance = st.selectbox("Ámbito", ["Global", "País"], index=0, key="aud_ambito")
     country = None
     if alcance == "País":
         country = st.selectbox("País (ISO-3)", ["ARG","MEX","ESP","USA","COL","PER","CHL","URY"], index=0, key="aud_pais")
-
     periods_back = st.number_input("¿Cuántos periodos previos querés comparar?", 1, 12, 4, key="aud_prev")
     st.caption("Ej.: Semanal = 1 semana actual + N semanas previas. Mensual = 1 mes actual + N meses previos, etc.")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="aud_lag")
-
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
-
 
 # ============== App ==============
 
@@ -852,8 +791,7 @@ elif _action == "change_src":
         st.session_state.pop(k, None)
     _clear_qp(); st.rerun()
 
-
-# --- PASO 1: OAuth PERSONAL (Drive/Sheets) ---
+# --- PASO 1: OAuth PERSONAL (Drive/Sheets + GSC) ---
 creds_dest = None
 if not st.session_state["step1_done"]:
     id_email = (st.session_state.get("_google_identity") or {}).get("email")
@@ -861,7 +799,7 @@ if not st.session_state["step1_done"]:
         st.markdown(
             f'''
             <div class="success-inline">
-                Sesión iniciada como <strong>{id_email}</strong>. Usá esta misma cuenta al autorizar Drive/Sheets.
+                Sesión iniciada como <strong>{id_email}</strong>. Usá esta misma cuenta al autorizar.
             </div>
             ''',
             unsafe_allow_html=True
@@ -884,7 +822,6 @@ if not st.session_state["step1_done"]:
 drive_service = None
 gs_client = None
 _me = None
-
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     try:
         creds_dest = Credentials(**st.session_state["creds_dest"])
@@ -905,11 +842,10 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
         st.error(f"No pude inicializar Drive/Sheets con la cuenta PERSONAL: {e}")
         st.stop()
 
-# --- PASO 2: Carpeta destino (opcional) en expander ---
+# --- PASO 2: Carpeta destino (opcional) ---
 if not st.session_state["step2_done"]:
     with st.expander("2) Destino de la copia (opcional)", expanded=False):
-        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
-                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**.")
         dest_folder_id = pick_destination(drive_service, _me, show_header=False)
         c1, c2 = st.columns([1, 3])
         with c1:
@@ -934,24 +870,64 @@ else:
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 sc_service = None
 if not st.session_state["step3_done"]:
-    creds_src = pick_source_oauth()
-    if not creds_src:
-        st.stop()
-    st.session_state["creds_src"] = {
-        "token": creds_src.token,
-        "refresh_token": getattr(creds_src, "refresh_token", None),
-        "token_uri": creds_src.token_uri,
-        "client_id": creds_src.client_id,
-        "client_secret": creds_src.client_secret,
-        "scopes": creds_src.scopes,
-    }
-    src_account = (st.session_state.get("oauth_src") or {}).get("account") or "ACCESO"
-    st.session_state["src_account_label"] = src_account
-    st.session_state["step3_done"] = True
-    st.rerun()
+    st.subheader("3) Conectar Search Console (fuente de datos)")
+
+    # Nueva opción: usar la cuenta del Paso 0 o conectar otra
+    source_choice = st.radio(
+        "¿Qué cuenta querés usar para los datos de Search Console?",
+        ["Mi cuenta (Paso 0)", "Conectar otra cuenta (Acceso/Acceso Medios)"],
+        index=0,
+        key="sc_source_choice"
+    )
+
+    if source_choice.startswith("Mi cuenta"):
+        try:
+            dest_creds = Credentials(**st.session_state["creds_dest"])
+            has_sc_scope = any(("webmasters" in s) for s in (dest_creds.scopes or []))
+            if not has_sc_scope:
+                st.warning(
+                    "Tu sesión actual no tiene permiso de Search Console. "
+                    "Necesitás **ampliar permisos** (volver al Paso 0) para continuar."
+                )
+                if st.button("Ampliar permisos (volver a Paso 0)", key="btn_sc_upgrade"):
+                    # Forzar reautorización del Paso 0 (incluye SCOPES_SC)
+                    for k in ("creds_dest", "step1_done"):
+                        st.session_state.pop(k, None)
+                    # También reiniciamos el flujo OIDC si existiera
+                    st.session_state.pop("oauth_oidc", None)
+                    st.experimental_set_query_params()
+                    st.rerun()
+                st.stop()
+            # Reutilizamos estas credenciales como fuente GSC
+            st.session_state["creds_src"] = st.session_state["creds_dest"]
+            st.session_state["src_account_label"] = "Mi cuenta (Paso 0)"
+            st.session_state["step3_done"] = True
+            st.rerun()
+        except Exception as e:
+            st.error(f"No pude usar tu cuenta del Paso 0 para Search Console: {e}")
+            st.stop()
+    else:
+        # Flujo clásico de Acceso/Acceso Medios
+        creds_src = pick_source_oauth()
+        if not creds_src:
+            st.stop()
+        st.session_state["creds_src"] = {
+            "token": creds_src.token,
+            "refresh_token": getattr(creds_src, "refresh_token", None),
+            "token_uri": creds_src.token_uri,
+            "client_id": creds_src.client_id,
+            "client_secret": creds_src.client_secret,
+            "scopes": creds_src.scopes,
+        }
+        src_account = (st.session_state.get("oauth_src") or {}).get("account") or "ACCESO"
+        st.session_state["src_account_label"] = src_account
+        st.session_state["step3_done"] = True
+        st.rerun()
 else:
     try:
-        creds_src = Credentials(**st.session_state["creds_src"])
+        # Si elegiste "Mi cuenta (Paso 0)", creds_src == creds_dest (dict); si no, vienen de pick_source_oauth
+        src_creds_dict = st.session_state.get("creds_src") or st.session_state.get("creds_dest")
+        creds_src = Credentials(**src_creds_dict)
         sc_service = ensure_sc_client(creds_src)
         src_label = st.session_state.get("src_account_label") or "ACCESO"
         st.markdown(
@@ -974,13 +950,11 @@ analisis = pick_analysis(include_auditoria)
 
 # ===== Helper para mostrar errores de Google de forma legible =====
 def _show_google_error(e, where: str = ""):
-    """Muestra errores de Google en forma legible; maneja JSON y HTML (5xx) con mensajes claros."""
     status = None
     try:
         status = getattr(getattr(e, "resp", None), "status", None)
     except Exception:
         pass
-
     raw = ""
     try:
         raw = getattr(e, "response", None).text
@@ -995,7 +969,6 @@ def _show_google_error(e, where: str = ""):
             pass
     if not raw:
         raw = str(e)
-
     raw_l = raw.lower()
     looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
     is_5xx = False
@@ -1003,7 +976,6 @@ def _show_google_error(e, where: str = ""):
         is_5xx = bool(status) and int(status) >= 500
     except Exception:
         pass
-
     if looks_html or is_5xx:
         st.error(
             f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
@@ -1012,7 +984,6 @@ def _show_google_error(e, where: str = ""):
         with st.expander("Detalle técnico del error"):
             st.code(raw, language="html")
         return
-
     try:
         data = json.loads(raw)
         msg = (data.get("error") or {}).get("message") or raw
@@ -1022,7 +993,7 @@ def _show_google_error(e, where: str = ""):
         st.error(f"Google API error{f' en {where}' if where else ''}:")
         st.code(raw)
 
-# --- Ejecutar ---
+# --- Ejecutar con indicador ---
 def run_with_indicator(titulo: str, fn, *args, **kwargs):
     mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
     if hasattr(st, "status"):
@@ -1057,28 +1028,23 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-# --- Resumen con IA (prompts por tipo + fallback) ---
+# --- Resumen con IA (toggle por defecto OFF) ---
 def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
-    # Panel para decidir si correr el resumen (por defecto DESACTIVADO)
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
-        value=False,  # <- por defecto desactivado
+        value=False,
         help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable."
     )
     if not use_ai:
         return
-
-    # Mostrar fuente de prompts si logramos importar
     if _AI_IMPORT_ERR:
         st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
     elif _AI_SRC != "none":
         st.caption(f"Fuente de prompts: **{_AI_SRC}**")
-
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
         return
-
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
             return False
@@ -1093,19 +1059,15 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
             "tipo aun no es soportado",
         ]
         return any(n in low for n in needles)
-
-    # Resolver prompt (forzado > kind > fallback)
     prompt_used = None
     prompt_key = force_prompt_key or kind
     prompt_source = "fallback"
-
     try:
         if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
             prompt_used = _PROMPTS[prompt_key]
             prompt_source = f"{_AI_SRC}:{prompt_key}"
     except Exception:
         pass
-
     try:
         if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
             with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
@@ -1113,14 +1075,11 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None):
         else:
             with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
         if _looks_unsupported(md):
             with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
                 md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
         st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
-
     except Exception as e:
         st.error(
             f"Falló el resumen con prompt específico **({prompt_source})**; "
@@ -1137,8 +1096,6 @@ if analisis == "4":
         st.warning("Este despliegue no incluye run_core_update.")
     else:
         params = params_for_core_update()
-
-        # 🔎 Test de prompt (solo en modo debug)
         if st.session_state.get("DEBUG"):
             with st.expander("🔎 Test de prompt (Core Update)", expanded=True):
                 st.caption("Comprobá qué prompt se aplicará antes de ejecutar el análisis.")
@@ -1146,7 +1103,6 @@ if analisis == "4":
                     _render_prompt_probe(kind="core", force_key="core")
                 else:
                     st.caption(f"Fuente actual de prompts: {_AI_SRC}")
-
                 with st.expander("🧪 Diagnóstico Gemini", expanded=False):
                     if st.button("Probar SDK Gemini", key="probe_gemini"):
                         ok, msgs = _gemini_healthcheck()
@@ -1155,7 +1111,6 @@ if analisis == "4":
                             st.success("Gemini OK: el resumen con prompt debería funcionar.")
                         else:
                             st.error("Gemini no está listo: se caerá al fallback.")
-
         if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
             sid = run_with_indicator(
                 "Procesando Core Update",
@@ -1164,12 +1119,8 @@ if analisis == "4":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-            # Compartir (en expander)
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-            # Guardar referencia y ofrecer resumen con IA (toggle por defecto OFF)
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
             _gemini_summary(sid, kind="core", force_prompt_key="core")
@@ -1187,10 +1138,8 @@ elif analisis == "5":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
             _gemini_summary(sid, kind="evergreen")
@@ -1208,10 +1157,8 @@ elif analisis == "6":
             )
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
             _gemini_summary(sid, kind="audit")
