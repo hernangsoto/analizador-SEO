@@ -288,7 +288,123 @@ if st.session_state.get("DEBUG"):
         if st.button("🔁 Reintentar carga de prompts"):
             _load_prompts()
             st.rerun()
+# === 🔎 Panel de diagnóstico: ¿dónde filtro y dónde llamo a GSC? (solo aparece si DEBUG) ===
+def _scan_repo_for_gsc_and_filters():
+    import os, re
+    import pandas as pd
 
+    # Carpetas donde buscar
+    roots = ['modules', '.ext_pkgs', '.']
+
+    # Carpetas a ignorar
+    skip_dirs = {
+        '.git', '.venv', 'venv', '__pycache__', '.streamlit',
+        '.pythonlibs', '.mypy_cache', '.ruff_cache', '.cache'
+    }
+
+    # Patrones a detectar
+    patterns = {
+        # Llamadas a Search Console
+        r"searchanalytics\(\)\.query": "Llamada a GSC: searchanalytics().query",
+        r"\bwebmasters\.\w*?searchanalytics\(\)\.query": "Llamada a GSC (cliente webmasters)",
+        r"\bservice\.\w*?searchanalytics\(\)\.query": "Llamada a GSC (objeto service)",
+        r"dimensionFilterGroups": "Filtro en la query (dimensionFilterGroups)",
+        r"dimensionFilter": "Filtro en la query (dimensionFilter)",
+
+        # Estructuras típicas del request
+        r"\brequest\s*=\s*{": "Construcción de request body",
+        r"\bbody\s*=\s*{": "Construcción de request body",
+        r'"dimensions"\s*:\s*\[': "Definición de dimensiones en request",
+        r'"dimension"\s*:\s*"PAGE"': "Dimensión PAGE dentro de filtros",
+
+        # Filtrado post-proceso sobre DataFrames
+        r"df\[['\"]page['\"]\]": "Uso de columna page en DataFrame",
+        r"page\s*\.str\.(?:contains|startswith|endswith)\(": "Filtro string sobre page (postproceso)",
+        r"\.query\(\s*['\"].*page.*['\"]\s*\)": "Filtro con DataFrame.query sobre page",
+    }
+    compiled = [(re.compile(p), label) for p, label in patterns.items()]
+
+    results = []
+    def _skip_dir(path):
+        name = os.path.basename(path)
+        return (name in skip_dirs) or name.startswith('.')
+
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not _skip_dir(os.path.join(dirpath, d))]
+            for fn in filenames:
+                if not fn.endswith('.py'):
+                    continue
+                path = os.path.join(dirpath, fn)
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        for i, line in enumerate(f, 1):
+                            for rx, label in compiled:
+                                if rx.search(line):
+                                    results.append({
+                                        "file": path,
+                                        "line": i,
+                                        "label": label,
+                                        "pattern": rx.pattern,
+                                        "snippet": line.strip(),
+                                    })
+                except Exception:
+                    # si no se puede leer, lo omitimos
+                    pass
+
+    st.session_state["_scan_results"] = results
+    return results
+
+def _read_context(path: str, line_no: int, around: int = 8) -> str:
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        start = max(0, line_no - 1 - around)
+        end = min(len(lines), line_no - 1 + around + 1)
+        blocks = []
+        for idx in range(start, end):
+            prefix = ">>> " if (idx + 1) == line_no else "    "
+            blocks.append(f"{prefix}{idx+1:>5}: {lines[idx].rstrip()}")
+        return "\n".join(blocks)
+    except Exception as e:
+        return f"(No se pudo abrir {path}: {e})"
+
+# UI del diagnóstico (solo visible cuando DEBUG está activo)
+if st.session_state.get("DEBUG"):
+    with st.expander("🛠️ Diagnóstico de filtros de Search Console", expanded=False):
+        st.caption("Escanea el código para ubicar dónde llamas a la API de GSC y dónde aplicas filtros por URL (columna 'page').")
+        if st.button("Escanear código (GSC + filtros)", key="btn_scan_gsc_files"):
+            _scan_repo_for_gsc_and_filters()
+
+        results = st.session_state.get("_scan_results", [])
+        if results:
+            import pandas as pd
+            df = pd.DataFrame(results)[["file", "line", "label", "snippet", "pattern"]]
+            st.write(f"Coincidencias encontradas: **{len(df)}**")
+            st.dataframe(df, use_container_width=True, height=340)
+
+            # Descargar CSV
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Descargar CSV de coincidencias",
+                data=csv_bytes,
+                file_name="diagnostico_gsc_filtros.csv",
+                mime="text/csv",
+                key="dl_scan_gsc_csv"
+            )
+
+            # Ver contexto de una coincidencia
+            options = [f"{i+1}. {row.file}:{row.line} — {row.label}" for i, row in df.iterrows()]
+            sel = st.selectbox("Ver contexto de una coincidencia:", options, index=0, key="sel_scan_item")
+            if sel:
+                idx = int(sel.split(".")[0]) - 1
+                row = df.iloc[idx]
+                ctx = _read_context(row["file"], int(row["line"]), around=8)
+                st.code(ctx, language="python")
+        else:
+            st.info("Aún no hay resultados. Pulsa **Escanear código (GSC + filtros)** para empezar.")
 # ------------------------------------------------------------
 # Helpers de query params
 # ------------------------------------------------------------
