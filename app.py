@@ -1129,20 +1129,35 @@ def _extract_medio_name(site_url: str | None) -> str | None:
         return s.split(":", 1)[1].strip() or None
     return None
 
+import re
+
 def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
-    """Si site_url es sc-domain:*, antepone '<medio> - ' al nombre del archivo en Drive."""
+    """Si site_url es sc-domain:*, antepone '<medio> - ' al nombre del archivo en Drive,
+    evitando duplicar guiones y respetando si ya está prefijado.
+    """
     medio = _extract_medio_name(site_url)
     if not medio:
         return
+    medio = medio.strip().strip("-–—").strip()
+
     try:
         meta = drive_service.files().get(fileId=file_id, fields="name").execute()
-        current = meta.get("name") or ""
-        if medio in current:
-            return  # ya está incluido
-        new_name = f"{medio} - {current}".strip()
+        current = (meta.get("name") or "").strip()
+
+        # 1) ¿Ya está prefijado con "<medio> - " (cualquier variante de guion)?
+        if re.match(rf"^{re.escape(medio)}\s*[-–—]\s+", current, flags=re.IGNORECASE):
+            return
+
+        # 2) Quitar guiones/espacios iniciales para evitar "medio - - nombre"
+        current_no_lead = re.sub(r"^\s*[-–—]+\s*", "", current)
+
+        # 3) Prefijar
+        new_name = f"{medio} - {current_no_lead}".strip()
+
+        # 4) Actualizar en Drive
         drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
     except Exception:
-        # Silencioso: no bloquear el flujo por un rename fallido
+        # No bloquear el flujo si falla el rename
         pass
 
 # --- Resumen con IA (prompts por tipo + fallback) ---
