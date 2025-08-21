@@ -28,16 +28,19 @@ st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 # ====== UI / Branding ======
 from modules.ui import (
     apply_page_style,
-    render_brand_header_once,
-    enable_brand_auto_align,
+    # render_brand_header_once,   # ← retirado para evitar duplicado
+    # enable_brand_auto_align,    # ← retirado para evitar duplicado
     get_user,
     sidebar_user_info,
-    login_screen,  # ya no se usa como gate principal, pero lo dejamos disponible
+    login_screen,
 )
 
 HEADER_COLOR = "#5c417c"
 HEADER_HEIGHT = 64
 LOGO_URL = "https://nomadic.agency/wp-content/uploads/2021/03/logo-blanco.png"
+
+# URL base del app (para enlaces internos que deben ir SIEMPRE a la home)
+APP_HOME = st.secrets.get("app_home_url", "https://hernangsoto.streamlit.app")
 
 # Estilo general + header nativo
 apply_page_style(
@@ -48,20 +51,7 @@ apply_page_style(
     band_height_px=110,
 )
 
-# Logo anclado (siempre visible)
-render_brand_header_once(
-    LOGO_URL,
-    height_px=27,
-    pinned=True,
-    nudge_px=-42,
-    x_align="left",
-    x_offset_px=40,
-    z_index=3000,
-    container_max_px=1200,
-)
-enable_brand_auto_align()
-
-# Refuerzo: mantener SIEMPRE visible el logo (evita que desaparezca tras OAuth)
+# Logo fijo (siempre visible)
 def _render_nomadic_logo_always():
     st.markdown(
         f"""
@@ -91,7 +81,7 @@ st.markdown("""
 .success-inline a { color:#0b8043; text-decoration:underline; font-weight:600; }
 .success-inline strong { margin-left:.25rem; }
 
-/* Asegurar que header no tape el logo */
+/* Mantener header por encima del contenido */
 header[data-testid="stHeader"] { z-index:1500 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -362,7 +352,7 @@ def step0_google_identity():
             flow.redirect_uri = redirect_uri
             auth_url, state = flow.authorization_url(
                 prompt="consent select_account",
-                access_type="offline",                # refresh_token
+                access_type="offline",
                 include_granted_scopes="true",
             )
             auth_url = _append_hd(auth_url)
@@ -594,9 +584,9 @@ def logout_screen():
             except Exception:
                 pass
 
-            # Redirigir manualmente a la home de la app
+            # Redirigir a la home de la app (no al callback de OAuth)
             st.markdown(
-                "<meta http-equiv='refresh' content='0; url=https://hernangsoto.streamlit.app'>",
+                f"<meta http-equiv='refresh' content='0; url={APP_HOME}'>",
                 unsafe_allow_html=True
             )
             st.stop()
@@ -782,7 +772,7 @@ if not user:
         login_screen()
         st.stop()
 
-# Sidebar → Mantenimiento (sin botón duplicado de logout)
+# Sidebar → Mantenimiento
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -863,7 +853,7 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
             f'''
             <div class="success-inline">
                 Los archivos se guardarán en el Drive de: <strong>{email_txt}</strong>
-                <a href="?action=change_personal">(Cambiar mail personal)</a>
+                <a href="{APP_HOME}?action=change_personal" target="_self" rel="nofollow">(Cambiar mail personal)</a>
             </div>
             ''',
             unsafe_allow_html=True
@@ -892,7 +882,7 @@ else:
         f'''
         <div class="success-inline">
             Destino de la copia: <strong>{pretty}</strong>
-            <a href="?action=change_folder">(Cambiar carpeta)</a>
+            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
         </div>
         ''',
         unsafe_allow_html=True
@@ -935,7 +925,7 @@ if sc_choice == "Cuenta principal (Paso 0)":
                 # Forzamos re-autorización del Paso 0 con scopes actualizados
                 for k in ("oauth_oidc", "_google_identity", "creds_dest", "step1_done"):
                     st.session_state.pop(k, None)
-                st.experimental_set_query_params()  # limpiar
+                st.experimental_set_query_params()
                 st.rerun()
         with c2:
             st.caption("Se reabrirá el Paso 0 pidiendo también el permiso de Search Console.")
@@ -949,10 +939,10 @@ if sc_choice == "Cuenta principal (Paso 0)":
         st.session_state["src_account_label"] = "Cuenta principal (Paso 0)"
         st.session_state["step3_done"] = True
         st.markdown(
-            '''
+            f'''
             <div class="success-inline">
                 Cuenta de acceso (Search Console): <strong>Cuenta principal (Paso 0)</strong>
-                <a href="?action=change_src">(Cambiar cuenta de acceso)</a>
+                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
             </div>
             ''',
             unsafe_allow_html=True
@@ -975,7 +965,7 @@ else:
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        creds_src_obj = pick_source_oauth()  # muestra UI de login SOLO aquí
+        creds_src_obj = pick_source_oauth()  # UI de login SOLO aquí
         if not creds_src_obj:
             st.stop()
 
@@ -1012,7 +1002,7 @@ else:
                 f'''
                 <div class="success-inline">
                     Cuenta de acceso (Search Console): <strong>{src_label}</strong>
-                    <a href="?action=change_src">(Cambiar cuenta de acceso)</a>
+                    <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
                 </div>
                 ''',
                 unsafe_allow_html=True
