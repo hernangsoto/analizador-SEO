@@ -1803,5 +1803,5 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets o ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
     )
