@@ -566,14 +566,13 @@ def step0_google_identity():
                 except Exception:
                     pass
 
-        # 3) Avisar si el state no coincide, pero continuar con el flujo rehidratado
+        # 3) Aviso si el state no coincide, pero continuar con el flujo rehidratado
         if expected_state and state_in and state_in != expected_state:
             st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando el flujo rehidratado con el state recibido…")
 
-        from urllib.parse import urlencode
-        current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
         try:
-            flow.fetch_token(authorization_response=current_url)
+            # 🔧 CLAVE DEL PARCHE: usar el code directamente para evitar el chequeo estricto de state
+            flow.fetch_token(code=code)
             creds = flow.credentials
             info = _fetch_userinfo_json_with_retry(creds.token)
             return _finalize_identity(creds, info)
@@ -614,11 +613,17 @@ def step0_google_identity():
                 try:
                     from urllib.parse import urlparse, parse_qs
                     state_in_manual = None
+                    code_in_manual = None
                     try:
                         q = parse_qs(urlparse(raw).query)
                         state_in_manual = q.get("state", [None])[0]
+                        code_in_manual = q.get("code", [None])[0]
                     except Exception:
                         pass
+
+                    if not code_in_manual:
+                        st.error("La URL no contiene el parámetro ?code=…")
+                        st.stop()
 
                     flow_state = oo.get("flow_state")
                     store = _oauth_flow_store()
@@ -638,8 +643,8 @@ def step0_google_identity():
                         except Exception:
                             pass
 
-                    # 3) Intercambiar código por tokens usando la URL pegada
-                    flow.fetch_token(authorization_response=raw)
+                    # 🔧 CLAVE DEL PARCHE: usar el code directamente (evita el chequeo de state)
+                    flow.fetch_token(code=code_in_manual)
                     creds = flow.credentials
                     info = _fetch_userinfo_json_with_retry(creds.token)
                     return _finalize_identity(creds, info)
@@ -740,7 +745,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
-               "2. Análisis de tráfico general (🚧 próximamente)",
+        "2. Análisis de tráfico general (🚧 próximamente)",
         "3. Análisis de secciones (🚧 próximamente)",
         "4. Análisis de impacto de Core Update ✅",
         "5. Análisis de tráfico evergreen ✅",
