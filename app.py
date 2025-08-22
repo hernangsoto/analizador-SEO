@@ -1542,7 +1542,7 @@ def _extract_medio_name(site_url: str | None) -> str | None:
     if not site_url:
         return None
     s = site_url.strip()
-    if s.lower().startsWith("sc-domain:"):
+    if s.lower().startswith("sc-domain:"):
         # toma lo que sigue a los ":"
         return s.split(":", 1)[1].strip() or None
     return None
