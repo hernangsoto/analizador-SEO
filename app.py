@@ -131,7 +131,6 @@ _ext = ensure_external_package()
 run_core_update = getattr(_ext, "run_core_update", None) if _ext else None
 run_evergreen = getattr(_ext, "run_evergreen", None) if _ext else None
 run_traffic_audit = getattr(_ext, "run_traffic_audit", None) if _ext else None
-run_names_kgraph = getattr(_ext, "run_names_kgraph", None) if _ext else None  # NUEVO
 
 if run_core_update is None or run_evergreen is None:
     try:
@@ -147,19 +146,6 @@ if run_traffic_audit is None:
         run_traffic_audit = _rta
     except Exception:
         pass
-
-# Intento de import alternativo para el análisis de nombres
-if run_names_kgraph is None:
-    try:
-        # Si el repo privado expone el módulo
-        from seo_analisis_ext.analysis_names import run_names_kgraph as _rnk  # type: ignore
-        run_names_kgraph = _rnk
-    except Exception:
-        try:
-            from modules.analysis_names import run_names_kgraph as _rnk_local  # type: ignore
-            run_names_kgraph = _rnk_local
-        except Exception:
-            run_names_kgraph = None
 
 USING_EXT = bool(_ext)
 
@@ -694,7 +680,7 @@ def pick_site(sc_service):
     site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
     return site_url
 
-def pick_analysis(include_auditoria: bool, include_names: bool):
+def pick_analysis(include_auditoria: bool):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
@@ -705,14 +691,10 @@ def pick_analysis(include_auditoria: bool, include_names: bool):
     ]
     if include_auditoria:
         opciones.append("6. Auditoría de tráfico ✅")
-    if include_names:
-        opciones.append("7. Análisis de Nombres (Knowledge Panel) ✅")
-
     key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
-    if key.startswith("7."): return "7"
     return "0"
 
 LAG_DAYS_DEFAULT = 3
@@ -824,48 +806,6 @@ def params_for_auditoria():
     st.caption("Ej.: Semanal = 1 semana actual + N semanas previas. Mensual = 1 mes actual + N meses previos, etc.")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="aud_lag")
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
-
-# ===== NUEVO: Parámetros (Nombres & Knowledge Panel) =====
-def params_for_names_kp():
-    st.markdown("#### Parámetros (Nombres & Knowledge Panel)")
-    file = st.file_uploader("Subí un CSV con la lista de nombres", type=["csv"], key="names_csv")
-    colname = st.text_input("Nombre de la columna a usar", value="", key="names_col")
-    st.caption("Si el CSV tiene una sola columna, podés dejar vacío y usaré esa.")
-
-    st.markdown("##### Opciones de matching")
-    lang = st.selectbox("Idioma principal", ["es", "en", "pt", "fr", "de", "it"], index=0)
-    min_score = st.number_input("Umbral de KG resultScore", 0.0, 2000.0, 200.0, step=5.0)
-    wiki_similarity = st.slider("Similitud mínima con Wikipedia (0–1)", 0.5, 1.0, 0.82, 0.01)
-    qps = st.slider("Consultas por segundo (aprox.)", 0.5, 10.0, 3.0, 0.5)
-    smoke = st.number_input("Prueba rápida con N filas (0 = desactivado)", 0, 500, 0)
-
-    names = []
-    if file is not None:
-        try:
-            df_try = pd.read_csv(file, sep=None, engine="python")
-            cols = list(df_try.columns)
-            if len(cols) == 1 and not colname:
-                series = df_try.iloc[:, 0]
-            else:
-                if colname and colname in df_try.columns:
-                    series = df_try[colname]
-                else:
-                    st.info("Elegí la columna a usar (o escribe su nombre arriba).")
-                    colname_pick = st.selectbox("Columnas detectadas", cols, index=0, key="names_pick_col")
-                    series = df_try[colname_pick]
-            names = [str(x).strip() for x in series.tolist() if str(x).strip()]
-            st.success(f"Se detectaron {len(names)} nombres.")
-        except Exception as e:
-            st.error(f"No pude leer el CSV: {e}")
-
-    return {
-        "names": names,
-        "lang": lang,
-        "min_score": float(min_score),
-        "wiki_similarity": float(wiki_similarity),
-        "qps": float(qps),
-        "smoke": int(smoke) if smoke else None,
-    }
 
 # ============== App ==============
 
@@ -1140,79 +1080,6 @@ else:
         unsafe_allow_html=True
     )
 
-# --- NUEVO: Seleccionar análisis ANTES de GSC ---
-include_auditoria = run_traffic_audit is not None
-include_names = run_names_kgraph is not None
-analisis = pick_analysis(include_auditoria, include_names)
-
-# Si eligen Nombres & KP, saltamos GSC y vamos directo
-if analisis == "7":
-    p = params_for_names_kp()
-    can_run = bool(p["names"])
-    c1, c2 = st.columns([1,1])
-    with c1:
-        if st.button("🔎 Probar con N filas (smoke test)", disabled=not can_run):
-            sid = run_with_indicator(
-                "Procesando Nombres (smoke test)",
-                run_names_kgraph,
-                drive_service, gs_client,
-                names=p["names"],
-                lang=p["lang"],
-                min_score=p["min_score"],
-                wiki_similarity=p["wiki_similarity"],
-                qps=p["qps"],
-                smoke_test=p["smoke"] or 10,
-                dest_folder_id=st.session_state.get("dest_folder_id"),
-            )
-            st.success("¡Listo! Tu documento de prueba está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-    with c2:
-        if st.button("🚀 Ejecutar análisis completo", type="primary", disabled=not can_run):
-            sid = run_with_indicator(
-                "Procesando Nombres (completo)",
-                run_names_kgraph,
-                drive_service, gs_client,
-                names=p["names"],
-                lang=p["lang"],
-                min_score=p["min_score"],
-                wiki_similarity=p["wiki_similarity"],
-                qps=p["qps"],
-                smoke_test=None,
-                dest_folder_id=st.session_state.get("dest_folder_id"),
-            )
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-            # 📝 Log: análisis Nombres & KP
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", "")
-                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            _activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis",
-                site_url="",  # no aplica
-                analysis_kind="Nombres & Knowledge Panel",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account="",  # no GSC en este flujo
-                notes=f"lang={p['lang']}, min_score={p['min_score']}, wiki_sim={p['wiki_similarity']}, qps={p['qps']}"
-            )
-
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "names"
-            _gemini_summary(sid, kind="names", widget_suffix="after_run")
-
-    # No mostrar pasos de GSC ni resto
-    st.stop()
-
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 def _has_gsc_scope(scopes: list[str] | None) -> bool:
     if not scopes:
@@ -1334,6 +1201,8 @@ else:
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
+include_auditoria = run_traffic_audit is not None
+analisis = pick_analysis(include_auditoria)
 
 # ===== Helper para mostrar errores de Google =====
 def _show_google_error(e, where: str = ""):
