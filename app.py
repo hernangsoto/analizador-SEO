@@ -363,7 +363,7 @@ def _scan_repo_for_gsc_and_filters():
                             for rx, label in compiled:
                                 if rx.search(line):
                                     results.append({
-                                        "file": path, "line": i, "label": label, "snippet": line.strip(), "pattern": rx.pattern,
+                                        "file": path, "line": i, "label": label, "pattern": rx.pattern, "snippet": line.strip(),
                                     })
                 except Exception:
                     pass
@@ -842,226 +842,131 @@ def _load_names_from_csv(uploaded_file) -> pd.DataFrame | None:
 
 def params_for_names():
     st.markdown("#### Parámetros (Nombres – KG + Wikipedia)")
-    st.caption("Subí un CSV con una columna de nombres **o** pegá nombres (uno por línea).")
+    st.caption("Subí un CSV (una columna de nombres) **o** pegá nombres (uno por línea). Opcional: una columna de ubicación por fila.")
 
     up = st.file_uploader("CSV de nombres (UTF-8). Si tiene varias columnas, elegí la que corresponde:", type=["csv"], key="names_csv")
     df = _load_names_from_csv(up)
-    names_from_csv = []
+
+    items_from_csv = []
+    names_from_text = []
+
     csv_col = None
+    loc_col = None
+
     if df is not None:
-        # Elegir columna candidata (nombre / name / primera)
         cols = list(df.columns)
+        # Columna de nombres candidata
         default_idx = 0
         for i, c in enumerate(cols):
             cl = str(c).strip().lower()
-            if cl in ("nombre", "nombres", "name", "names"):
+            if cl in ("nombre", "nombres", "name", "names", "persona", "entidad"):
                 default_idx = i; break
         csv_col = st.selectbox("Columna con los nombres:", cols, index=default_idx, key="names_csv_col")
+
+        # Columna opcional de ubicación
+        loc_opt = ["(ninguna)"] + cols
+        loc_pick = st.selectbox("Columna de ubicación (opcional):", loc_opt, index=0, key="names_loc_col")
+        loc_col = None if loc_pick == "(ninguna)" else loc_pick
+
         if csv_col:
             try:
-                names_from_csv = [str(x).strip() for x in df[csv_col].tolist() if str(x).strip()]
+                for i, row in df.iterrows():
+                    name_val = str(row[csv_col]).strip()
+                    if not name_val:
+                        continue
+                    loc_val = ""
+                    if loc_col:
+                        try:
+                            loc_val = str(row[loc_col]).strip()
+                        except Exception:
+                            loc_val = ""
+                    items_from_csv.append({"name": name_val, "row_location": loc_val})
             except Exception:
-                names_from_csv = []
+                items_from_csv = []
+
         with st.expander("Vista previa del CSV (primeras 50 filas)"):
             st.dataframe(df.head(50), use_container_width=True)
 
     names_text = st.text_area("O pegá nombres (uno por línea):", value="", height=160, key="names_textarea")
-    names_from_text = [ln.strip() for ln in names_text.splitlines() if ln.strip()]
+    names_from_text = [{"name": ln.strip(), "row_location": ""} for ln in names_text.splitlines() if ln.strip()]
 
-    # Unión (prioridad CSV + pegados)
+    # Unión + dedup por (name,row_location)
+    dedup = st.checkbox("Eliminar duplicados exactos (nombre + ubicación por fila)", value=True, key="names_dedup")
     seen = set()
-    merged = []
-    for src in (names_from_csv, names_from_text):
-        for n in src:
-            if n not in seen:
-                seen.add(n)
-                merged.append(n)
+    merged_items = []
+    for src in (items_from_csv, names_from_text):
+        for it in src:
+            key = (it["name"], it.get("row_location",""))
+            if (not dedup) or key not in seen:
+                if dedup:
+                    seen.add(key)
+                merged_items.append(it)
 
-    st.caption(f"Total de nombres detectados: **{len(merged)}**")
+    st.caption(f"Total de filas a analizar: **{len(merged_items)}**")
 
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
         lang = st.selectbox("Idioma (para KG/Wiki)", ["es","en","pt","fr","it","de"], index=0, key="names_lang")
     with c2:
-        strategy = st.selectbox("Estrategia", ["Balance (KG + Wikipedia)"], index=0, key="names_strategy")
+        # Modo de coincidencia por si querés afinar (queda oculto en UI si no se usa)
+        match_mode = st.selectbox("Modo de coincidencia", ["Flexible (recomendado)", "Estricto"], index=0, key="names_match_mode")
     with c3:
-        dedup = st.checkbox("Eliminar duplicados", value=True, key="names_dedup")
+        strategy = st.selectbox("Estrategia", ["Balance (KG + Wikipedia)"], index=0, key="names_strategy")
 
-    if dedup:
-        # ya deduplicamos arriba manteniendo orden
-        pass
+    # NUEVO: Tipo de entidad (global) + Inferir automáticamente
+    entity_type_label = st.selectbox(
+        "Tipo de entidad (global)",
+        ["Inferir automáticamente", "Persona", "Organización", "Lugar", "Evento", "Obra creativa", "Producto", "Otro"],
+        index=0, key="names_entity_type"
+    )
+
+    # NUEVO: Términos complementarios globales
+    global_terms = st.text_input(
+        "Términos complementarios (globales, opcional)",
+        value="", placeholder="ej.: periodista argentino, club de fútbol, banda de rock",
+        key="names_global_terms"
+    )
+
+    # Sesgo de ubicación (global)
+    location_bias = st.text_input(
+        "Sesgo de ubicación (global, opcional)",
+        value="", placeholder="ej.: Argentina, Madrid (España), Ciudad de México",
+        key="names_location_bias"
+    )
 
     # API key de KG (puede venir de secrets o env)
     kg_key = (
         st.secrets.get("kg_api_key")
+        or st.secrets.get("google", {}).get("kg_api_key")
         or (st.secrets.get("kg", {}).get("api_key") if "kg" in st.secrets else None)
         or os.getenv("KG_API_KEY")
     )
     if not kg_key:
-        st.info("ℹ️ Podés configurar `kg_api_key` en *Secrets* o `KG_API_KEY` como variable de entorno. Sin eso, el análisis usará solo Wikipedia.")
+        st.info("ℹ️ Podés configurar `kg_api_key` en *Secrets* (ideal en `[google]`) o `KG_API_KEY` como variable de entorno. Sin eso, el análisis usará solo Wikipedia.")
+
+    # Normalizar params
+    match_mode_val = "strict" if match_mode.startswith("Estricto") else "flex"
+    entity_type_map = {
+        "Inferir automáticamente": "infer",
+        "Persona": "person",
+        "Organización": "organization",
+        "Lugar": "place",
+        "Evento": "event",
+        "Obra creativa": "creativeWork",
+        "Producto": "product",
+        "Otro": "other",
+    }
 
     return {
-        "names": merged,
+        "items": merged_items,              # [{name, row_location}]
         "lang": lang,
         "strategy": "balance",
         "kg_api_key": kg_key or "",
+        "location_bias": location_bias or "",
+        "entity_type": entity_type_map.get(entity_type_label, "infer"),
+        "match_mode": match_mode_val,
+        "global_terms": global_terms or "",
     }
-
-# ===== Helper para mostrar errores de Google (MOVIDO ARRIBA) =====
-def _show_google_error(e, where: str = ""):
-    status = None
-    try:
-        status = getattr(getattr(e, "resp", None), "status", None)
-    except Exception:
-        pass
-
-    raw = ""
-    try:
-        raw = getattr(e, "response", None).text
-    except Exception:
-        pass
-    if not raw:
-        try:
-            raw_bytes = getattr(e, "content", None)
-            if raw_bytes:
-                raw = raw_bytes.decode("utf-8", "ignore")
-        except Exception:
-            pass
-    if not raw:
-        raw = str(e)
-
-    raw_l = raw.lower()
-    looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
-    is_5xx = False
-    try:
-        is_5xx = bool(status) and int(status) >= 500
-    except Exception:
-        pass
-
-    if looks_html or is_5xx:
-        st.error(
-            f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
-            "Suele resolverse reintentando en breve. Si persiste, probá más tarde."
-        )
-        with st.expander("Detalle técnico del error"):
-            st.code(raw, language="html")
-        return
-
-    try:
-        data = json.loads(raw)
-        msg = (data.get("error") or {}).get("message") or raw
-        st.error(f"Google API error{f' en {where}' if where else ''}: {msg}")
-        st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
-    except Exception:
-        st.error(f"Google API error{f' en {where}' if where else ''}:")
-        st.code(raw)
-
-# --- Ejecutar con indicador (MOVIDO ARRIBA) ---
-def run_with_indicator(titulo: str, fn, *args, **kwargs):
-    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
-    if hasattr(st, "status"):
-        with st.status(mensaje, expanded=True) as status:
-            try:
-                res = fn(*args, **kwargs)
-                status.update(label="✅ Informe generado", state="complete")
-                return res
-            except GspreadAPIError as e:
-                status.update(label="❌ Error de Google Sheets", state="error")
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except HttpError as e:
-                status.update(label="❌ Error de Google API", state="error")
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except Exception as e:
-                status.update(label="❌ Error inesperado", state="error")
-                st.exception(e)
-                st.stop()
-    else:
-        with st.spinner(mensaje):
-            try:
-                return fn(*args, **kwargs)
-            except GspreadAPIError as e:
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except HttpError as e:
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except Exception as e:
-                st.exception(e)
-                st.stop()
-
-# --- Resumen con IA (prompts por tipo + fallback) (MOVIDO ARRIBA) ---
-def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    st.divider()
-    use_ai = st.toggle(
-        "Generar resumen con IA (Nomadic Bot 🤖)",
-        value=False,
-        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
-        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
-    )
-    if not use_ai:
-        return
-
-    if _AI_IMPORT_ERR:
-        st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
-    elif _AI_SRC != "none":
-        st.caption(f"Fuente de prompts: **{_AI_SRC}**")
-
-    if not is_gemini_configured():
-        st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
-        return
-
-    def _looks_unsupported(md: str) -> bool:
-        if not isinstance(md, str):
-            return False
-        low = md.lower()
-        needles = [
-            "por ahora solo está implementado el resumen para auditoría de tráfico",
-            "solo está implementado el resumen para auditoría",
-            "only the traffic audit summary is implemented",
-            "only audit summary is implemented",
-            "aún no implementado",
-            "not yet implemented",
-            "tipo aun no es soportado",
-        ]
-        return any(n in low for n in needles)
-
-    prompt_used = None
-    prompt_key = force_prompt_key or kind
-    prompt_source = "fallback"
-
-    try:
-        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
-            prompt_used = _PROMPTS[prompt_key]
-            prompt_source = f"{_AI_SRC}:{prompt_key}"
-    except Exception:
-        pass
-
-    try:
-        if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
-            with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
-                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
-        else:
-            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
-        if _looks_unsupported(md):
-            with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
-        st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
-        render_summary_box(md)
-
-    except Exception as e:
-        st.error(
-            f"Falló el resumen con prompt específico **({prompt_source})**; "
-            f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
-        )
-        with st.spinner("🤖 Usando fallback…"):
-            md = summarize_sheet_auto(gs_client, sid, kind=kind)
-        st.caption("🧠 Prompt en uso: **fallback:auto**")
-        render_summary_box(md)
 
 # ============== App ==============
 
@@ -1341,7 +1246,7 @@ if analisis == "7":
         st.warning("Este despliegue no incluye `run_names_analysis` (analysis_names.py). Subilo al repo privado o a modules/ y recargá.")
     else:
         params_names = params_for_names()
-        total = len(params_names.get("names") or [])
+        total = len(params_names.get("items") or [])
         if total == 0:
             st.info("Cargá un CSV o pegá al menos un nombre para habilitar la ejecución.")
         else:
@@ -1530,6 +1435,162 @@ else:
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
+
+# ===== Helper para mostrar errores de Google =====
+def _show_google_error(e, where: str = ""):
+    status = None
+    try:
+        status = getattr(getattr(e, "resp", None), "status", None)
+    except Exception:
+        pass
+
+    raw = ""
+    try:
+        raw = getattr(e, "response", None).text
+    except Exception:
+        pass
+    if not raw:
+        try:
+            raw_bytes = getattr(e, "content", None)
+            if raw_bytes:
+                raw = raw_bytes.decode("utf-8", "ignore")
+        except Exception:
+            pass
+    if not raw:
+        raw = str(e)
+
+    raw_l = raw.lower()
+    looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
+    is_5xx = False
+    try:
+        is_5xx = bool(status) and int(status) >= 500
+    except Exception:
+        pass
+
+    if looks_html or is_5xx:
+        st.error(
+            f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
+            "Suele resolverse reintentando en breve. Si persiste, probá más tarde."
+        )
+        with st.expander("Detalle técnico del error"):
+            st.code(raw, language="html")
+        return
+
+    try:
+        data = json.loads(raw)
+        msg = (data.get("error") or {}).get("message") or raw
+        st.error(f"Google API error{f' en {where}' if where else ''}: {msg}")
+        st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
+    except Exception:
+        st.error(f"Google API error{f' en {where}' if where else ''}:")
+        st.code(raw)
+
+# --- Ejecutar ---
+def run_with_indicator(titulo: str, fn, *args, **kwargs):
+    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
+    if hasattr(st, "status"):
+        with st.status(mensaje, expanded=True) as status:
+            try:
+                res = fn(*args, **kwargs)
+                status.update(label="✅ Informe generado", state="complete")
+                return res
+            except GspreadAPIError as e:
+                status.update(label="❌ Error de Google Sheets", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                status.update(label="❌ Error de Google API", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                status.update(label="❌ Error inesperado", state="error")
+                st.exception(e)
+                st.stop()
+    else:
+        with st.spinner(mensaje):
+            try:
+                return fn(*args, **kwargs)
+            except GspreadAPIError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                st.exception(e)
+                st.stop()
+
+# --- Resumen con IA (prompts por tipo + fallback) ---
+def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
+    st.divider()
+    use_ai = st.toggle(
+        "Generar resumen con IA (Nomadic Bot 🤖)",
+        value=False,
+        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
+        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
+    )
+    if not use_ai:
+        return
+
+    if _AI_IMPORT_ERR:
+        st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
+    elif _AI_SRC != "none":
+        st.caption(f"Fuente de prompts: **{_AI_SRC}**")
+
+    if not is_gemini_configured():
+        st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
+        return
+
+    def _looks_unsupported(md: str) -> bool:
+        if not isinstance(md, str):
+            return False
+        low = md.lower()
+        needles = [
+            "por ahora solo está implementado el resumen para auditoría de tráfico",
+            "solo está implementado el resumen para auditoría",
+            "only the traffic audit summary is implemented",
+            "only audit summary is implemented",
+            "aún no implementado",
+            "not yet implemented",
+            "tipo aun no es soportado",
+        ]
+        return any(n in low for n in needles)
+
+    prompt_used = None
+    prompt_key = force_prompt_key or kind
+    prompt_source = "fallback"
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
+            prompt_used = _PROMPTS[prompt_key]
+            prompt_source = f"{_AI_SRC}:{prompt_key}"
+    except Exception:
+        pass
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
+            with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
+                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
+        else:
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+
+        if _looks_unsupported(md):
+            with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+
+        st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
+        render_summary_box(md)
+
+    except Exception as e:
+        st.error(
+            f"Falló el resumen con prompt específico **({prompt_source})**; "
+            f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
+        )
+        with st.spinner("🤖 Usando fallback…"):
+            md = summarize_sheet_auto(gs_client, sid, kind=kind)
+        st.caption("🧠 Prompt en uso: **fallback:auto**")
+        render_summary_box(md)
 
 # ============== Flujos por análisis que requieren GSC ==============
 if analisis == "4":
