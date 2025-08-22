@@ -6,7 +6,7 @@ import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from types import SimpleNamespace
 import time
 import requests
@@ -314,6 +314,7 @@ if st.session_state.get("DEBUG"):
         if st.button("🔁 Reintentar carga de prompts"):
             _load_prompts()
             st.rerun()
+
 # === 🔎 Panel de diagnóstico: ¿dónde filtro y dónde llamo a GSC? (solo aparece si DEBUG) ===
 def _scan_repo_for_gsc_and_filters():
     import os, re
@@ -431,6 +432,7 @@ if st.session_state.get("DEBUG"):
                 st.code(ctx, language="python")
         else:
             st.info("Aún no hay resultados. Pulsa **Escanear código (GSC + filtros)** para empezar.")
+
 # ------------------------------------------------------------
 # Helpers de query params
 # ------------------------------------------------------------
@@ -453,6 +455,178 @@ def _clear_qp():
 def _oauth_flow_store():
     # state -> {"flow": Flow, "created": ts, "mode": "web"/"installed"}
     return {}
+
+# ------------------------------------------------------------
+# ⚙️ Activity Log (Drive/Sheets)
+# ------------------------------------------------------------
+APP_VERSION = "2025.08.21"
+_AL_CONF = st.secrets.get("activity_log", {}) if isinstance(st.secrets.get("activity_log", {}), dict) else {}
+AL_ENABLED = bool(_AL_CONF.get("enabled", True))
+AL_TITLE_DEFAULT = _AL_CONF.get("title", "Nomadic SEO App — Activity Log")
+AL_FOLDER_ID = _AL_CONF.get("folder_id")  # opcional
+AL_SHEET_ID = _AL_CONF.get("sheet_id")    # opcional
+
+def _utc_now_iso() -> str:
+    try:
+        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    except Exception:
+        return pd.Timestamp.utcnow().isoformat()
+
+def _al_get_or_create(drive_service, gs_client, suggested_folder_id: str | None = None):
+    """Devuelve (spreadsheet, sid) del Activity Log. Crea si no existe.
+       Prioriza sheet_id de secrets; si no, busca por título; si no, crea."""
+    if not AL_ENABLED or not drive_service or not gs_client:
+        return None, None
+    # 1) Si viene sheet_id fijo
+    sid = AL_SHEET_ID or st.session_state.get("_activity_log_sid")
+    if sid:
+        try:
+            sh = gs_client.open_by_key(sid)
+            st.session_state["_activity_log_sid"] = sid
+            return sh, sid
+        except Exception:
+            # id inválido: seguimos
+            pass
+
+    # 2) Buscar por nombre
+    title = AL_TITLE_DEFAULT
+    try:
+        q = f"mimeType='application/vnd.google-apps.spreadsheet' and name='{title}' and trashed=false"
+        # Buscar en todo el Drive (incl. unidades compartidas)
+        resp = drive_service.files().list(
+            q=q,
+            spaces="drive",
+            fields="files(id,name,parents)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageSize=5,
+        ).execute()
+        files = resp.get("files", []) or []
+        if files:
+            sid = files[0]["id"]
+            sh = gs_client.open_by_key(sid)
+            st.session_state["_activity_log_sid"] = sid
+            return sh, sid
+    except Exception:
+        pass
+
+    # 3) Crear
+    try:
+        meta = {
+            "name": title,
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+        }
+        parent_id = AL_FOLDER_ID or suggested_folder_id
+        if parent_id:
+            meta["parents"] = [parent_id]
+        newf = drive_service.files().create(
+            body=meta, fields="id", supportsAllDrives=True
+        ).execute()
+        sid = newf["id"]
+        sh = gs_client.open_by_key(sid)
+        # Inicializar hoja + encabezados
+        try:
+            try:
+                ws = sh.worksheet("Log")
+            except Exception:
+                ws = sh.sheet1
+                ws.update_title("Log")
+            headers = [
+                "timestamp_utc", "event", "user_email", "user_name",
+                "site_url", "analysis", "result_sheet_id",
+                "account_label", "dest_folder_id",
+                "extra_json", "app_version"
+            ]
+            # Escribimos encabezados solo si A1 está vacío
+            try:
+                a1 = ws.acell("A1").value
+            except Exception:
+                a1 = None
+            if not a1:
+                ws.update("A1", [headers])
+        except Exception:
+            pass
+        st.session_state["_activity_log_sid"] = sid
+        return sh, sid
+    except Exception:
+        return None, None
+
+def _al_append(drive_service, gs_client, row: dict, suggested_folder_id: str | None = None):
+    """Append seguro; nunca rompe el flujo si falla."""
+    if not AL_ENABLED:
+        return
+    try:
+        sh, sid = _al_get_or_create(drive_service, gs_client, suggested_folder_id)
+        if not sh:
+            return
+        try:
+            ws = sh.worksheet("Log")
+        except Exception:
+            ws = sh.sheet1
+        # Orden de columnas esperado
+        cols = [
+            "timestamp_utc", "event", "user_email", "user_name",
+            "site_url", "analysis", "result_sheet_id",
+            "account_label", "dest_folder_id",
+            "extra_json", "app_version"
+        ]
+        out = {c: "" for c in cols}
+        out.update(row or {})
+        values = [[out[c] for c in cols]]
+        ws.append_rows(values, value_input_option="USER_ENTERED")
+    except Exception:
+        # Silencioso: no bloqueamos la app si el log falla
+        pass
+
+def _al_login_main(drive_service, gs_client, user_email: str, user_name: str | None):
+    _al_append(
+        drive_service, gs_client,
+        {
+            "timestamp_utc": _utc_now_iso(),
+            "event": "login_main",
+            "user_email": user_email or "—",
+            "user_name": user_name or "—",
+            "app_version": APP_VERSION,
+        },
+        suggested_folder_id=st.session_state.get("dest_folder_id"),
+    )
+
+def _al_login_sc(drive_service, gs_client, user_email: str, account_label: str):
+    _al_append(
+        drive_service, gs_client,
+        {
+            "timestamp_utc": _utc_now_iso(),
+            "event": "login_sc",
+            "user_email": user_email or "—",
+            "user_name": "—",
+            "account_label": account_label or "—",
+            "app_version": APP_VERSION,
+        },
+        suggested_folder_id=st.session_state.get("dest_folder_id"),
+    )
+
+def _al_analysis(
+    drive_service, gs_client, user_email: str,
+    analysis_key: str, site_url: str, result_sheet_id: str,
+    extra: dict | None = None
+):
+    _al_append(
+        drive_service, gs_client,
+        {
+            "timestamp_utc": _utc_now_iso(),
+            "event": "analysis_run",
+            "user_email": user_email or "—",
+            "user_name": "—",
+            "site_url": site_url or "—",
+            "analysis": analysis_key or "—",
+            "result_sheet_id": result_sheet_id or "—",
+            "account_label": st.session_state.get("src_account_label") or "—",
+            "dest_folder_id": st.session_state.get("dest_folder_id") or (AL_FOLDER_ID or "—"),
+            "extra_json": json.dumps(extra or {}, ensure_ascii=False),
+            "app_version": APP_VERSION,
+        },
+        suggested_folder_id=st.session_state.get("dest_folder_id"),
+    )
 
 # ------------------------------------------------------------
 # PASO 0: Login con Google (OIDC + Drive/Sheets + Search Console) para identidad y credenciales destino
@@ -730,6 +904,7 @@ def logout_screen():
                 "site_url_choice", "last_file_id", "last_file_kind",
                 "sc_account_choice",
                 "DEBUG",
+                "_activity_log_sid", "_logged_login_main", "_logged_login_sc"
             ]:
                 st.session_state.pop(k, None)
 
@@ -1091,6 +1266,10 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
             ''',
             unsafe_allow_html=True
         )
+        # 👇 REGISTRO: login principal (solo una vez por sesión)
+        if AL_ENABLED and not st.session_state.get("_logged_login_main"):
+            _al_login_main(drive_service, gs_client, user_email=email_txt, user_name=(st.session_state.get("_google_identity") or {}).get("name"))
+            st.session_state["_logged_login_main"] = True
     except Exception as e:
         st.error(f"No pude inicializar Drive/Sheets con la cuenta PERSONAL: {e}")
         st.stop()
@@ -1185,6 +1364,11 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
             ''',
             unsafe_allow_html=True
         )
+        # 👇 REGISTRO: login SC (una vez)
+        if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
+            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+            _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label="Acceso en cuenta personal de Nomadic")
+            st.session_state["_logged_login_sc"] = True
     except Exception as e:
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
@@ -1235,6 +1419,11 @@ else:
         }
         st.session_state["src_account_label"] = picked_label
         st.session_state["step3_done"] = True
+        # 👇 REGISTRO: login SC (una vez)
+        if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
+            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+            _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label=picked_label)
+            st.session_state["_logged_login_sc"] = True
         st.rerun()
     else:
         try:
@@ -1250,6 +1439,11 @@ else:
                 ''',
                 unsafe_allow_html=True
             )
+            # Ya estaba logueado; si no quedó marcado, marcamos
+            if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
+                email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+                _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label=src_label)
+                st.session_state["_logged_login_sc"] = True
         except Exception as e:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
@@ -1348,7 +1542,7 @@ def _extract_medio_name(site_url: str | None) -> str | None:
     if not site_url:
         return None
     s = site_url.strip()
-    if s.lower().startswith("sc-domain:"):
+    if s.lower().startsWith("sc-domain:"):
         # toma lo que sigue a los ":"
         return s.split(":", 1)[1].strip() or None
     return None
@@ -1496,6 +1690,18 @@ if analisis == "4":
             # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
 
+            # 👇 REGISTRO: ejecución
+            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+            _al_analysis(
+                drive_service, gs_client, user_email=email_txt,
+                analysis_key="core",
+                site_url=site_url, result_sheet_id=sid,
+                extra={
+                    "params": list(map(lambda x: (str(x) if x is not None else None), params)),
+                    "adv_filters": st.session_state.get("core_filters_payload")
+                }
+            )
+
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
@@ -1520,6 +1726,15 @@ elif analisis == "5":
             # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
 
+            # 👇 REGISTRO: ejecución
+            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+            _al_analysis(
+                drive_service, gs_client, user_email=email_txt,
+                analysis_key="evergreen",
+                site_url=site_url, result_sheet_id=sid,
+                extra={"params": list(map(lambda x: (str(x) if x is not None else None), params))}
+            )
+
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
@@ -1543,6 +1758,15 @@ elif analisis == "6":
             )
             # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+
+            # 👇 REGISTRO: ejecución
+            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
+            _al_analysis(
+                drive_service, gs_client, user_email=email_txt,
+                analysis_key="audit",
+                site_url=site_url, result_sheet_id=sid,
+                extra={"params": list(map(lambda x: (str(x) if x is not None else None), params))}
+            )
 
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
