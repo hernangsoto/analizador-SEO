@@ -531,31 +531,48 @@ def step0_google_identity():
         st.success(f"Identidad verificada y permisos listos: {ident['email']}")
         return ident
 
+    # ====== PARCHE: rehidratación de state para redirección ======
     if oo.get("use_redirect") and code:
         expected_state = oo.get("flow_state")
         flow = None
         store = _oauth_flow_store()
+
+        # 1) Intentar recuperar el Flow usando el state recibido
         if state_in and state_in in store:
             flow = store.pop(state_in)["flow"]
+
+        # 2) Si no está en memoria, rehidratar/recrear con el state de la URL
         if not flow:
             st.info("Intentando recuperar sesión…")
             if has_web:
                 from google_auth_oauthlib.flow import Flow
                 client_secrets = {"web": {
-                    "client_id": auth_sec["client_id"], "client_secret": auth_sec["client_secret"],
+                    "client_id": auth_sec["client_id"],
+                    "client_secret": auth_sec["client_secret"],
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
                     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                     "redirect_uris": [redirect_uri],
                 }}
-                flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
+                # Rehidratar con el state recibido
+                flow = Flow.from_client_config(client_secrets, scopes=scopes_step0, state=state_in)
                 flow.redirect_uri = redirect_uri
+            else:
+                # Modo installed/manual
+                acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+                flow = build_flow(acct_for_dest, scopes_step0)
+                try:
+                    setattr(flow, "_state", state_in)
+                except Exception:
+                    pass
+
+        # 3) Avisar si el state no coincide, pero continuar con el flujo rehidratado
+        if expected_state and state_in and state_in != expected_state:
+            st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando el flujo rehidratado con el state recibido…")
 
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
         try:
-            if expected_state and state_in and state_in != expected_state:
-                st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando flujo recuperado…")
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
             info = _fetch_userinfo_json_with_retry(creds.token)
@@ -581,23 +598,48 @@ def step0_google_identity():
         st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({auth_url})")
         with st.expander("Ver/copiar URL de autorización (identidad)"):
             st.code(auth_url)
-        url = st.text_input("🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)", key="auth_response_url_oidc", placeholder="http://localhost/?code=...&state=...")
+        url = st.text_input(
+            "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
+            key="auth_response_url_oidc",
+            placeholder="http://localhost/?code=...&state=..."
+        )
         c1, c2 = st.columns(2)
         with c1:
+            # ====== PARCHE: rehidratación de state en modo manual ======
             if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
-                if not url.strip():
+                raw = (url or "").strip()
+                if not raw:
                     st.error("Pegá la URL completa de redirección (incluye code y state).")
                     st.stop()
                 try:
+                    from urllib.parse import urlparse, parse_qs
+                    state_in_manual = None
+                    try:
+                        q = parse_qs(urlparse(raw).query)
+                        state_in_manual = q.get("state", [None])[0]
+                    except Exception:
+                        pass
+
                     flow_state = oo.get("flow_state")
                     store = _oauth_flow_store()
                     flow = None
-                    if flow_state and flow_state in store:
-                        flow = store.pop(flow_state)["flow"]
+
+                    # 1) Priorizar el Flow guardado para el state que vino en la URL
+                    key_state = state_in_manual or flow_state
+                    if key_state and key_state in store:
+                        flow = store.pop(key_state)["flow"]
+
+                    # 2) Si no existe, recrear y setear el state best-effort
                     if not flow:
                         acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
                         flow = build_flow(acct_for_dest, scopes_step0)
-                    flow.fetch_token(authorization_response=url.strip())
+                        try:
+                            setattr(flow, "_state", key_state)
+                        except Exception:
+                            pass
+
+                    # 3) Intercambiar código por tokens usando la URL pegada
+                    flow.fetch_token(authorization_response=raw)
                     creds = flow.credentials
                     info = _fetch_userinfo_json_with_retry(creds.token)
                     return _finalize_identity(creds, info)
@@ -1761,5 +1803,5 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+        "GEMINI_API_KEY" in st.secrets o ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
     )
