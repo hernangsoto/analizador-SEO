@@ -28,8 +28,8 @@ st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 # ====== UI / Branding ======
 from modules.ui import (
     apply_page_style,
-    # render_brand_header_once,   # ← retirado para evitar duplicado
-    # enable_brand_auto_align,    # ← retirado para evitar duplicado
+    # render_brand_header_once,
+    # enable_brand_auto_align,
     get_user,
     sidebar_user_info,
     login_screen,
@@ -65,7 +65,6 @@ apply_page_style(
 
 # --- Logo Nomadic siempre visible (CSS sobre el header) ---
 def pin_nomadic_logo_css(logo_url: str):
-    # Pintamos el logo como pseudo-elemento del header para que no se pierda en los reruns
     st.markdown(
         f"""
         <style>
@@ -100,7 +99,6 @@ def pin_nomadic_logo_css(logo_url: str):
         unsafe_allow_html=True,
     )
 
-# Llamada (dejala después de apply_page_style(...) para que estas reglas tengan prioridad)
 pin_nomadic_logo_css(LOGO_URL)
 
 # ====== Estilos globales ======
@@ -223,10 +221,8 @@ def _load_prompts():
         e_loc = el
         _AI_IMPORT_ERR = f"external={repr(e_ext)} | file={repr(e_file)} | local={repr(e_loc)}"
 
-# Ejecutar la carga al iniciar
 _load_prompts()
 
-# ---- Healthcheck de Gemini (solo para debug UI) ----
 def _gemini_healthcheck():
     ok = True
     msgs = []
@@ -259,7 +255,6 @@ def _gemini_healthcheck():
 
     return ok, msgs
 
-# ---------- Probe de prompts (solo visible en debug) ----------
 def _render_prompt_probe(kind: str, force_key: str | None = None):
     key = force_key or kind
     st.markdown("### 🔍 Test de prompt")
@@ -296,7 +291,6 @@ def _render_prompt_probe(kind: str, force_key: str | None = None):
         st.markdown("**bullets_hint:**")
         st.code(bh, language="md")
 
-# Diagnóstico rápido de prompts (solo si DEBUG)
 if st.session_state.get("DEBUG"):
     with st.expander("🧪 Diagnóstico rápido de prompts (opcional)", expanded=False):
         try:
@@ -315,47 +309,31 @@ if st.session_state.get("DEBUG"):
             _load_prompts()
             st.rerun()
 
-# === 🔎 Panel de diagnóstico: ¿dónde filtro y dónde llamo a GSC? (solo aparece si DEBUG) ===
+# === 🔎 Panel de diagnóstico (DEBUG) ===
 def _scan_repo_for_gsc_and_filters():
     import os, re
     import pandas as pd
-
-    # Carpetas donde buscar
     roots = ['modules', '.ext_pkgs', '.']
-
-    # Carpetas a ignorar
-    skip_dirs = {
-        '.git', '.venv', 'venv', '__pycache__', '.streamlit',
-        '.pythonlibs', '.mypy_cache', '.ruff_cache', '.cache'
-    }
-
-    # Patrones a detectar
+    skip_dirs = {'.git', '.venv', 'venv', '__pycache__', '.streamlit', '.pythonlibs', '.mypy_cache', '.ruff_cache', '.cache'}
     patterns = {
-        # Llamadas a Search Console
         r"searchanalytics\(\)\.query": "Llamada a GSC: searchanalytics().query",
         r"\bwebmasters\.\w*?searchanalytics\(\)\.query": "Llamada a GSC (cliente webmasters)",
         r"\bservice\.\w*?searchanalytics\(\)\.query": "Llamada a GSC (objeto service)",
         r"dimensionFilterGroups": "Filtro en la query (dimensionFilterGroups)",
         r"dimensionFilter": "Filtro en la query (dimensionFilter)",
-
-        # Estructuras típicas del request
         r"\brequest\s*=\s*{": "Construcción de request body",
         r"\bbody\s*=\s*{": "Construcción de request body",
         r'"dimensions"\s*:\s*\[': "Definición de dimensiones en request",
         r'"dimension"\s*:\s*"PAGE"': "Dimensión PAGE dentro de filtros",
-
-        # Filtrado post-proceso sobre DataFrames
         r"df\[['\"]page['\"]\]": "Uso de columna page en DataFrame",
         r"page\s*\.str\.(?:contains|startswith|endswith)\(": "Filtro string sobre page (postproceso)",
         r"\.query\(\s*['\"].*page.*['\"]\s*\)": "Filtro con DataFrame.query sobre page",
     }
     compiled = [(re.compile(p), label) for p, label in patterns.items()]
-
     results = []
     def _skip_dir(path):
         name = os.path.basename(path)
         return (name in skip_dirs) or name.startswith('.')
-
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -371,16 +349,10 @@ def _scan_repo_for_gsc_and_filters():
                             for rx, label in compiled:
                                 if rx.search(line):
                                     results.append({
-                                        "file": path,
-                                        "line": i,
-                                        "label": label,
-                                        "pattern": rx.pattern,
-                                        "snippet": line.strip(),
+                                        "file": path, "line": i, "label": label, "pattern": rx.pattern, "snippet": line.strip(),
                                     })
                 except Exception:
-                    # si no se puede leer, lo omitimos
                     pass
-
     st.session_state["_scan_results"] = results
     return results
 
@@ -398,31 +370,19 @@ def _read_context(path: str, line_no: int, around: int = 8) -> str:
     except Exception as e:
         return f"(No se pudo abrir {path}: {e})"
 
-# UI del diagnóstico (solo visible cuando DEBUG está activo)
 if st.session_state.get("DEBUG"):
     with st.expander("🛠️ Diagnóstico de filtros de Search Console", expanded=False):
         st.caption("Escanea el código para ubicar dónde llamas a la API de GSC y dónde aplicas filtros por URL (columna 'page').")
         if st.button("Escanear código (GSC + filtros)", key="btn_scan_gsc_files"):
             _scan_repo_for_gsc_and_filters()
-
         results = st.session_state.get("_scan_results", [])
         if results:
             import pandas as pd
             df = pd.DataFrame(results)[["file", "line", "label", "snippet", "pattern"]]
             st.write(f"Coincidencias encontradas: **{len(df)}**")
             st.dataframe(df, use_container_width=True, height=340)
-
-            # Descargar CSV
             csv_bytes = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Descargar CSV de coincidencias",
-                data=csv_bytes,
-                file_name="diagnostico_gsc_filtros.csv",
-                mime="text/csv",
-                key="dl_scan_gsc_csv"
-            )
-
-            # Ver contexto de una coincidencia
+            st.download_button("⬇️ Descargar CSV de coincidencias", data=csv_bytes, file_name="diagnostico_gsc_filtros.csv", mime="text/csv", key="dl_scan_gsc_csv")
             options = [f"{i+1}. {row.file}:{row.line} — {row.label}" for i, row in df.iterrows()]
             sel = st.selectbox("Ver contexto de una coincidencia:", options, index=0, key="sel_scan_item")
             if sel:
@@ -453,184 +413,10 @@ def _clear_qp():
 # ------------------------------------------------------------
 @st.cache_resource
 def _oauth_flow_store():
-    # state -> {"flow": Flow, "created": ts, "mode": "web"/"installed"}
     return {}
 
 # ------------------------------------------------------------
-# ⚙️ Activity Log (Drive/Sheets)
-# ------------------------------------------------------------
-APP_VERSION = "2025.08.21"
-_AL_CONF = st.secrets.get("activity_log", {}) if isinstance(st.secrets.get("activity_log", {}), dict) else {}
-AL_ENABLED = bool(_AL_CONF.get("enabled", True))
-AL_TITLE_DEFAULT = _AL_CONF.get("title", "Nomadic SEO App — Activity Log")
-AL_FOLDER_ID = _AL_CONF.get("folder_id")  # opcional
-AL_SHEET_ID = _AL_CONF.get("sheet_id")    # opcional
-
-def _utc_now_iso() -> str:
-    try:
-        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    except Exception:
-        return pd.Timestamp.utcnow().isoformat()
-
-def _al_get_or_create(drive_service, gs_client, suggested_folder_id: str | None = None):
-    """Devuelve (spreadsheet, sid) del Activity Log. Crea si no existe.
-       Prioriza sheet_id de secrets; si no, busca por título; si no, crea."""
-    if not AL_ENABLED or not drive_service or not gs_client:
-        return None, None
-    # 1) Si viene sheet_id fijo
-    sid = AL_SHEET_ID or st.session_state.get("_activity_log_sid")
-    if sid:
-        try:
-            sh = gs_client.open_by_key(sid)
-            st.session_state["_activity_log_sid"] = sid
-            return sh, sid
-        except Exception:
-            # id inválido: seguimos
-            pass
-
-    # 2) Buscar por nombre
-    title = AL_TITLE_DEFAULT
-    try:
-        q = f"mimeType='application/vnd.google-apps.spreadsheet' and name='{title}' and trashed=false"
-        # Buscar en todo el Drive (incl. unidades compartidas)
-        resp = drive_service.files().list(
-            q=q,
-            spaces="drive",
-            fields="files(id,name,parents)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            pageSize=5,
-        ).execute()
-        files = resp.get("files", []) or []
-        if files:
-            sid = files[0]["id"]
-            sh = gs_client.open_by_key(sid)
-            st.session_state["_activity_log_sid"] = sid
-            return sh, sid
-    except Exception:
-        pass
-
-    # 3) Crear
-    try:
-        meta = {
-            "name": title,
-            "mimeType": "application/vnd.google-apps.spreadsheet",
-        }
-        parent_id = AL_FOLDER_ID or suggested_folder_id
-        if parent_id:
-            meta["parents"] = [parent_id]
-        newf = drive_service.files().create(
-            body=meta, fields="id", supportsAllDrives=True
-        ).execute()
-        sid = newf["id"]
-        sh = gs_client.open_by_key(sid)
-        # Inicializar hoja + encabezados
-        try:
-            try:
-                ws = sh.worksheet("Log")
-            except Exception:
-                ws = sh.sheet1
-                ws.update_title("Log")
-            headers = [
-                "timestamp_utc", "event", "user_email", "user_name",
-                "site_url", "analysis", "result_sheet_id",
-                "account_label", "dest_folder_id",
-                "extra_json", "app_version"
-            ]
-            # Escribimos encabezados solo si A1 está vacío
-            try:
-                a1 = ws.acell("A1").value
-            except Exception:
-                a1 = None
-            if not a1:
-                ws.update("A1", [headers])
-        except Exception:
-            pass
-        st.session_state["_activity_log_sid"] = sid
-        return sh, sid
-    except Exception:
-        return None, None
-
-def _al_append(drive_service, gs_client, row: dict, suggested_folder_id: str | None = None):
-    """Append seguro; nunca rompe el flujo si falla."""
-    if not AL_ENABLED:
-        return
-    try:
-        sh, sid = _al_get_or_create(drive_service, gs_client, suggested_folder_id)
-        if not sh:
-            return
-        try:
-            ws = sh.worksheet("Log")
-        except Exception:
-            ws = sh.sheet1
-        # Orden de columnas esperado
-        cols = [
-            "timestamp_utc", "event", "user_email", "user_name",
-            "site_url", "analysis", "result_sheet_id",
-            "account_label", "dest_folder_id",
-            "extra_json", "app_version"
-        ]
-        out = {c: "" for c in cols}
-        out.update(row or {})
-        values = [[out[c] for c in cols]]
-        ws.append_rows(values, value_input_option="USER_ENTERED")
-    except Exception:
-        # Silencioso: no bloqueamos la app si el log falla
-        pass
-
-def _al_login_main(drive_service, gs_client, user_email: str, user_name: str | None):
-    _al_append(
-        drive_service, gs_client,
-        {
-            "timestamp_utc": _utc_now_iso(),
-            "event": "login_main",
-            "user_email": user_email or "—",
-            "user_name": user_name or "—",
-            "app_version": APP_VERSION,
-        },
-        suggested_folder_id=st.session_state.get("dest_folder_id"),
-    )
-
-def _al_login_sc(drive_service, gs_client, user_email: str, account_label: str):
-    _al_append(
-        drive_service, gs_client,
-        {
-            "timestamp_utc": _utc_now_iso(),
-            "event": "login_sc",
-            "user_email": user_email or "—",
-            "user_name": "—",
-            "account_label": account_label or "—",
-            "app_version": APP_VERSION,
-        },
-        suggested_folder_id=st.session_state.get("dest_folder_id"),
-    )
-
-def _al_analysis(
-    drive_service, gs_client, user_email: str,
-    analysis_key: str, site_url: str, result_sheet_id: str,
-    extra: dict | None = None
-):
-    _al_append(
-        drive_service, gs_client,
-        {
-            "timestamp_utc": _utc_now_iso(),
-            "event": "analysis_run",
-            "user_email": user_email or "—",
-            "user_name": "—",
-            "site_url": site_url or "—",
-            "analysis": analysis_key or "—",
-            "result_sheet_id": result_sheet_id or "—",
-            "account_label": st.session_state.get("src_account_label") or "—",
-            "dest_folder_id": st.session_state.get("dest_folder_id") or (AL_FOLDER_ID or "—"),
-            "extra_json": json.dumps(extra or {}, ensure_ascii=False),
-            "app_version": APP_VERSION,
-        },
-        suggested_folder_id=st.session_state.get("dest_folder_id"),
-    )
-
-# ------------------------------------------------------------
-# PASO 0: Login con Google (OIDC + Drive/Sheets + Search Console) para identidad y credenciales destino
-#   - Restringido a @nomadic.agency (sugerido con hd y validado post-login)
+# PASO 0: Login con Google (OIDC + Drive/Sheets + Search Console)
 # ------------------------------------------------------------
 def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
     sep = "&" if "?" in auth_url else "?"
@@ -655,84 +441,59 @@ def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
 
 def step0_google_identity():
     st.subheader("¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic")
-
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
     redirect_uri = auth_sec.get("redirect_uri")
     store = _oauth_flow_store()
-
-    # Scopes Paso 0: identidad + Drive/Sheets + Search Console
     scopes_step0 = ["openid", "email", "profile"] + SCOPES_DRIVE + SCOPES_GSC
 
     if "oauth_oidc" not in st.session_state:
         if has_web:
-            client_secrets = {
-                "web": {
-                    "client_id": auth_sec["client_id"],
-                    "client_secret": auth_sec["client_secret"],
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                    "redirect_uris": [redirect_uri],
-                }
-            }
+            client_secrets = {"web": {
+                "client_id": auth_sec["client_id"],
+                "client_secret": auth_sec["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": [redirect_uri],
+            }}
             from google_auth_oauthlib.flow import Flow
             flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
             flow.redirect_uri = redirect_uri
             auth_url, state = flow.authorization_url(
-                prompt="consent select_account",
-                access_type="offline",
-                include_granted_scopes="true",
+                prompt="consent select_account", access_type="offline", include_granted_scopes="true",
             )
             auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
-                "flow_state": state,
-                "use_redirect": True,
-                "redirect_uri": redirect_uri,
-                "mode": "web",
-                "auth_url": auth_url,
+                "flow_state": state, "use_redirect": True, "redirect_uri": redirect_uri, "mode": "web", "auth_url": auth_url,
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "web"}
         else:
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-            flow = build_flow(acct_for_dest, scopes_step0)  # redirect http://localhost
+            flow = build_flow(acct_for_dest, scopes_step0)
             auth_url, state = flow.authorization_url(
-                prompt="consent select_account",
-                access_type="offline",
-                include_granted_scopes="true",
+                prompt="consent select_account", access_type="offline", include_granted_scopes="true",
             )
             auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
-                "flow_state": state,
-                "use_redirect": False,
-                "redirect_uri": "http://localhost",
-                "mode": "installed",
-                "auth_url": auth_url,
+                "flow_state": state, "use_redirect": False, "redirect_uri": "http://localhost", "mode": "installed", "auth_url": auth_url,
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "installed"}
     else:
         oo = st.session_state["oauth_oidc"]
         if has_web and oo.get("mode") != "web":
-            st.session_state.pop("oauth_oidc", None)
-            return step0_google_identity()
+            st.session_state.pop("oauth_oidc", None); return step0_google_identity()
         if (not has_web) and oo.get("mode") != "installed":
-            st.session_state.pop("oauth_oidc", None)
-            return step0_google_identity()
+            st.session_state.pop("oauth_oidc", None); return step0_google_identity()
 
     oo = st.session_state["oauth_oidc"]
     auth_url = oo["auth_url"]
-
-    # Si venimos redirigidos desde Google (solo modo web)
     qp = _get_qp()
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
     def _finalize_identity(creds, info):
-        ident = {
-            "name": info.get("name") or info.get("email") or "Invitado",
-            "email": info.get("email") or "—",
-            "picture": info.get("picture"),
-        }
+        ident = {"name": info.get("name") or info.get("email") or "Invitado", "email": info.get("email") or "—", "picture": info.get("picture")}
         hd_ok = (info.get("hd") == "nomadic.agency") if info.get("hd") else False
         if not (_email_is_nomadic(ident["email"]) or hd_ok):
             st.error("Debes iniciar sesión con un correo **@nomadic.agency**.")
@@ -743,7 +504,6 @@ def step0_google_identity():
             st.stop()
 
         st.session_state["_google_identity"] = ident
-        # 💾 Guardar credenciales (Drive/Sheets + Search Console)
         st.session_state["creds_dest"] = {
             "token": creds.token,
             "refresh_token": getattr(creds, "refresh_token", None),
@@ -763,41 +523,33 @@ def step0_google_identity():
         store = _oauth_flow_store()
         if state_in and state_in in store:
             flow = store.pop(state_in)["flow"]
-
         if not flow:
             st.info("Intentando recuperar sesión…")
             if has_web:
                 from google_auth_oauthlib.flow import Flow
-                client_secrets = {
-                    "web": {
-                        "client_id": auth_sec["client_id"],
-                        "client_secret": auth_sec["client_secret"],
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                        "redirect_uris": [redirect_uri],
-                    }
-                }
+                client_secrets = {"web": {
+                    "client_id": auth_sec["client_id"], "client_secret": auth_sec["client_secret"],
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                    "redirect_uris": [redirect_uri],
+                }}
                 flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
                 flow.redirect_uri = redirect_uri
 
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
-
         try:
             if expected_state and state_in and state_in != expected_state:
                 st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando flujo recuperado…")
-
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
-
             info = _fetch_userinfo_json_with_retry(creds.token)
             return _finalize_identity(creds, info)
         except Exception as e:
             st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
 
-    # UI inicial según modo
     if oo.get("use_redirect"):
         try:
             st.link_button("Continuar con Google", auth_url)
@@ -815,12 +567,7 @@ def step0_google_identity():
         st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({auth_url})")
         with st.expander("Ver/copiar URL de autorización (identidad)"):
             st.code(auth_url)
-
-        url = st.text_input(
-            "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
-            key="auth_response_url_oidc",
-            placeholder="http://localhost/?code=...&state=...",
-        )
+        url = st.text_input("🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)", key="auth_response_url_oidc", placeholder="http://localhost/?code=...&state=...")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
@@ -838,7 +585,6 @@ def step0_google_identity():
                         flow = build_flow(acct_for_dest, scopes_step0)
                     flow.fetch_token(authorization_response=url.strip())
                     creds = flow.credentials
-
                     info = _fetch_userinfo_json_with_retry(creds.token)
                     return _finalize_identity(creds, info)
                 except Exception as e:
@@ -853,7 +599,7 @@ def step0_google_identity():
     return st.session_state.get("_google_identity")
 
 # ------------------------------------------------------------
-# Pantalla de LOGOUT: revoca tokens, borra cachés y limpia sesión
+# Pantalla de LOGOUT
 # ------------------------------------------------------------
 def _revoke_google_token(token: str | None) -> None:
     if not token:
@@ -885,16 +631,13 @@ def logout_screen():
                     data = st.session_state.get(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
-
             try: st.cache_data.clear()
             except Exception: pass
             try: st.cache_resource.clear()
             except Exception: pass
-
             if wipe_pkg:
                 import shutil
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
-
             for k in [
                 "_auth_bypass", "_google_identity",
                 "oauth_oidc", "oauth_dest", "oauth_src",
@@ -904,31 +647,22 @@ def logout_screen():
                 "site_url_choice", "last_file_id", "last_file_kind",
                 "sc_account_choice",
                 "DEBUG",
-                "_activity_log_sid", "_logged_login_main", "_logged_login_sc"
             ]:
                 st.session_state.pop(k, None)
-
             try:
                 token_store.clear("creds_dest")
                 token_store.clear("creds_src")
             except Exception:
                 pass
-
-            # Redirigir a la home de la app (no al callback de OAuth)
-            st.markdown(
-                f"<meta http-equiv='refresh' content='0; url={APP_HOME}'>",
-                unsafe_allow_html=True
-            )
+            st.markdown(f"<meta http-equiv='refresh' content='0; url={APP_HOME}'>", unsafe_allow_html=True)
             st.stop()
-
     with col2:
         if st.button("Cancelar"):
             _clear_qp()
             st.rerun()
 
-# ====== Pequeñas utilidades UI (parámetros y selección) ======
+# ====== Pequeñas utilidades UI ======
 def pick_site(sc_service):
-    # Renombrado solicitado
     st.subheader("Elige el sitio a analizar")
     try:
         site_list = sc_service.sites().list().execute()
@@ -940,7 +674,6 @@ def pick_site(sc_service):
     if not verified:
         st.error("No se encontraron sitios verificados en esta cuenta.")
         st.stop()
-
     options = sorted({s["siteUrl"] for s in verified})
     prev = st.session_state.get("site_url_choice")
     index = options.index(prev) if prev in options else 0
@@ -948,7 +681,6 @@ def pick_site(sc_service):
     return site_url
 
 def pick_analysis(include_auditoria: bool):
-    # Renombrado solicitado
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
@@ -959,14 +691,10 @@ def pick_analysis(include_auditoria: bool):
     ]
     if include_auditoria:
         opciones.append("6. Auditoría de tráfico ✅")
-
     key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
-    if key.startswith("4."):
-        return "4"
-    if key.startswith("5."):
-        return "5"
-    if key.startswith("6."):
-        return "6"
+    if key.startswith("4."): return "4"
+    if key.startswith("5."): return "5"
+    if key.startswith("6."): return "6"
     return "0"
 
 LAG_DAYS_DEFAULT = 3
@@ -977,7 +705,6 @@ def _parse_paths_csv(txt: str) -> list[str]:
         return []
     items = [p.strip() for p in txt.split(",")]
     items = [p for p in items if p]
-    # Normalizar: quitar dobles espacios; no forzamos / al inicio/fin para no romper sitios
     return items
 
 def _build_advanced_filters_payload(
@@ -986,24 +713,14 @@ def _build_advanced_filters_payload(
 ) -> dict | None:
     payload: dict = {}
     if sec_mode in ("Incluir solo", "Excluir") and sec_paths:
-        payload["sections"] = {
-            "mode": "include" if sec_mode == "Incluir solo" else "exclude",
-            "paths": sec_paths
-        }
+        payload["sections"] = {"mode": "include" if sec_mode == "Incluir solo" else "exclude", "paths": sec_paths}
     if sub_enabled and sub_mode and sub_paths:
-        payload["subsections"] = {
-            "mode": "include" if sub_mode == "Incluir solo" else "exclude",
-            "paths": sub_paths
-        }
+        payload["subsections"] = {"mode": "include" if sub_mode == "Incluir solo" else "exclude", "paths": sub_paths}
     return payload or None
 
 def params_for_core_update():
-    # Renombrado solicitado
     st.markdown("#### Configuración del análisis")
-    lag_days = st.number_input(
-        "Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core"
-    )
-
+    lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_core")
     presets = [
         "Core Update de junio 2025",
         "Core Update de marzo 2025",
@@ -1013,7 +730,6 @@ def params_for_core_update():
         "Personalizado",
     ]
     core_choice = st.selectbox("Core Update", presets, index=0, key="core_choice")
-
     custom_ini = None
     custom_fin = None
     if core_choice == "Personalizado":
@@ -1024,82 +740,41 @@ def params_for_core_update():
             custom_fin = st.date_input("Fecha de fin (YYYY-MM-DD)", key="core_custom_fin")
         else:
             custom_fin = None
-
-    # UI muestra "Search + Discover", pero internamente seguimos pasando "Ambos"
     tipo_display = st.selectbox("Datos a analizar", ["Search", "Discover", "Search + Discover"], index=2, key="tipo_core_display")
     tipo_map = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}
     tipo = tipo_map.get(tipo_display, "Ambos")
-
-    pais_choice = st.selectbox(
-        "¿Filtrar por país? (ISO-3)",
-        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
-        index=0,
-        key="pais_core",
-    )
+    pais_choice = st.selectbox("¿Filtrar por país? (ISO-3)", ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"], index=0, key="pais_core")
     pais = None if pais_choice == "Todos" else pais_choice
-
-    # ----- NUEVO: filtros avanzados de secciones y subsecciones -----
     st.markdown("##### Filtro por secciones")
-    sec_mode = st.radio(
-        "¿Cómo aplicar el filtro de sección?",
-        ["No filtrar", "Incluir solo", "Excluir"],
-        index=0, horizontal=True, key="sec_mode_core"
-    )
-    sec_list_txt = st.text_input(
-        "Secciones (separa múltiples rutas con coma, ej.: /vida/, /ciencia/)",
-        value="", key="sec_list_core", placeholder="/vida/, /ciencia/"
-    )
-
+    sec_mode = st.radio("¿Cómo aplicar el filtro de sección?", ["No filtrar", "Incluir solo", "Excluir"], index=0, horizontal=True, key="sec_mode_core")
+    sec_list_txt = st.text_input("Secciones (separa múltiples rutas con coma, ej.: /vida/, /ciencia/)", value="", key="sec_list_core", placeholder="/vida/, /ciencia/")
     st.markdown("##### Filtro por subsecciones (opcional)")
     sub_enabled = st.checkbox("Activar filtro por subsecciones", value=False, key="subsec_en_core")
     sub_mode = None
     sub_list_txt = None
     if sub_enabled:
-        sub_mode = st.radio(
-            "Modo de subsecciones",
-            ["Incluir solo", "Excluir"],
-            index=0, horizontal=True, key="subsec_mode_core"
-        )
-        sub_list_txt = st.text_input(
-            "Subsecciones (separa múltiples rutas con coma, ej.: /vida/salud/, /vida/bienestar/)",
-            value="", key="subsec_list_core", placeholder="/vida/salud/, /vida/bienestar/"
-        )
-
-    # Construimos payload avanzado + compatibilidad con 'seccion' legacy
+        sub_mode = st.radio("Modo de subsecciones", ["Incluir solo", "Excluir"], index=0, horizontal=True, key="subsec_mode_core")
+        sub_list_txt = st.text_input("Subsecciones (separa múltiples rutas con coma, ej.: /vida/salud/, /vida/bienestar/)", value="", key="subsec_list_core", placeholder="/vida/salud/, /vida/bienestar/")
     sec_paths = _parse_paths_csv(sec_list_txt)
     sub_paths = _parse_paths_csv(sub_list_txt) if sub_list_txt is not None else None
     adv_payload = _build_advanced_filters_payload(sec_mode, sec_paths, sub_enabled, sub_mode, sub_paths)
-
-    # Guardar en sesión para usarlo al ejecutar (env var)
     st.session_state["core_filters_payload"] = adv_payload
-
-    # Compatibilidad: si es Incluir solo con UNA sección y sin subsecciones -> usamos 'seccion' legacy
     seccion_legacy = None
     if adv_payload and "sections" in adv_payload:
         if adv_payload["sections"]["mode"] == "include" and len(adv_payload["sections"]["paths"]) == 1 and "subsections" not in adv_payload:
             seccion_legacy = adv_payload["sections"]["paths"][0]
-
-    # Si no hay payload pero el usuario escribió algo "por costumbre", también lo aceptamos
     if not adv_payload and sec_list_txt.strip():
-        # Si solo una ruta -> legacy; si múltiples -> tomar la primera
         first = _parse_paths_csv(sec_list_txt)[:1]
         seccion_legacy = first[0] if first else None
-
     return lag_days, core_choice, custom_ini, custom_fin, tipo, pais, seccion_legacy
 
 def params_for_evergreen():
     st.markdown("#### Parámetros (Evergreen)")
     st.caption("Se usa el período más amplio posible de **meses completos** (hasta 16) en Search.")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="lag_ev")
-    pais_choice = st.selectbox(
-        "¿Filtrar por país? (ISO-3)",
-        ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"],
-        index=0,
-        key="pais_ev",
-    )
+    pais_choice = st.selectbox("¿Filtrar por país? (ISO-3)", ["Todos", "ARG", "MEX", "ESP", "USA", "COL", "PER", "CHL", "URY"], index=0, key="pais_ev")
     pais = None if pais_choice == "Todos" else pais_choice
     seccion = st.text_input("¿Limitar a una sección? (path, ej: /vida/)", value="", key="sec_ev") or None
-
     hoy_util = date.today() - timedelta(days=lag_days)
     end_month_first_day = (pd.Timestamp(hoy_util.replace(day=1)) - pd.offsets.MonthBegin(1))
     end_month_last_day = (end_month_first_day + pd.offsets.MonthEnd(0))
@@ -1107,7 +782,6 @@ def params_for_evergreen():
     start_date = start_month_first_day.date()
     end_date = end_month_last_day.date()
     st.info(f"Ventana mensual: {start_date} → {end_date}")
-
     incluir_diario = st.checkbox("Incluir análisis diario por URL (lento)", value=False, key="daily_ev")
     return lag_days, pais, seccion, incluir_diario, start_date, end_date
 
@@ -1122,19 +796,15 @@ def params_for_auditoria():
     custom_days = None
     if modo == "Personalizado":
         custom_days = st.number_input("Días del período personalizado", 2, 90, 7, key="aud_custom_days")
-
     tipo = st.selectbox("Origen", ["Search", "Discover", "Search y Discover"], index=2, key="aud_tipo")
     seccion = st.text_input("Sección (path, ej: /vida/). Vacío = todo el sitio", value="", key="aud_sec") or None
-
     alcance = st.selectbox("Ámbito", ["Global", "País"], index=0, key="aud_ambito")
     country = None
     if alcance == "País":
         country = st.selectbox("País (ISO-3)", ["ARG","MEX","ESP","USA","COL","PER","CHL","URY"], index=0, key="aud_pais")
-
     periods_back = st.number_input("¿Cuántos periodos previos querés comparar?", 1, 12, 4, key="aud_prev")
     st.caption("Ej.: Semanal = 1 semana actual + N semanas previas. Mensual = 1 mes actual + N meses previos, etc.")
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="aud_lag")
-
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
 
 # ============== App ==============
@@ -1207,11 +877,9 @@ if _action == "change_personal":
     st.session_state["step2_done"] = False
     st.session_state.pop("dest_folder_id", None)
     _clear_qp(); st.rerun()
-
 elif _action == "change_folder":
     st.session_state["step2_done"] = False
     _clear_qp(); st.rerun()
-
 elif _action == "change_src":
     for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
         st.session_state.pop(k, None)
@@ -1250,6 +918,115 @@ drive_service = None
 gs_client = None
 _me = None
 
+# ============ ACTIVITY LOG (helpers) ============
+def _extract_medio_name(site_url: str | None) -> str | None:
+    if not site_url:
+        return None
+    s = site_url.strip()
+    if s.lower().startswith("sc-domain:"):
+        return s.split(":", 1)[1].strip() or None
+    return None
+
+def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
+    medio = _extract_medio_name(site_url)
+    if not medio:
+        return
+    medio = medio.strip().strip("-–—").strip()
+    try:
+        meta = drive_service.files().get(fileId=file_id, fields="name").execute()
+        current = (meta.get("name") or "").strip()
+        if re.match(rf"^{re.escape(medio)}\s*[-–—]\s+", current, flags=re.IGNORECASE):
+            return
+        current_no_lead = re.sub(r"^\s*[-–—]+\s*", "", current)
+        new_name = f"{medio} - {current_no_lead}".strip()
+        drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    except Exception:
+        pass
+
+def _get_activity_log_config():
+    cfg = st.secrets.get("activity_log", {}) or {}
+    return {
+        "title": cfg.get("title") or "Nomadic SEO – Activity Log",
+        "worksheet": cfg.get("worksheet") or "Log",
+        "file_id": cfg.get("file_id") or None,
+        "folder_id": cfg.get("folder_id") or st.session_state.get("dest_folder_id"),
+    }
+
+def _get_or_create_activity_log_ws(drive, gsclient):
+    cfg = _get_activity_log_config()
+    file_id = cfg["file_id"]
+    title = cfg["title"]
+    ws_name = cfg["worksheet"]
+    folder_id = cfg["folder_id"]
+
+    try:
+        if file_id:
+            sh = gsclient.open_by_key(file_id)
+        else:
+            q = f"name = '{title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+            res = drive.files().list(
+                q=q, spaces="drive",
+                fields="files(id,name)",
+                includeItemsFromAllDrives=True, supportsAllDrives=True
+            ).execute()
+            files = res.get("files", [])
+            if files:
+                file_id = files[0]["id"]
+            else:
+                body = {"name": title, "mimeType": "application/vnd.google-apps.spreadsheet"}
+                if folder_id:
+                    body["parents"] = [folder_id]
+                new_file = drive.files().create(
+                    body=body, fields="id", supportsAllDrives=True
+                ).execute()
+                file_id = new_file["id"]
+        sh = gsclient.open_by_key(file_id)
+
+        try:
+            ws = sh.worksheet(ws_name)
+        except Exception:
+            # usa la sheet1 si existe, si no crea
+            try:
+                ws = sh.sheet1
+                ws.update_title(ws_name)
+            except Exception:
+                ws = sh.add_worksheet(title=ws_name, rows=1000, cols=20)
+
+        # Encabezados en A1 si no están
+        headers = ["timestamp", "user_email", "event", "site_url", "analysis_kind", "sheet_id", "sheet_name", "sheet_url", "gsc_account", "notes"]
+        try:
+            top_left = ws.acell("A1").value
+        except Exception:
+            top_left = None
+        if (top_left or "").strip().lower() != "timestamp":
+            # Si la hoja está vacía o los headers no coinciden, insertamos encabezados en la fila 1
+            try:
+                ws.clear()
+            except Exception:
+                pass
+            ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws, file_id
+    except Exception:
+        return None, None
+
+def _activity_log_append(drive, gsclient, *, user_email: str, event: str,
+                         site_url: str = "", analysis_kind: str = "",
+                         sheet_id: str = "", sheet_name: str = "", sheet_url: str = "",
+                         gsc_account: str = "", notes: str = "") -> None:
+    try:
+        ws, _ = _get_or_create_activity_log_ws(drive, gsclient)
+        if not ws:
+            return
+        ts = datetime.now().isoformat(timespec="seconds")
+        row = [ts, user_email or "", event or "", site_url or "", analysis_kind or "",
+               sheet_id or "", sheet_name or "", sheet_url or "", gsc_account or "", notes or ""]
+        # 👇 Apendea SIEMPRE una nueva fila desde la columna A
+        ws.append_row(row, value_input_option="USER_ENTERED")
+    except Exception:
+        # No bloquear nunca el flujo por el log
+        pass
+# ============ /ACTIVITY LOG ============
+
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     try:
         creds_dest = Credentials(**st.session_state["creds_dest"])
@@ -1266,10 +1043,13 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
             ''',
             unsafe_allow_html=True
         )
-        # 👇 REGISTRO: login principal (solo una vez por sesión)
-        if AL_ENABLED and not st.session_state.get("_logged_login_main"):
-            _al_login_main(drive_service, gs_client, user_email=email_txt, user_name=(st.session_state.get("_google_identity") or {}).get("name"))
-            st.session_state["_logged_login_main"] = True
+        # 📝 Log: login (Drive/Sheets listo)
+        _activity_log_append(
+            drive_service, gs_client,
+            user_email=email_txt, event="login",
+            gsc_account=st.session_state.get("src_account_label") or "",
+            notes="OIDC + Drive/Sheets listos"
+        )
     except Exception as e:
         st.error(f"No pude inicializar Drive/Sheets con la cuenta PERSONAL: {e}")
         st.stop()
@@ -1314,11 +1094,7 @@ def _norm(s: str | None) -> str:
 sc_service = None
 
 st.subheader("Selecciona la cuenta con acceso a Search Console")
-
-# Orden y texto de opciones: Acceso, Acceso Medios, Acceso en cuenta personal de Nomadic
 account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
-
-# Default: usar lo que esté en sesión; si no, la personal de Nomadic
 _default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
 default_idx = account_options.index(_default_label) if _default_label in account_options else 2
 
@@ -1328,7 +1104,6 @@ sc_choice = st.selectbox(
 )
 
 if sc_choice == "Acceso en cuenta personal de Nomadic":
-    # Usar credenciales del Paso 0 (creds_dest) SI tienen el scope de GSC
     creds_dest_dict = st.session_state.get("creds_dest")
     if not creds_dest_dict:
         st.error("No encuentro la sesión principal. Volvé a iniciar sesión en el Paso 0.")
@@ -1339,7 +1114,6 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         c1, c2 = st.columns([1,3])
         with c1:
             if st.button("➕ Añadir permiso de Search Console", key="btn_add_gsc_scope"):
-                # Forzamos re-autorización del Paso 0 con scopes actualizados
                 for k in ("oauth_oidc", "_google_identity", "creds_dest", "step1_done"):
                     st.session_state.pop(k, None)
                 st.experimental_set_query_params()
@@ -1348,11 +1122,10 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
             st.caption("Se reabrirá el Paso 0 pidiendo también el permiso de Search Console.")
         st.stop()
 
-    # OK: construir cliente GSC con la cuenta personal
     try:
         creds_src = Credentials(**creds_dest_dict)
         sc_service = ensure_sc_client(creds_src)
-        st.session_state["creds_src"] = creds_dest_dict  # para reutilizar lógica downstream
+        st.session_state["creds_src"] = creds_dest_dict
         st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
         st.session_state["step3_done"] = True
         st.markdown(
@@ -1364,22 +1137,13 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
             ''',
             unsafe_allow_html=True
         )
-        # 👇 REGISTRO: login SC (una vez)
-        if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
-            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-            _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label="Acceso en cuenta personal de Nomadic")
-            st.session_state["_logged_login_sc"] = True
     except Exception as e:
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
-
 else:
-    # Modo Acceso / Acceso Medios
-    wanted_norm = _norm(sc_choice)  # "acceso" o "accesomedios"
+    wanted_norm = _norm(sc_choice)
     have_label = st.session_state.get("src_account_label")
     have_norm = _norm(have_label)
-
-    # Si veníamos usando la personal o no hay sesión previa, pedimos login de Acceso/Medios
     need_new_auth = (
         not st.session_state.get("step3_done")
         or (have_norm != wanted_norm)
@@ -1387,16 +1151,14 @@ else:
     )
 
     if need_new_auth:
-        # Limpiar credenciales previas de otra cuenta
         for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        creds_src_obj = pick_source_oauth()  # UI de login SOLO aquí
+        creds_src_obj = pick_source_oauth()
         if not creds_src_obj:
             st.stop()
 
-        # Validar que el usuario eligió la cuenta correcta dentro del picker
         picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
         picked_norm = _norm(picked_label)
 
@@ -1408,7 +1170,6 @@ else:
                 st.rerun()
             st.stop()
 
-        # OK: guardar y continuar
         st.session_state["creds_src"] = {
             "token": creds_src_obj.token,
             "refresh_token": getattr(creds_src_obj, "refresh_token", None),
@@ -1419,11 +1180,6 @@ else:
         }
         st.session_state["src_account_label"] = picked_label
         st.session_state["step3_done"] = True
-        # 👇 REGISTRO: login SC (una vez)
-        if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
-            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-            _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label=picked_label)
-            st.session_state["_logged_login_sc"] = True
         st.rerun()
     else:
         try:
@@ -1439,11 +1195,6 @@ else:
                 ''',
                 unsafe_allow_html=True
             )
-            # Ya estaba logueado; si no quedó marcado, marcamos
-            if AL_ENABLED and not st.session_state.get("_logged_login_sc"):
-                email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-                _al_login_sc(drive_service, gs_client, user_email=email_txt, account_label=src_label)
-                st.session_state["_logged_login_sc"] = True
         except Exception as e:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
@@ -1453,7 +1204,7 @@ site_url = pick_site(sc_service)
 include_auditoria = run_traffic_audit is not None
 analisis = pick_analysis(include_auditoria)
 
-# ===== Helper para mostrar errores de Google de forma legible =====
+# ===== Helper para mostrar errores de Google =====
 def _show_google_error(e, where: str = ""):
     status = None
     try:
@@ -1537,48 +1288,8 @@ def run_with_indicator(titulo: str, fn, *args, **kwargs):
                 st.exception(e)
                 st.stop()
 
-# --- Helpers: medio desde sc-domain y renombrado del Sheet ---
-def _extract_medio_name(site_url: str | None) -> str | None:
-    if not site_url:
-        return None
-    s = site_url.strip()
-    if s.lower().startswith("sc-domain:"):
-        # toma lo que sigue a los ":"
-        return s.split(":", 1)[1].strip() or None
-    return None
-
-def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
-    """Si site_url es sc-domain:*, antepone '<medio> - ' al nombre del archivo en Drive,
-    evitando duplicar guiones y respetando si ya está prefijado.
-    """
-    medio = _extract_medio_name(site_url)
-    if not medio:
-        return
-    medio = medio.strip().strip("-–—").strip()
-
-    try:
-        meta = drive_service.files().get(fileId=file_id, fields="name").execute()
-        current = (meta.get("name") or "").strip()
-
-        # 1) ¿Ya está prefijado con "<medio> - " (cualquier variante de guion)?
-        if re.match(rf"^{re.escape(medio)}\s*[-–—]\s+", current, flags=re.IGNORECASE):
-            return
-
-        # 2) Quitar guiones/espacios iniciales para evitar "medio - - nombre"
-        current_no_lead = re.sub(r"^\s*[-–—]+\s*", "", current)
-
-        # 3) Prefijar
-        new_name = f"{medio} - {current_no_lead}".strip()
-
-        # 4) Actualizar en Drive
-        drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
-    except Exception:
-        # No bloquear el flujo si falla el rename
-        pass
-
 # --- Resumen con IA (prompts por tipo + fallback) ---
 def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    # Toggle por defecto DESACTIVADO + clave única para evitar duplicados
     st.divider()
     use_ai = st.toggle(
         "Generar resumen con IA (Nomadic Bot 🤖)",
@@ -1656,7 +1367,6 @@ if analisis == "4":
     else:
         params = params_for_core_update()
 
-        # 🔎 Test de prompt (solo en modo debug)
         if st.session_state.get("DEBUG"):
             with st.expander("🔎 Test de prompt (Core Update)", expanded=True):
                 st.caption("Comprobá qué prompt se aplicará antes de ejecutar el análisis.")
@@ -1664,7 +1374,6 @@ if analisis == "4":
                     _render_prompt_probe(kind="core", force_key="core")
                 else:
                     st.caption(f"Fuente actual de prompts: {_AI_SRC}")
-
                 with st.expander("🧪 Diagnóstico Gemini", expanded=False):
                     if st.button("Probar SDK Gemini", key="probe_gemini"):
                         ok, msgs = _gemini_healthcheck()
@@ -1675,7 +1384,6 @@ if analisis == "4":
                             st.error("Gemini no está listo: se caerá al fallback.")
 
         if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
-            # Inyectar filtros avanzados para el job (si existen)
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
@@ -1687,26 +1395,32 @@ if analisis == "4":
                 run_core_update, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
-            # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-
-            # 👇 REGISTRO: ejecución
-            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-            _al_analysis(
-                drive_service, gs_client, user_email=email_txt,
-                analysis_key="core",
-                site_url=site_url, result_sheet_id=sid,
-                extra={
-                    "params": list(map(lambda x: (str(x) if x is not None else None), params)),
-                    "adv_filters": st.session_state.get("core_filters_payload")
-                }
-            )
 
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # 📝 Log: análisis Core Update
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", "")
+                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            _activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis",
+                site_url=site_url,
+                analysis_kind="Core Update",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"params={params!r}"
+            )
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
@@ -1723,23 +1437,32 @@ elif analisis == "5":
                 run_evergreen, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
-            # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-
-            # 👇 REGISTRO: ejecución
-            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-            _al_analysis(
-                drive_service, gs_client, user_email=email_txt,
-                analysis_key="evergreen",
-                site_url=site_url, result_sheet_id=sid,
-                extra={"params": list(map(lambda x: (str(x) if x is not None else None), params))}
-            )
 
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # 📝 Log: análisis Evergreen
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", "")
+                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            _activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis",
+                site_url=site_url,
+                analysis_kind="Evergreen",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"params={params!r}"
+            )
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
@@ -1756,23 +1479,32 @@ elif analisis == "6":
                 run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
                 st.session_state.get("dest_folder_id")
             )
-            # Renombrado si el sitio es sc-domain:*
             _maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-
-            # 👇 REGISTRO: ejecución
-            email_txt = (_me or {}).get("emailAddress") or "email desconocido"
-            _al_analysis(
-                drive_service, gs_client, user_email=email_txt,
-                analysis_key="audit",
-                site_url=site_url, result_sheet_id=sid,
-                extra={"params": list(map(lambda x: (str(x) if x is not None else None), params))}
-            )
 
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+            # 📝 Log: análisis Auditoría
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", "")
+                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            _activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis",
+                site_url=site_url,
+                analysis_kind="Auditoría",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"params={params!r}"
+            )
 
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
@@ -1784,7 +1516,6 @@ else:
 # --- Panel persistente para generar resumen del último informe sin rerun del análisis ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     st.divider()
-    # Renombrado solicitado
     st.subheader("📄 Resumen del análisis")
     st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
     _gemini_summary(
