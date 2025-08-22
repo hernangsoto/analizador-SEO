@@ -63,19 +63,45 @@ apply_page_style(
     band_height_px=110,
 )
 
-# Logo fijo (siempre visible)
-def _render_nomadic_logo_always():
+# --- Logo Nomadic siempre visible (CSS sobre el header) ---
+def pin_nomadic_logo_css(logo_url: str):
+    # Pintamos el logo como pseudo-elemento del header para que no se pierda en los reruns
     st.markdown(
         f"""
-        <div id="nomadic-logo-fixed"
-             style="position:fixed; top:14px; left:40px; z-index:4000; pointer-events:none;"
-             aria-hidden="true">
-            <img src="{LOGO_URL}" alt="Nomadic" height="27" style="display:block;"/>
-        </div>
+        <style>
+        header[data-testid="stHeader"] {{
+            position: sticky !important;
+            top: 0;
+            z-index: 1500 !important;
+        }}
+        header[data-testid="stHeader"]::before {{
+            content: "";
+            position: fixed;
+            left: 40px;
+            top: 14px;
+            width: 140px;
+            height: 27px;
+            background-image: url('{logo_url}');
+            background-repeat: no-repeat;
+            background-size: contain;
+            pointer-events: none;
+            z-index: 4000;
+        }}
+        @media (max-width: 600px) {{
+            header[data-testid="stHeader"]::before {{
+                left: 16px;
+                top: 12px;
+                width: 120px;
+                height: 24px;
+            }}
+        }}
+        </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-_render_nomadic_logo_always()
+
+# Llamada (dejala después de apply_page_style(...) para que estas reglas tengan prioridad)
+pin_nomadic_logo_css(LOGO_URL)
 
 # ====== Estilos globales ======
 st.markdown("""
