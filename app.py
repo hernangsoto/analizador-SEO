@@ -740,7 +740,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
-        "2. Análisis de tráfico general (🚧 próximamente)",
+               "2. Análisis de tráfico general (🚧 próximamente)",
         "3. Análisis de secciones (🚧 próximamente)",
         "4. Análisis de impacto de Core Update ✅",
         "5. Análisis de tráfico evergreen ✅",
