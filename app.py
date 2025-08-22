@@ -1,4 +1,3 @@
-# app.py
 from __future__ import annotations
 
 # --- Permisos OAuth en localhost + tolerancia de scope
@@ -132,6 +131,9 @@ run_core_update = getattr(_ext, "run_core_update", None) if _ext else None
 run_evergreen = getattr(_ext, "run_evergreen", None) if _ext else None
 run_traffic_audit = getattr(_ext, "run_traffic_audit", None) if _ext else None
 
+# -- NUEVO runner: Análisis de Nombres (KG + Wikipedia)
+run_names_analysis = getattr(_ext, "run_names_analysis", None) if _ext else None
+
 if run_core_update is None or run_evergreen is None:
     try:
         from modules.analysis import run_core_update as _rcu, run_evergreen as _rev  # type: ignore
@@ -146,6 +148,18 @@ if run_traffic_audit is None:
         run_traffic_audit = _rta
     except Exception:
         pass
+
+# Intento de import para Nombres desde repo privado y fallback local
+if run_names_analysis is None:
+    try:
+        from seo_analisis_ext.analysis_names import run_names_analysis as _rna  # type: ignore
+        run_names_analysis = _rna
+    except Exception:
+        try:
+            from modules.analysis_names import run_names_analysis as _rna  # type: ignore
+            run_names_analysis = _rna
+        except Exception:
+            run_names_analysis = None
 
 USING_EXT = bool(_ext)
 
@@ -680,7 +694,7 @@ def pick_site(sc_service):
     site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
     return site_url
 
-def pick_analysis(include_auditoria: bool):
+def pick_analysis(include_auditoria: bool, include_names: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
@@ -691,10 +705,14 @@ def pick_analysis(include_auditoria: bool):
     ]
     if include_auditoria:
         opciones.append("6. Auditoría de tráfico ✅")
+    if include_names:
+        opciones.append("7. Análisis de Nombres (KG + Wikipedia) ✅")
+
     key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
+    if key.startswith("7."): return "7"
     return "0"
 
 LAG_DAYS_DEFAULT = 3
@@ -807,6 +825,88 @@ def params_for_auditoria():
     lag_days = st.number_input("Lag de datos (para evitar días incompletos)", 0, 7, LAG_DAYS_DEFAULT, key="aud_lag")
     return (modo, tipo, seccion, alcance, country, lag_days, custom_days, periods_back)
 
+# ======== Parámetros (Nombres KG + Wikipedia) ========
+def _load_names_from_csv(uploaded_file) -> pd.DataFrame | None:
+    if not uploaded_file:
+        return None
+    try:
+        df = pd.read_csv(uploaded_file)
+        return df if not df.empty else None
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        st.error("No pude leer el CSV. Asegurate de que esté en UTF-8 y separado por comas.")
+        return None
+
+def params_for_names():
+    st.markdown("#### Parámetros (Nombres – KG + Wikipedia)")
+    st.caption("Subí un CSV con una columna de nombres **o** pegá nombres (uno por línea).")
+
+    up = st.file_uploader("CSV de nombres (UTF-8). Si tiene varias columnas, elegí la que corresponde:", type=["csv"], key="names_csv")
+    df = _load_names_from_csv(up)
+    names_from_csv = []
+    csv_col = None
+    if df is not None:
+        # Elegir columna candidata (nombre / name / primera)
+        cols = list(df.columns)
+        default_idx = 0
+        for i, c in enumerate(cols):
+            cl = str(c).strip().lower()
+            if cl in ("nombre", "nombres", "name", "names"):
+                default_idx = i; break
+        csv_col = st.selectbox("Columna con los nombres:", cols, index=default_idx, key="names_csv_col")
+        if csv_col:
+            try:
+                names_from_csv = [str(x).strip() for x in df[csv_col].tolist() if str(x).strip()]
+            except Exception:
+                names_from_csv = []
+        with st.expander("Vista previa del CSV (primeras 50 filas)"):
+            st.dataframe(df.head(50), use_container_width=True)
+
+    names_text = st.text_area("O pegá nombres (uno por línea):", value="", height=160, key="names_textarea")
+    names_from_text = [ln.strip() for ln in names_text.splitlines() if ln.strip()]
+
+    # Unión (prioridad CSV + pegados)
+    seen = set()
+    merged = []
+    for src in (names_from_csv, names_from_text):
+        for n in src:
+            if n not in seen:
+                seen.add(n)
+                merged.append(n)
+
+    st.caption(f"Total de nombres detectados: **{len(merged)}**")
+
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        lang = st.selectbox("Idioma (para KG/Wiki)", ["es","en","pt","fr","it","de"], index=0, key="names_lang")
+    with c2:
+        strategy = st.selectbox("Estrategia", ["Balance (KG + Wikipedia)"], index=0, key="names_strategy")
+    with c3:
+        dedup = st.checkbox("Eliminar duplicados", value=True, key="names_dedup")
+
+    if dedup:
+        # ya deduplicamos arriba manteniendo orden
+        pass
+
+    # API key de KG (puede venir de secrets o env)
+    kg_key = (
+        st.secrets.get("kg_api_key")
+        or (st.secrets.get("kg", {}).get("api_key") if "kg" in st.secrets else None)
+        or os.getenv("KG_API_KEY")
+    )
+    if not kg_key:
+        st.info("ℹ️ Podés configurar `kg_api_key` en *Secrets* o `KG_API_KEY` como variable de entorno. Sin eso, el análisis usará solo Wikipedia.")
+
+    return {
+        "names": merged,
+        "lang": lang,
+        "strategy": "balance",
+        "kg_api_key": kg_key or "",
+    }
+
 # ============== App ==============
 
 # Detectar pantalla de logout por query param
@@ -913,7 +1013,7 @@ if not st.session_state["step1_done"]:
     }
     st.rerun()
 
-# Si ya está completo, clientes + resumen
+# Si ya está completo, clientes + resumen + log login
 drive_service = None
 gs_client = None
 _me = None
@@ -985,21 +1085,18 @@ def _get_or_create_activity_log_ws(drive, gsclient):
         try:
             ws = sh.worksheet(ws_name)
         except Exception:
-            # usa la sheet1 si existe, si no crea
             try:
                 ws = sh.sheet1
                 ws.update_title(ws_name)
             except Exception:
                 ws = sh.add_worksheet(title=ws_name, rows=1000, cols=20)
 
-        # Encabezados en A1 si no están
         headers = ["timestamp", "user_email", "event", "site_url", "analysis_kind", "sheet_id", "sheet_name", "sheet_url", "gsc_account", "notes"]
         try:
             top_left = ws.acell("A1").value
         except Exception:
             top_left = None
         if (top_left or "").strip().lower() != "timestamp":
-            # Si la hoja está vacía o los headers no coinciden, insertamos encabezados en la fila 1
             try:
                 ws.clear()
             except Exception:
@@ -1020,10 +1117,8 @@ def _activity_log_append(drive, gsclient, *, user_email: str, event: str,
         ts = datetime.now().isoformat(timespec="seconds")
         row = [ts, user_email or "", event or "", site_url or "", analysis_kind or "",
                sheet_id or "", sheet_name or "", sheet_url or "", gsc_account or "", notes or ""]
-        # 👇 Apendea SIEMPRE una nueva fila desde la columna A
         ws.append_row(row, value_input_option="USER_ENTERED")
     except Exception:
-        # No bloquear nunca el flujo por el log
         pass
 # ============ /ACTIVITY LOG ============
 
@@ -1079,6 +1174,84 @@ else:
         ''',
         unsafe_allow_html=True
     )
+
+# ========== NUEVO ORDEN: Elegir análisis ANTES de Search Console ==========
+include_auditoria = run_traffic_audit is not None
+analisis = pick_analysis(include_auditoria, include_names=True)
+
+# ========== Rama especial: Análisis de Nombres (no requiere GSC) ==========
+if analisis == "7":
+    if run_names_analysis is None:
+        st.warning("Este despliegue no incluye `run_names_analysis` (analysis_names.py). Subilo al repo privado o a modules/ y recargá.")
+    else:
+        params_names = params_for_names()
+        total = len(params_names.get("names") or [])
+        if total == 0:
+            st.info("Cargá un CSV o pegá al menos un nombre para habilitar la ejecución.")
+        else:
+            if st.button("🔎 Ejecutar Análisis de Nombres (KG + Wikipedia)", type="primary"):
+                sid = None
+                # Ejecutar
+                sid = run_with_indicator(
+                    "Procesando Análisis de Nombres (KG + Wikipedia)",
+                    run_names_analysis,
+                    drive_service, gs_client,
+                    params_names,
+                    st.session_state.get("dest_folder_id")
+                )
+
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+                # 📝 Log
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", "")
+                    sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""
+                    sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+                _activity_log_append(
+                    drive_service, gs_client,
+                    user_email=(_me or {}).get("emailAddress") or "",
+                    event="analysis",
+                    site_url="",  # no aplica
+                    analysis_kind="Nombres (KG+Wikipedia)",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account="",  # no aplica
+                    notes=f"lang={params_names.get('lang')}, n={total}"
+                )
+
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "names"
+                _gemini_summary(sid, kind="names", widget_suffix="after_run")
+
+    # Panel persistente de resumen si ya hay algo
+    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
+        st.divider()
+        st.subheader("📄 Resumen del análisis")
+        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
+        _gemini_summary(
+            st.session_state["last_file_id"],
+            kind=st.session_state["last_file_kind"],
+            widget_suffix="panel"
+        )
+
+    # Fin rama "7" (evita renderizar GSC y sitio)
+    if True:
+        # Debug opcional (solo si está activo)
+        if st.session_state.get("DEBUG"):
+            st.write(
+                "¿Gemini listo?",
+                "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+            )
+        st.stop()
+
+# ======== Resto de análisis (sí requieren GSC) ========
 
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 def _has_gsc_scope(scopes: list[str] | None) -> bool:
@@ -1201,8 +1374,6 @@ else:
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
-include_auditoria = run_traffic_audit is not None
-analisis = pick_analysis(include_auditoria)
 
 # ===== Helper para mostrar errores de Google =====
 def _show_google_error(e, where: str = ""):
@@ -1360,7 +1531,7 @@ def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, wi
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
 
-# ============== Flujos por análisis ==============
+# ============== Flujos por análisis que requieren GSC ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
