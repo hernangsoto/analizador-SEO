@@ -968,6 +968,266 @@ def params_for_names():
         "global_terms": global_terms or "",
     }
 
+# ============ ACTIVITY LOG (helpers) ============
+def _extract_medio_name(site_url: str | None) -> str | None:
+    if not site_url:
+        return None
+    s = site_url.strip()
+    if s.lower().startswith("sc-domain:"):
+        return s.split(":", 1)[1].strip() or None
+    return None
+
+def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
+    medio = _extract_medio_name(site_url)
+    if not medio:
+        return
+    medio = medio.strip().strip("-–—").strip()
+    try:
+        meta = drive_service.files().get(fileId=file_id, fields="name").execute()
+        current = (meta.get("name") or "").strip()
+        if re.match(rf"^{re.escape(medio)}\s*[-–—]\s+", current, flags=re.IGNORECASE):
+            return
+        current_no_lead = re.sub(r"^\s*[-–—]+\s*", "", current)
+        new_name = f"{medio} - {current_no_lead}".strip()
+        drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    except Exception:
+        pass
+
+def _get_activity_log_config():
+    cfg = st.secrets.get("activity_log", {}) or {}
+    return {
+        "title": cfg.get("title") or "Nomadic SEO – Activity Log",
+        "worksheet": cfg.get("worksheet") or "Log",
+        "file_id": cfg.get("file_id") or None,
+        "folder_id": cfg.get("folder_id") or st.session_state.get("dest_folder_id"),
+    }
+
+def _get_or_create_activity_log_ws(drive, gsclient):
+    cfg = _get_activity_log_config()
+    file_id = cfg["file_id"]
+    title = cfg["title"]
+    ws_name = cfg["worksheet"]
+    folder_id = cfg["folder_id"]
+
+    try:
+        if file_id:
+            sh = gsclient.open_by_key(file_id)
+        else:
+            q = f"name = '{title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+            res = drive.files().list(
+                q=q, spaces="drive",
+                fields="files(id,name)",
+                includeItemsFromAllDrives=True, supportsAllDrives=True
+            ).execute()
+            files = res.get("files", [])
+            if files:
+                file_id = files[0]["id"]
+            else:
+                body = {"name": title, "mimeType": "application/vnd.google-apps.spreadsheet"}
+                if folder_id:
+                    body["parents"] = [folder_id]
+                new_file = drive.files().create(
+                    body=body, fields="id", supportsAllDrives=True
+                ).execute()
+                file_id = new_file["id"]
+        sh = gsclient.open_by_key(file_id)
+
+        try:
+            ws = sh.worksheet(ws_name)
+        except Exception:
+            try:
+                ws = sh.sheet1
+                ws.update_title(ws_name)
+            except Exception:
+                ws = sh.add_worksheet(title=ws_name, rows=1000, cols=20)
+
+        headers = ["timestamp", "user_email", "event", "site_url", "analysis_kind", "sheet_id", "sheet_name", "sheet_url", "gsc_account", "notes"]
+        try:
+            top_left = ws.acell("A1").value
+        except Exception:
+            top_left = None
+        if (top_left or "").strip().lower() != "timestamp":
+            try:
+                ws.clear()
+            except Exception:
+                pass
+            ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws, file_id
+    except Exception:
+        return None, None
+
+def _activity_log_append(drive, gsclient, *, user_email: str, event: str,
+                         site_url: str = "", analysis_kind: str = "",
+                         sheet_id: str = "", sheet_name: str = "", sheet_url: str = "",
+                         gsc_account: str = "", notes: str = "") -> None:
+    try:
+        ws, _ = _get_or_create_activity_log_ws(drive, gsclient)
+        if not ws:
+            return
+        ts = datetime.now().isoformat(timespec="seconds")
+        row = [ts, user_email or "", event or "", site_url or "", analysis_kind or "",
+               sheet_id or "", sheet_name or "", sheet_url or "", gsc_account or "", notes or ""]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+# ============ /ACTIVITY LOG ============
+
+# ===== Helper para mostrar errores de Google (MOVIDO ARRIBA para uso temprano) =====
+def _show_google_error(e, where: str = ""):
+    status = None
+    try:
+        status = getattr(getattr(e, "resp", None), "status", None)
+    except Exception:
+        pass
+
+    raw = ""
+    try:
+        raw = getattr(e, "response", None).text
+    except Exception:
+        pass
+    if not raw:
+        try:
+            raw_bytes = getattr(e, "content", None)
+            if raw_bytes:
+                raw = raw_bytes.decode("utf-8", "ignore")
+        except Exception:
+            pass
+    if not raw:
+        raw = str(e)
+
+    raw_l = raw.lower()
+    looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
+    is_5xx = False
+    try:
+        is_5xx = bool(status) and int(status) >= 500
+    except Exception:
+        pass
+
+    if looks_html or is_5xx:
+        st.error(
+            f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
+            "Suele resolverse reintentando en breve. Si persiste, probá más tarde."
+        )
+        with st.expander("Detalle técnico del error"):
+            st.code(raw, language="html")
+        return
+
+    try:
+        data = json.loads(raw)
+        msg = (data.get("error") or {}).get("message") or raw
+        st.error(f"Google API error{f' en {where}' if where else ''}: {msg}")
+        st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
+    except Exception:
+        st.error(f"Google API error{f' en {where}' if where else ''}:")
+        st.code(raw)
+
+# --- Ejecutar (MOVIDO ARRIBA para estar disponible en la rama de Nombres) ---
+def run_with_indicator(titulo: str, fn, *args, **kwargs):
+    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
+    if hasattr(st, "status"):
+        with st.status(mensaje, expanded=True) as status:
+            try:
+                res = fn(*args, **kwargs)
+                status.update(label="✅ Informe generado", state="complete")
+                return res
+            except GspreadAPIError as e:
+                status.update(label="❌ Error de Google Sheets", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                status.update(label="❌ Error de Google API", state="error")
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                status.update(label="❌ Error inesperado", state="error")
+                st.exception(e)
+                st.stop()
+    else:
+        with st.spinner(mensaje):
+            try:
+                return fn(*args, **kwargs)
+            except GspreadAPIError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except HttpError as e:
+                _show_google_error(e, where=titulo)
+                st.stop()
+            except Exception as e:
+                st.exception(e)
+                st.stop()
+
+# --- Resumen con IA (MOVIDO ARRIBA: lo invocamos en la rama de Nombres) ---
+def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
+    st.divider()
+    use_ai = st.toggle(
+        "Generar resumen con IA (Nomadic Bot 🤖)",
+        value=False,
+        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
+        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
+    )
+    if not use_ai:
+        return
+
+    if _AI_IMPORT_ERR:
+        st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
+    elif _AI_SRC != "none":
+        st.caption(f"Fuente de prompts: **{_AI_SRC}**")
+
+    if not is_gemini_configured():
+        st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
+        return
+
+    def _looks_unsupported(md: str) -> bool:
+        if not isinstance(md, str):
+            return False
+        low = md.lower()
+        needles = [
+            "por ahora solo está implementado el resumen para auditoría de tráfico",
+            "solo está implementado el resumen para auditoría",
+            "only the traffic audit summary is implemented",
+            "only audit summary is implemented",
+            "aún no implementado",
+            "not yet implemented",
+            "tipo aun no es soportado",
+        ]
+        return any(n in low for n in needles)
+
+    prompt_used = None
+    prompt_key = force_prompt_key or kind
+    prompt_source = "fallback"
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
+            prompt_used = _PROMPTS[prompt_key]
+            prompt_source = f"{_AI_SRC}:{prompt_key}"
+    except Exception:
+        pass
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
+            with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
+                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
+        else:
+            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+
+        if _looks_unsupported(md):
+            with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
+                md = summarize_sheet_auto(gs_client, sid, kind=kind)
+
+        st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
+        render_summary_box(md)
+
+    except Exception as e:
+        st.error(
+            f"Falló el resumen con prompt específico **({prompt_source})**; "
+            f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
+        )
+        with st.spinner("🤖 Usando fallback…"):
+            md = summarize_sheet_auto(gs_client, sid, kind=kind)
+        st.caption("🧠 Prompt en uso: **fallback:auto**")
+        render_summary_box(md)
+
 # ============== App ==============
 
 # Detectar pantalla de logout por query param
@@ -1078,110 +1338,6 @@ if not st.session_state["step1_done"]:
 drive_service = None
 gs_client = None
 _me = None
-
-# ============ ACTIVITY LOG (helpers) ============
-def _extract_medio_name(site_url: str | None) -> str | None:
-    if not site_url:
-        return None
-    s = site_url.strip()
-    if s.lower().startswith("sc-domain:"):
-        return s.split(":", 1)[1].strip() or None
-    return None
-
-def _maybe_prefix_sheet_name_with_medio(drive_service, file_id: str, site_url: str):
-    medio = _extract_medio_name(site_url)
-    if not medio:
-        return
-    medio = medio.strip().strip("-–—").strip()
-    try:
-        meta = drive_service.files().get(fileId=file_id, fields="name").execute()
-        current = (meta.get("name") or "").strip()
-        if re.match(rf"^{re.escape(medio)}\s*[-–—]\s+", current, flags=re.IGNORECASE):
-            return
-        current_no_lead = re.sub(r"^\s*[-–—]+\s*", "", current)
-        new_name = f"{medio} - {current_no_lead}".strip()
-        drive_service.files().update(fileId=file_id, body={"name": new_name}).execute()
-    except Exception:
-        pass
-
-def _get_activity_log_config():
-    cfg = st.secrets.get("activity_log", {}) or {}
-    return {
-        "title": cfg.get("title") or "Nomadic SEO – Activity Log",
-        "worksheet": cfg.get("worksheet") or "Log",
-        "file_id": cfg.get("file_id") or None,
-        "folder_id": cfg.get("folder_id") or st.session_state.get("dest_folder_id"),
-    }
-
-def _get_or_create_activity_log_ws(drive, gsclient):
-    cfg = _get_activity_log_config()
-    file_id = cfg["file_id"]
-    title = cfg["title"]
-    ws_name = cfg["worksheet"]
-    folder_id = cfg["folder_id"]
-
-    try:
-        if file_id:
-            sh = gsclient.open_by_key(file_id)
-        else:
-            q = f"name = '{title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-            res = drive.files().list(
-                q=q, spaces="drive",
-                fields="files(id,name)",
-                includeItemsFromAllDrives=True, supportsAllDrives=True
-            ).execute()
-            files = res.get("files", [])
-            if files:
-                file_id = files[0]["id"]
-            else:
-                body = {"name": title, "mimeType": "application/vnd.google-apps.spreadsheet"}
-                if folder_id:
-                    body["parents"] = [folder_id]
-                new_file = drive.files().create(
-                    body=body, fields="id", supportsAllDrives=True
-                ).execute()
-                file_id = new_file["id"]
-        sh = gsclient.open_by_key(file_id)
-
-        try:
-            ws = sh.worksheet(ws_name)
-        except Exception:
-            try:
-                ws = sh.sheet1
-                ws.update_title(ws_name)
-            except Exception:
-                ws = sh.add_worksheet(title=ws_name, rows=1000, cols=20)
-
-        headers = ["timestamp", "user_email", "event", "site_url", "analysis_kind", "sheet_id", "sheet_name", "sheet_url", "gsc_account", "notes"]
-        try:
-            top_left = ws.acell("A1").value
-        except Exception:
-            top_left = None
-        if (top_left or "").strip().lower() != "timestamp":
-            try:
-                ws.clear()
-            except Exception:
-                pass
-            ws.append_row(headers, value_input_option="USER_ENTERED")
-        return ws, file_id
-    except Exception:
-        return None, None
-
-def _activity_log_append(drive, gsclient, *, user_email: str, event: str,
-                         site_url: str = "", analysis_kind: str = "",
-                         sheet_id: str = "", sheet_name: str = "", sheet_url: str = "",
-                         gsc_account: str = "", notes: str = "") -> None:
-    try:
-        ws, _ = _get_or_create_activity_log_ws(drive, gsclient)
-        if not ws:
-            return
-        ts = datetime.now().isoformat(timespec="seconds")
-        row = [ts, user_email or "", event or "", site_url or "", analysis_kind or "",
-               sheet_id or "", sheet_name or "", sheet_url or "", gsc_account or "", notes or ""]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-    except Exception:
-        pass
-# ============ /ACTIVITY LOG ============
 
 if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
     try:
@@ -1435,162 +1591,6 @@ else:
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 site_url = pick_site(sc_service)
-
-# ===== Helper para mostrar errores de Google =====
-def _show_google_error(e, where: str = ""):
-    status = None
-    try:
-        status = getattr(getattr(e, "resp", None), "status", None)
-    except Exception:
-        pass
-
-    raw = ""
-    try:
-        raw = getattr(e, "response", None).text
-    except Exception:
-        pass
-    if not raw:
-        try:
-            raw_bytes = getattr(e, "content", None)
-            if raw_bytes:
-                raw = raw_bytes.decode("utf-8", "ignore")
-        except Exception:
-            pass
-    if not raw:
-        raw = str(e)
-
-    raw_l = raw.lower()
-    looks_html = ("<html" in raw_l) or ("<!doctype html" in raw_l)
-    is_5xx = False
-    try:
-        is_5xx = bool(status) and int(status) >= 500
-    except Exception:
-        pass
-
-    if looks_html or is_5xx:
-        st.error(
-            f"Google devolvió un **{status or '5xx'}** temporal{f' en {where}' if where else ''}. "
-            "Suele resolverse reintentando en breve. Si persiste, probá más tarde."
-        )
-        with st.expander("Detalle técnico del error"):
-            st.code(raw, language="html")
-        return
-
-    try:
-        data = json.loads(raw)
-        msg = (data.get("error") or {}).get("message") or raw
-        st.error(f"Google API error{f' en {where}' if where else ''}: {msg}")
-        st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
-    except Exception:
-        st.error(f"Google API error{f' en {where}' if where else ''}:")
-        st.code(raw)
-
-# --- Ejecutar ---
-def run_with_indicator(titulo: str, fn, *args, **kwargs):
-    mensaje = f"⏳ {titulo}… Esto puede tardar varios minutos."
-    if hasattr(st, "status"):
-        with st.status(mensaje, expanded=True) as status:
-            try:
-                res = fn(*args, **kwargs)
-                status.update(label="✅ Informe generado", state="complete")
-                return res
-            except GspreadAPIError as e:
-                status.update(label="❌ Error de Google Sheets", state="error")
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except HttpError as e:
-                status.update(label="❌ Error de Google API", state="error")
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except Exception as e:
-                status.update(label="❌ Error inesperado", state="error")
-                st.exception(e)
-                st.stop()
-    else:
-        with st.spinner(mensaje):
-            try:
-                return fn(*args, **kwargs)
-            except GspreadAPIError as e:
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except HttpError as e:
-                _show_google_error(e, where=titulo)
-                st.stop()
-            except Exception as e:
-                st.exception(e)
-                st.stop()
-
-# --- Resumen con IA (prompts por tipo + fallback) ---
-def _gemini_summary(sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    st.divider()
-    use_ai = st.toggle(
-        "Generar resumen con IA (Nomadic Bot 🤖)",
-        value=False,
-        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
-        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
-    )
-    if not use_ai:
-        return
-
-    if _AI_IMPORT_ERR:
-        st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
-    elif _AI_SRC != "none":
-        st.caption(f"Fuente de prompts: **{_AI_SRC}**")
-
-    if not is_gemini_configured():
-        st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
-        return
-
-    def _looks_unsupported(md: str) -> bool:
-        if not isinstance(md, str):
-            return False
-        low = md.lower()
-        needles = [
-            "por ahora solo está implementado el resumen para auditoría de tráfico",
-            "solo está implementado el resumen para auditoría",
-            "only the traffic audit summary is implemented",
-            "only audit summary is implemented",
-            "aún no implementado",
-            "not yet implemented",
-            "tipo aun no es soportado",
-        ]
-        return any(n in low for n in needles)
-
-    prompt_used = None
-    prompt_key = force_prompt_key or kind
-    prompt_source = "fallback"
-
-    try:
-        if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
-            prompt_used = _PROMPTS[prompt_key]
-            prompt_source = f"{_AI_SRC}:{prompt_key}"
-    except Exception:
-        pass
-
-    try:
-        if _SUMMARIZE_WITH_PROMPT and (prompt_used is not None):
-            with st.spinner(f"🤖 Nomadic Bot está leyendo tu informe (prompt: {prompt_source})…"):
-                md = _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used)
-        else:
-            with st.spinner("🤖 Nomadic Bot está leyendo tu informe (modo automático)…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
-        if _looks_unsupported(md):
-            with st.spinner("🤖 El tipo reportó no estar soportado; reintentando en modo fallback…"):
-                md = summarize_sheet_auto(gs_client, sid, kind=kind)
-
-        st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
-        render_summary_box(md)
-
-    except Exception as e:
-        st.error(
-            f"Falló el resumen con prompt específico **({prompt_source})**; "
-            f"usaré fallback automático.\n\n**Motivo:** {repr(e)}"
-        )
-        with st.spinner("🤖 Usando fallback…"):
-            md = summarize_sheet_auto(gs_client, sid, kind=kind)
-        st.caption("🧠 Prompt en uso: **fallback:auto**")
-        render_summary_box(md)
 
 # ============== Flujos por análisis que requieren GSC ==============
 if analisis == "4":
