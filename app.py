@@ -21,6 +21,18 @@ except Exception:
     # Evita el warning "Already configured" en reruns o multipágina
     pass
 
+# ------------------------------------------------------------------
+# 🔧 Shim de compatibilidad: si otros módulos hacen `from app_constants import ...`
+# y moviste el archivo a modules/app_constants.py, esto evita el ImportError.
+# Debe ir ANTES de importar cualquier modules.app_* que a su vez importe app_constants.
+# ------------------------------------------------------------------
+import sys
+try:
+    import modules.app_constants as _app_constants
+    sys.modules.setdefault("app_constants", _app_constants)
+except Exception:
+    pass
+
 # ====== UI / Branding ======
 from modules.ui import (
     apply_page_style,  # usado dentro de config
