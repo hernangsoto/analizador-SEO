@@ -1,29 +1,42 @@
+# modules/app_utils.py
+from __future__ import annotations
+
 import streamlit as st
-from app_constants import SCOPES_GSC
+
+# Intentamos importar desde la raíz; si no existe, usamos un fallback seguro.
+try:
+    from app_constants import SCOPES_GSC  # type: ignore
+except Exception:
+    SCOPES_GSC = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 def get_qp() -> dict:
+    """Obtiene los query params de forma compatible con distintas versiones de Streamlit."""
     try:
         return dict(st.query_params)
     except Exception:
         return st.experimental_get_query_params()
 
-def clear_qp():
+def clear_qp() -> None:
+    """Limpia los query params de forma compatible con distintas versiones de Streamlit."""
     try:
         st.query_params.clear()
     except Exception:
         st.experimental_set_query_params()
 
 @st.cache_resource
-def oauth_flow_store():
-    # Almacén global de OAuth Flows (compartido entre pestañas/sesiones)
+def oauth_flow_store() -> dict:
+    """Almacén en memoria para objetos Flow (sobrevive a reruns y pestañas)."""
     return {}
 
 def has_gsc_scope(scopes: list[str] | None) -> bool:
+    """Verifica si las credenciales incluyen permisos de Search Console."""
     if not scopes:
         return False
-    needed = set(SCOPES_GSC)
-    return any(s in scopes for s in needed) or "https://www.googleapis.com/auth/webmasters" in (scopes or [])
+    needed = set(SCOPES_GSC + ["https://www.googleapis.com/auth/webmasters"])
+    return any(s in needed for s in scopes)
 
 def norm(s: str | None) -> str:
-    if not s: return ""
+    """Normaliza strings para comparar etiquetas de cuentas."""
+    if not s:
+        return ""
     return "".join(ch for ch in s.lower() if ch.isalnum())
