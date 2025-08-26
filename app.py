@@ -24,20 +24,26 @@ except Exception:
 # ------------------------------------------------------------------
 # 🔧 Shims de compatibilidad:
 # Si moviste archivos a modules/, evita ImportError en módulos que aún
-# hacen imports antiguos (app_constants / app_config).
+# hacen imports antiguos (app_constants / app_config / app_ext / etc).
 # ------------------------------------------------------------------
 import sys
-try:
-    import modules.app_constants as _app_constants
-    sys.modules.setdefault("app_constants", _app_constants)
-except Exception:
-    pass
-
-try:
-    import modules.app_config as _app_config
-    sys.modules.setdefault("app_config", _app_config)
-except Exception:
-    pass
+for _name in [
+    "app_constants",
+    "app_config",
+    "app_ext",
+    "app_utils",
+    "app_params",
+    "app_errors",
+    "app_activity",
+    "app_auth_flow",
+    "app_diagnostics",
+    "app_ai",
+]:
+    try:
+        _mod = __import__(f"modules.{_name}", fromlist=["*"])
+        sys.modules.setdefault(_name, _mod)
+    except Exception:
+        pass
 
 # ====== UI / Branding ======
 from modules.ui import (
