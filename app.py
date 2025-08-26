@@ -30,7 +30,7 @@ from modules.ui import (
 )
 
 # ====== Carga de módulos locales fraccionados ======
-from app_config import apply_base_style_and_logo, get_app_home
+from modules.app_config import apply_base_style_and_logo, get_app_home
 from app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 from app_utils import get_qp, clear_qp, oauth_flow_store, has_gsc_scope, norm
 from app_ai import (
