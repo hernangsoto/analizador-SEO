@@ -19,13 +19,10 @@ from google.oauth2.credentials import Credentials
 try:
     st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 except Exception:
-    # Evita el warning "Already configured" en reruns o multipágina
     pass
 
 # ------------------------------------------------------------------
-# 🔧 Shims de compatibilidad:
-# Si moviste archivos a modules/, evita ImportError en módulos que aún
-# hacen imports antiguos (app_constants / app_config / app_ext / etc).
+# 🔧 Shims de compatibilidad
 # ------------------------------------------------------------------
 for _name in [
     "app_constants",
@@ -47,7 +44,7 @@ for _name in [
 
 # ====== UI / Branding ======
 from modules.ui import (
-    apply_page_style,  # usado dentro de config
+    apply_page_style,
     get_user,
     sidebar_user_info,
     login_screen,
@@ -91,14 +88,61 @@ from modules.drive import (
 )
 from modules.gsc import ensure_sc_client
 
+# ====== 🔧 PARCHE Sheets (auto-resize + chunks + throttle) ======
+# Evita errores 400/429 al escribir con gspread/gspread_dataframe cuando la hoja es chica
+# o cuando se escribe demasiado rápido. Se puede tunear con variables de entorno:
+#   SEO_SHEETS_CHUNK_ROWS (default 500)
+#   SEO_SHEETS_THROTTLE_S (default 1.5)
+if USING_EXT:
+    try:
+        import seo_analisis_ext.sheets_helpers as _sh  # paquete externo
+        _orig_safe_set = _sh.safe_set_df_chunked
+
+        def _patched_safe_set_df_chunked(ws, df, include_header=True, chunk_rows=2000, throttle_s=1.0, **kw):
+            try:
+                rows_needed = (len(df) + (1 if include_header else 0) + 5)
+                cols_needed = max(len(df.columns) + 2, 2)
+                # Intentar resize "atómico"
+                try:
+                    ws.resize(
+                        rows=max(ws.row_count, rows_needed),
+                        cols=max(ws.col_count, cols_needed),
+                    )
+                except Exception:
+                    # Fallback: add_rows / add_cols
+                    try:
+                        if ws.row_count < rows_needed:
+                            ws.add_rows(rows_needed - ws.row_count)
+                    except Exception:
+                        pass
+                    try:
+                        if ws.col_count < cols_needed:
+                            ws.add_cols(cols_needed - ws.col_count)
+                    except Exception:
+                        pass
+
+                # Tuning por env (bajamos payload y subimos espera)
+                env_chunk = int(os.environ.get("SEO_SHEETS_CHUNK_ROWS", "500"))
+                env_throttle = float(os.environ.get("SEO_SHEETS_THROTTLE_S", "1.5"))
+                chunk_rows = min(chunk_rows or 2000, env_chunk)
+                throttle_s = max(throttle_s or 1.0, env_throttle)
+            except Exception:
+                # Si el parche falla, seguimos con valores originales
+                pass
+            return _orig_safe_set(ws, df, include_header=include_header, chunk_rows=chunk_rows, throttle_s=throttle_s, **kw)
+
+        _sh.safe_set_df_chunked = _patched_safe_set_df_chunked
+        st.caption("⚙️ Parche Sheets activo: auto-resize + chunk reducido + throttle aumentado.")
+    except Exception as _e:
+        st.warning(f"No se pudo aplicar el parche de escritura en Sheets: {_e}")
+
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
 st.title("Analizador SEO 🚀")
 
 # ------------------------------------------------------------
-# Diagnóstico de prompts/IA (igual que antes, pero usando helpers nuevos)
+# Diagnóstico de prompts/IA
 # ------------------------------------------------------------
-# Cargar prompts al inicio
 load_prompts()
 
 if st.session_state.get("DEBUG"):
@@ -121,7 +165,6 @@ if st.session_state.get("DEBUG"):
             load_prompts()
             st.rerun()
 else:
-    # Aviso suave si Gemini no está listo (fuera del panel DEBUG)
     try:
         ok, _ = gemini_healthcheck()
         if not ok:
@@ -289,7 +332,6 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
             ''',
             unsafe_allow_html=True
         )
-        # 📝 Log: login (Drive/Sheets listo)
         activity_log_append(
             drive_service, gs_client,
             user_email=email_txt, event="login",
@@ -376,7 +418,6 @@ if analisis == "7":
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
-                # 📝 Log
                 try:
                     meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
                     sheet_name = meta.get("name", "")
@@ -389,10 +430,10 @@ if analisis == "7":
                     drive_service, gs_client,
                     user_email=(_me or {}).get("emailAddress") or "",
                     event="analysis",
-                    site_url="",  # no aplica
+                    site_url="",
                     analysis_kind="Nombres (KG+Wikipedia)",
                     sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account="",  # no aplica
+                    gsc_account="",
                     notes=f"lang={params_names.get('lang')}, n={total}"
                 )
 
@@ -400,7 +441,6 @@ if analisis == "7":
                 st.session_state["last_file_kind"] = "names"
                 gemini_summary(gs_client, sid, kind="names", widget_suffix="after_run")
 
-    # Panel persistente de resumen si ya hay algo
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
         st.divider()
         st.subheader("📄 Resumen del análisis")
@@ -411,11 +451,10 @@ if analisis == "7":
             kind=st.session_state["last_file_kind"],
             widget_suffix="panel"
         )
-    st.stop()  # fin rama nombres
+    st.stop()
 
 # ======== Resto de análisis (sí requieren GSC) ========
 
-# --- Helper: hint para CSRF/state mismatch en Paso 2 ---
 def _csrf_mismatch_hint(step_label: str = "Paso 2"):
     st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
     st.info(f"Hacé clic en **Reiniciar {step_label}** y repetí la autorización (un solo click).")
@@ -486,13 +525,11 @@ else:
     )
 
     if need_new_auth:
-        # Mostrar botón explícito para iniciar el flujo y evitar dobles clics / reruns
         if not st.session_state.get("_src_oauth_in_progress"):
             st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
             c1, c2 = st.columns([1,3])
             with c1:
                 if st.button(f"Conectar {sc_choice}", key="btn_start_src_oauth"):
-                    # Limpiar cualquier resto previo y fijar objetivo
                     for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
                         st.session_state.pop(k, None)
                     clear_qp()
@@ -503,14 +540,12 @@ else:
                 st.caption("Se abrirá la autorización de Google. No hagas doble click ni cambies de opción mientras se procesa.")
             st.stop()
 
-        # Si cambia la selección durante el proceso, reiniciamos para evitar estados cruzados
         if norm(st.session_state.get("_src_target_label")) != wanted_norm:
             st.warning("Cambiaste la selección de cuenta durante el login. Reiniciando Paso 2…")
             for k in ("creds_src", "oauth_src", "step3_done", "src_account_label", "_src_oauth_in_progress", "_src_target_label"):
                 st.session_state.pop(k, None)
             clear_qp(); st.rerun()
 
-        # Ejecutar el flujo de autorización (una única vez)
         try:
             creds_src_obj = pick_source_oauth()
         except Exception as e:
@@ -522,7 +557,6 @@ else:
                 raise
 
         if not creds_src_obj:
-            # El componente de auth todavía no devolvió credenciales (UI intermedia)
             st.stop()
 
         picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
@@ -595,7 +629,6 @@ selected_sites: list[str] = []
 site_url: str | None = None
 
 if work_mode == "Un dominio":
-    # Selectbox clásico
     def pick_site(sc_service):
         try:
             site_list = sc_service.sites().list().execute()
@@ -615,7 +648,6 @@ if work_mode == "Un dominio":
     site_url = pick_site(sc_service)
 
 else:
-    # Masivo: filtro + multiselect + seleccionar todos
     all_sites = _list_verified_sites(sc_service)
     with st.container():
         st.markdown("#### Selección de sitios (análisis masivo)")
@@ -664,13 +696,9 @@ def _run_loop_over_sites(kind: str, params, runner_fn):
         "audit": "Procesando Auditoría de tráfico",
     }.get(kind, "Procesando análisis")
 
-    # Indicador de progreso
-    if hasattr(st, "status"):
-        status = st.status(f"⏳ {label}…", expanded=True)
-    else:
-        status = None
-        st.info(f"⏳ {label}…")
+    delay_between = float(os.environ.get("SEO_BULK_DELAY_S", "1.0"))
 
+    status = st.status(f"⏳ {label}…", expanded=True) if hasattr(st, "status") else None
     try:
         for i, site in enumerate(targets, 1):
             step_txt = f"[{i}/{len(targets)}] {site}"
@@ -679,60 +707,68 @@ def _run_loop_over_sites(kind: str, params, runner_fn):
             else:
                 st.write(f"• {step_txt}")
 
-            sid = runner_fn(
-                sc_service, drive_service, gs_client, site, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site)
-
-            # Log
             try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", "")
-                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                sid = runner_fn(
+                    sc_service, drive_service, gs_client, site, params,
+                    st.session_state.get("dest_folder_id")
+                )
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site)
 
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis",
-                site_url=site,
-                analysis_kind={"core":"Core Update","evergreen":"Evergreen","audit":"Auditoría"}.get(kind, kind),
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", "")
+                    sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""
+                    sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
 
-            results.append({"site": site, "sheet_id": sid, "sheet_url": sheet_url, "sheet_name": sheet_name})
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis",
+                    site_url=site,
+                    analysis_kind={"core":"Core Update","evergreen":"Evergreen","audit":"Auditoría"}.get(kind, kind),
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"params={params!r}"
+                )
+
+                results.append({"site": site, "sheet_id": sid, "sheet_url": sheet_url, "sheet_name": sheet_name})
+            except Exception as e:
+                err = str(e)
+                st.error(f"❌ Falló {site}: {err[:300]}")
+                results.append({"site": site, "error": err})
+            finally:
+                if i < len(targets) and delay_between > 0:
+                    time.sleep(delay_between)
 
         if status:
             status.update(label="✅ Análisis completado", state="complete")
 
-        # Mostrar resultados
-        st.success("¡Listo! Archivos generados:")
-        for r in results:
-            st.markdown(f"- **{r['site']}** → [Abrir Google Sheets]({r['sheet_url']})")
-
-        # Guardar último para resumen (opcional)
         if results:
-            st.session_state["last_file_id"] = results[-1]["sheet_id"]
-            st.session_state["last_file_kind"] = {"core":"core","evergreen":"evergreen","audit":"audit"}[kind]
+            ok_items = [r for r in results if "sheet_url" in r]
+            if ok_items:
+                st.success("¡Listo! Archivos generados:")
+                for r in ok_items:
+                    st.markdown(f"- **{r['site']}** → [Abrir Google Sheets]({r['sheet_url']})")
+            failed = [r for r in results if "error" in r]
+            if failed:
+                st.warning("Algunos sitios fallaron. Revisá los mensajes e intentá de nuevo más tarde.")
 
-            with st.expander("Compartir acceso al último documento (opcional)"):
-                share_controls(drive_service, results[-1]["sheet_id"], default_email=_me.get("emailAddress") if _me else None)
+            st.session_state["last_file_id"] = ok_items[-1]["sheet_id"] if ok_items else None
+            st.session_state["last_file_kind"] = {"core":"core","evergreen":"evergreen","audit":"audit"}.get(kind)
 
-            # Resumen automático solo si fue 1 sitio (para no saturar)
-            if len(results) == 1:
-                if kind == "core":
-                    gemini_summary(gs_client, results[-1]["sheet_id"], kind="core", force_prompt_key="core", widget_suffix="after_run")
-                else:
-                    gemini_summary(gs_client, results[-1]["sheet_id"], kind=st.session_state["last_file_kind"], widget_suffix="after_run")
+            if ok_items:
+                with st.expander("Compartir acceso al último documento (opcional)"):
+                    share_controls(drive_service, ok_items[-1]["sheet_id"], default_email=_me.get("emailAddress") if _me else None)
 
+                if len(ok_items) == 1 and st.session_state["last_file_id"]:
+                    if kind == "core":
+                        gemini_summary(gs_client, ok_items[-1]["sheet_id"], kind="core", force_prompt_key="core", widget_suffix="after_run")
+                    else:
+                        gemini_summary(gs_client, ok_items[-1]["sheet_id"], kind=st.session_state["last_file_kind"], widget_suffix="after_run")
     finally:
-        if status:
-            pass
+        pass
 
 # === Ejecutores por tipo ===
 if analisis == "4":
@@ -762,7 +798,6 @@ if analisis == "4":
             btn_label += " (masivo)"
 
         if st.button(btn_label, type="primary"):
-            # Filtros avanzados (si aplica)
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
