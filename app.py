@@ -572,28 +572,169 @@ else:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
 
-# --- PASO 4: sitio + PASO 5: análisis ---
-def pick_site(sc_service):
-    st.subheader("Elige el sitio a analizar")
+# --- Sitios (single o masivo) ---
+def _list_verified_sites(sc_service):
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
+        verified = [s["siteUrl"] for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
+        return sorted(set(verified))
     except Exception as e:
         st.error(f"Error al obtener sitios: {e}")
         st.stop()
-    verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
-    if not verified:
-        st.error("No se encontraron sitios verificados en esta cuenta.")
-        st.stop()
-    options = sorted({s["siteUrl"] for s in verified})
-    prev = st.session_state.get("site_url_choice")
-    index = options.index(prev) if prev in options else 0
-    site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
-    return site_url
 
-site_url = pick_site(sc_service)
+st.subheader("Modo de trabajo")
+work_mode = st.radio(
+    "¿Querés analizar un dominio puntual o varios a la vez?",
+    ["Un dominio", "Análisis masivo"],
+    horizontal=True,
+    key="work_mode_choice"
+)
+
+selected_sites: list[str] = []
+site_url: str | None = None
+
+if work_mode == "Un dominio":
+    # Selectbox clásico
+    def pick_site(sc_service):
+        try:
+            site_list = sc_service.sites().list().execute()
+            sites = site_list.get("siteEntry", [])
+        except Exception as e:
+            st.error(f"Error al obtener sitios: {e}")
+            st.stop()
+        verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
+        if not verified:
+            st.error("No se encontraron sitios verificados en esta cuenta.")
+            st.stop()
+        options = sorted({s["siteUrl"] for s in verified})
+        prev = st.session_state.get("site_url_choice")
+        index = options.index(prev) if prev in options else 0
+        return st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
+
+    site_url = pick_site(sc_service)
+
+else:
+    # Masivo: filtro + multiselect + seleccionar todos
+    all_sites = _list_verified_sites(sc_service)
+    with st.container():
+        st.markdown("#### Selección de sitios (análisis masivo)")
+        excl = st.text_input(
+            "Excluir por texto (separá por comas). Ej: `dev, staging, beta`",
+            value=st.session_state.get("bulk_exclude_txt", ""),
+            key="bulk_exclude_txt",
+            help="Se excluirán sitios que contengan cualquiera de las cadenas indicadas."
+        )
+        patterns = [p.strip().lower() for p in excl.split(",") if p.strip()] if excl else []
+        if patterns:
+            filt_sites = [s for s in all_sites if not any(p in s.lower() for p in patterns)]
+        else:
+            filt_sites = all_sites[:]
+
+        c1, c2 = st.columns([1, 4], vertical_alignment="center")
+        with c1:
+            sel_all = st.checkbox("Seleccionar todos", value=False, key="bulk_sel_all")
+        default_sel = filt_sites if sel_all else st.session_state.get("bulk_sites", [])
+
+        selected_sites = st.multiselect(
+            "Elegí los sitios a procesar",
+            options=filt_sites,
+            default=default_sel,
+            key="bulk_sites",
+            placeholder="Seleccioná uno o más sitios…"
+        )
+        st.caption(f"Seleccionados: **{len(selected_sites)}** de {len(filt_sites)} (filtrados) / {len(all_sites)} (totales).")
 
 # ============== Flujos por análisis que requieren GSC ==============
+def _targets() -> list[str]:
+    if work_mode == "Un dominio":
+        return [site_url] if site_url else []
+    return selected_sites or []
+
+def _run_loop_over_sites(kind: str, params, runner_fn):
+    targets = _targets()
+    if not targets:
+        st.warning("Seleccioná al menos un sitio para ejecutar.")
+        return
+
+    results = []
+    label = {
+        "core": "Procesando Core Update",
+        "evergreen": "Procesando Evergreen",
+        "audit": "Procesando Auditoría de tráfico",
+    }.get(kind, "Procesando análisis")
+
+    # Indicador de progreso
+    if hasattr(st, "status"):
+        status = st.status(f"⏳ {label}…", expanded=True)
+    else:
+        status = None
+        st.info(f"⏳ {label}…")
+
+    try:
+        for i, site in enumerate(targets, 1):
+            step_txt = f"[{i}/{len(targets)}] {site}"
+            if status:
+                status.update(label=f"{label}… {step_txt}")
+            else:
+                st.write(f"• {step_txt}")
+
+            sid = runner_fn(
+                sc_service, drive_service, gs_client, site, params,
+                st.session_state.get("dest_folder_id")
+            )
+            maybe_prefix_sheet_name_with_medio(drive_service, sid, site)
+
+            # Log
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", "")
+                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+            activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis",
+                site_url=site,
+                analysis_kind={"core":"Core Update","evergreen":"Evergreen","audit":"Auditoría"}.get(kind, kind),
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"params={params!r}"
+            )
+
+            results.append({"site": site, "sheet_id": sid, "sheet_url": sheet_url, "sheet_name": sheet_name})
+
+        if status:
+            status.update(label="✅ Análisis completado", state="complete")
+
+        # Mostrar resultados
+        st.success("¡Listo! Archivos generados:")
+        for r in results:
+            st.markdown(f"- **{r['site']}** → [Abrir Google Sheets]({r['sheet_url']})")
+
+        # Guardar último para resumen (opcional)
+        if results:
+            st.session_state["last_file_id"] = results[-1]["sheet_id"]
+            st.session_state["last_file_kind"] = {"core":"core","evergreen":"evergreen","audit":"audit"}[kind]
+
+            with st.expander("Compartir acceso al último documento (opcional)"):
+                share_controls(drive_service, results[-1]["sheet_id"], default_email=_me.get("emailAddress") if _me else None)
+
+            # Resumen automático solo si fue 1 sitio (para no saturar)
+            if len(results) == 1:
+                if kind == "core":
+                    gemini_summary(gs_client, results[-1]["sheet_id"], kind="core", force_prompt_key="core", widget_suffix="after_run")
+                else:
+                    gemini_summary(gs_client, results[-1]["sheet_id"], kind=st.session_state["last_file_kind"], widget_suffix="after_run")
+
+    finally:
+        if status:
+            pass
+
+# === Ejecutores por tipo ===
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -616,132 +757,43 @@ if analisis == "4":
                         else:
                             st.error("Gemini no está listo: se caerá al fallback.")
 
-        if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+        btn_label = "🚀 Ejecutar análisis de Core Update"
+        if work_mode == "Análisis masivo":
+            btn_label += " (masivo)"
+
+        if st.button(btn_label, type="primary"):
+            # Filtros avanzados (si aplica)
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
             else:
                 os.environ.pop("SEO_ADVANCED_FILTERS", None)
 
-            sid = run_with_indicator(
-                "Procesando Core Update",
-                run_core_update, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-            # 📝 Log: análisis Core Update
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", "")
-                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis",
-                site_url=site_url,
-                analysis_kind="Core Update",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "core"
-            gemini_summary(gs_client, sid, kind="core", force_prompt_key="core", widget_suffix="after_run")
+            _run_loop_over_sites("core", params, run_core_update)
 
 elif analisis == "5":
     if run_evergreen is None:
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
-        if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
-            sid = run_with_indicator(
-                "Procesando Evergreen",
-                run_evergreen, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+        btn_label = "🌲 Ejecutar análisis Evergreen"
+        if work_mode == "Análisis masivo":
+            btn_label += " (masivo)"
 
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-            # 📝 Log: análisis Evergreen
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", "")
-                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis",
-                site_url=site_url,
-                analysis_kind="Evergreen",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "evergreen"
-            gemini_summary(gs_client, sid, kind="evergreen", widget_suffix="after_run")
+        if st.button(btn_label, type="primary"):
+            _run_loop_over_sites("evergreen", params, run_evergreen)
 
 elif analisis == "6":
     if run_traffic_audit is None:
         st.warning("Este despliegue no incluye run_traffic_audit.")
     else:
         params = params_for_auditoria()
-        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary"):
-            sid = run_with_indicator(
-                "Procesando Auditoría de tráfico",
-                run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+        btn_label = "🧮 Ejecutar Auditoría de tráfico"
+        if work_mode == "Análisis masivo":
+            btn_label += " (masivo)"
 
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-            # 📝 Log: análisis Auditoría
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", "")
-                sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis",
-                site_url=site_url,
-                analysis_kind="Auditoría",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "audit"
-            gemini_summary(gs_client, sid, kind="audit", widget_suffix="after_run")
+        if st.button(btn_label, type="primary"):
+            _run_loop_over_sites("audit", params, run_traffic_audit)
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
