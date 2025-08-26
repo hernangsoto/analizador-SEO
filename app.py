@@ -478,9 +478,20 @@ else:
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        creds_src_obj = pick_source_oauth()
-        if not creds_src_obj:
-            st.stop()
+try:
+    creds_src_obj = pick_source_oauth()
+except Exception as e:
+    msg = str(e)
+    # Detectamos el típico mensaje de CSRF/state mismatch
+    if "CSRF" in msg or "state" in msg or "mismatch" in msg.lower():
+        _csrf_mismatch_hint("Paso 2")
+        st.stop()
+    else:
+        # Si es otro error, lo re-lanzamos para no ocultarlo
+        raise
+
+if not creds_src_obj:
+    st.stop()
 
         picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
         picked_norm = norm(picked_label)
