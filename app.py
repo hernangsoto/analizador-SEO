@@ -31,9 +31,9 @@ from modules.ui import (
 
 # ====== Carga de módulos locales fraccionados ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
-from app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
-from app_utils import get_qp, clear_qp, oauth_flow_store, has_gsc_scope, norm
-from app_ai import (
+from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
+from modules.app_utils import get_qp, clear_qp, oauth_flow_store, has_gsc_scope, norm
+from modules.app_ai import (
     load_prompts,
     ai_source,
     ai_import_error,
@@ -42,17 +42,17 @@ from app_ai import (
     render_prompt_probe,
     gemini_summary,
 )
-from app_params import (
+from modules.app_params import (
     params_for_core_update, params_for_evergreen, params_for_auditoria,
     params_for_names,
 )
-from app_activity import (
+from modules.app_activity import (
     maybe_prefix_sheet_name_with_medio,
     activity_log_append,
 )
-from app_errors import show_google_error, run_with_indicator
-from app_auth_flow import step0_google_identity, logout_screen
-from app_diagnostics import scan_repo_for_gsc_and_filters, read_context
+from modules.app_errors import show_google_error, run_with_indicator
+from modules.app_auth_flow import step0_google_identity, logout_screen
+from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # ====== Google modules ya existentes en tu repo ======
 from modules.auth import (
