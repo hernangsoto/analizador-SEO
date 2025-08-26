@@ -22,14 +22,20 @@ except Exception:
     pass
 
 # ------------------------------------------------------------------
-# 🔧 Shim de compatibilidad: si otros módulos hacen `from app_constants import ...`
-# y moviste el archivo a modules/app_constants.py, esto evita el ImportError.
-# Debe ir ANTES de importar cualquier modules.app_* que a su vez importe app_constants.
+# 🔧 Shims de compatibilidad:
+# Si moviste archivos a modules/, evita ImportError en módulos que aún
+# hacen imports antiguos (app_constants / app_config).
 # ------------------------------------------------------------------
 import sys
 try:
     import modules.app_constants as _app_constants
     sys.modules.setdefault("app_constants", _app_constants)
+except Exception:
+    pass
+
+try:
+    import modules.app_config as _app_config
+    sys.modules.setdefault("app_config", _app_config)
 except Exception:
     pass
 
@@ -701,5 +707,5 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets["gemini"])
+        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets['gemini'])
     )
