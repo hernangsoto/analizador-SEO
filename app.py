@@ -1,5 +1,6 @@
 from __future__ import annotations
-# --- Permisos OAuth en localhost + tolerancia de scope (igual que antes)
+
+# --- Permisos OAuth en localhost + tolerancia de scope
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -12,10 +13,13 @@ from datetime import date, timedelta, datetime
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
-import requests
 
 # ====== Config base (debe ser el 1er st.*)
-st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
+try:
+    st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
+except Exception:
+    # Evita el warning "Already configured" en reruns o multipágina
+    pass
 
 # ====== UI / Branding ======
 from modules.ui import (
@@ -26,7 +30,6 @@ from modules.ui import (
 )
 
 # ====== Carga de módulos locales fraccionados ======
-from app_constants import SCOPES_GSC
 from app_config import apply_base_style_and_logo, get_app_home
 from app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 from app_utils import get_qp, clear_qp, oauth_flow_store, has_gsc_scope, norm
@@ -52,11 +55,9 @@ from app_auth_flow import step0_google_identity, logout_screen
 from app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # ====== Google modules ya existentes en tu repo ======
-from modules.utils import ensure_external_package, token_store, debug_log  # noqa: F401  (se siguen usando)
 from modules.auth import (
     pick_destination_oauth,
     pick_source_oauth,
-    SCOPES_DRIVE,
 )
 from modules.drive import (
     ensure_drive_clients,
@@ -95,6 +96,14 @@ if st.session_state.get("DEBUG"):
         if st.button("🔁 Reintentar carga de prompts"):
             load_prompts()
             st.rerun()
+else:
+    # Aviso suave si Gemini no está listo (fuera del panel DEBUG)
+    try:
+        ok, _ = gemini_healthcheck()
+        if not ok:
+            st.caption("💡 Podés cargar una API key de Gemini en Secrets para activar resúmenes automáticos (GEMINI_API_KEY o [gemini].api_key).")
+    except Exception:
+        pass
 
 # === 🔎 Panel de diagnóstico (DEBUG) ===
 if st.session_state.get("DEBUG"):
@@ -406,7 +415,7 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
             if st.button("➕ Añadir permiso de Search Console", key="btn_add_gsc_scope"):
                 for k in ("oauth_oidc", "_google_identity", "creds_dest", "step1_done"):
                     st.session_state.pop(k, None)
-                st.experimental_set_query_params()
+                clear_qp()
                 st.rerun()
         with c2:
             st.caption("Se reabrirá el Paso 0 pidiendo también el permiso de Search Console.")
