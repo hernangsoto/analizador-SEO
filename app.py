@@ -7,6 +7,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 import json
 import time
+import sys
 from types import SimpleNamespace
 from datetime import date, timedelta, datetime
 
@@ -26,7 +27,6 @@ except Exception:
 # Si moviste archivos a modules/, evita ImportError en módulos que aún
 # hacen imports antiguos (app_constants / app_config / app_ext / etc).
 # ------------------------------------------------------------------
-import sys
 for _name in [
     "app_constants",
     "app_config",
@@ -413,6 +413,16 @@ if analisis == "7":
 
 # ======== Resto de análisis (sí requieren GSC) ========
 
+# --- Helper: hint para CSRF/state mismatch en Paso 2 ---
+def _csrf_mismatch_hint(step_label: str = "Paso 2"):
+    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+    st.info(f"Hacé clic en **Reiniciar {step_label}** y repetí la autorización (un solo click).")
+    if st.button(f"Reiniciar {step_label}", key="btn_restart_step2"):
+        for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
+            st.session_state.pop(k, None)
+        clear_qp()
+        st.rerun()
+
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 sc_service = None
 
@@ -478,27 +488,28 @@ else:
             st.session_state.pop(k, None)
 
         st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-try:
-    creds_src_obj = pick_source_oauth()
-except Exception as e:
-    msg = str(e)
-    # Detectamos el típico mensaje de CSRF/state mismatch
-    if "CSRF" in msg or "state" in msg or "mismatch" in msg.lower():
-        _csrf_mismatch_hint("Paso 2")
-        st.stop()
-    else:
-        # Si es otro error, lo re-lanzamos para no ocultarlo
-        raise
+        try:
+            creds_src_obj = pick_source_oauth()
+        except Exception as e:
+            msg = str(e)
+            if "csrf" in msg.lower() or "state" in msg.lower() or "mismatch" in msg.lower():
+                _csrf_mismatch_hint("Paso 2")
+                st.stop()
+            else:
+                raise
 
-if not creds_src_obj:
-    st.stop()
+        if not creds_src_obj:
+            st.stop()
 
         picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
         picked_norm = norm(picked_label)
 
         if picked_norm != wanted_norm:
-            st.error(f"Autorizaste **{picked_label}**, pero seleccionaste **{sc_choice}**. Reintentá el login eligiendo la cuenta correcta.")
-            if st.button("Reintentar selección de cuenta", key="retry_wrong_sc_account"):
+            st.error(
+                f"Autorizaste **{picked_label}**, pero seleccionaste **{sc_choice}**. "
+                "Reintentá el login eligiendo la cuenta correcta."
+            )
+            if st.button("Reiniciar selección de cuenta", key="retry_wrong_sc_account"):
                 for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -724,5 +735,5 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets['gemini'])
+        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets.get('gemini', {}))
     )
