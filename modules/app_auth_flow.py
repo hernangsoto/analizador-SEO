@@ -1,19 +1,24 @@
+# modules/app_auth_flow.py
 import time
 import requests
 import streamlit as st
-from google.oauth2.credentials import Credentials
+from google.oauth2.credentials import Credentials  # noqa: F401 (se usa en app principal)
 
-from app_utils import oauth_flow_store, get_qp, clear_qp
-from app_constants import SCOPES_GSC
+# 👇 imports relativos al paquete modules
+from .app_utils import oauth_flow_store, get_qp, clear_qp
+from .app_constants import SCOPES_GSC
 from modules.auth import build_flow, SCOPES_DRIVE
 from modules.utils import token_store  # usado en logout
+
 
 def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
     sep = "&" if "?" in auth_url else "?"
     return f"{auth_url}{sep}hd={domain}"
 
+
 def _email_is_nomadic(email: str | None) -> bool:
     return bool(email and email.lower().endswith("@nomadic.agency"))
+
 
 def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
     url = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -29,14 +34,31 @@ def _fetch_userinfo_json_with_retry(access_token: str) -> dict:
             time.sleep(1.2 * (attempt + 1))
     return {}
 
+
+def _purge_stale_states(store: dict, ttl_seconds: int = 1800) -> None:
+    """Elimina entradas del almacén con más de ttl_seconds (default: 30 min)."""
+    now = time.time()
+    stale = [k for k, v in store.items() if (now - float(v.get("created", now))) > ttl_seconds]
+    for k in stale:
+        try:
+            store.pop(k, None)
+        except Exception:
+            pass
+
+
 def step0_google_identity():
     st.subheader("¡Bienvenido! Para comenzar, inicia sesión con tu mail personal de Nomadic")
+
     auth_sec = st.secrets.get("auth", {}) or {}
     has_web = bool(auth_sec.get("client_id") and auth_sec.get("client_secret") and auth_sec.get("redirect_uri"))
     redirect_uri = auth_sec.get("redirect_uri")
+
     store = oauth_flow_store()
+    _purge_stale_states(store)
+
     scopes_step0 = ["openid", "email", "profile"] + SCOPES_DRIVE + SCOPES_GSC
 
+    # 1) Preparar flow y auth_url (y guardar por state)
     if "oauth_oidc" not in st.session_state:
         if has_web:
             client_secrets = {"web": {
@@ -51,31 +73,46 @@ def step0_google_identity():
             flow = Flow.from_client_config(client_secrets, scopes=scopes_step0)
             flow.redirect_uri = redirect_uri
             auth_url, state = flow.authorization_url(
-                prompt="consent select_account", access_type="offline", include_granted_scopes="true",
+                prompt="consent select_account",
+                access_type="offline",
+                include_granted_scopes="true",
             )
             auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
-                "flow_state": state, "use_redirect": True, "redirect_uri": redirect_uri, "mode": "web", "auth_url": auth_url,
+                "flow_state": state,
+                "use_redirect": True,
+                "redirect_uri": redirect_uri,
+                "mode": "web",
+                "auth_url": auth_url,
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "web"}
         else:
             acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
             flow = build_flow(acct_for_dest, scopes_step0)
             auth_url, state = flow.authorization_url(
-                prompt="consent select_account", access_type="offline", include_granted_scopes="true",
+                prompt="consent select_account",
+                access_type="offline",
+                include_granted_scopes="true",
             )
             auth_url = _append_hd(auth_url)
             st.session_state["oauth_oidc"] = {
-                "flow_state": state, "use_redirect": False, "redirect_uri": "http://localhost", "mode": "installed", "auth_url": auth_url,
+                "flow_state": state,
+                "use_redirect": False,
+                "redirect_uri": "http://localhost",
+                "mode": "installed",
+                "auth_url": auth_url,
             }
             store[state] = {"flow": flow, "created": time.time(), "mode": "installed"}
     else:
         oo = st.session_state["oauth_oidc"]
         if has_web and oo.get("mode") != "web":
-            st.session_state.pop("oauth_oidc", None); return step0_google_identity()
+            st.session_state.pop("oauth_oidc", None)
+            return step0_google_identity()
         if (not has_web) and oo.get("mode") != "installed":
-            st.session_state.pop("oauth_oidc", None); return step0_google_identity()
+            st.session_state.pop("oauth_oidc", None)
+            return step0_google_identity()
 
+    # 2) Manejo del callback: rehidratación por state recibido
     oo = st.session_state["oauth_oidc"]
     auth_url = oo["auth_url"]
     qp = get_qp()
@@ -83,7 +120,11 @@ def step0_google_identity():
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
     def _finalize_identity(creds, info):
-        ident = {"name": info.get("name") or info.get("email") or "Invitado", "email": info.get("email") or "—", "picture": info.get("picture")}
+        ident = {
+            "name": info.get("name") or info.get("email") or "Invitado",
+            "email": info.get("email") or "—",
+            "picture": info.get("picture"),
+        }
         hd_ok = (info.get("hd") == "nomadic.agency") if info.get("hd") else False
         if not (_email_is_nomadic(ident["email"]) or hd_ok):
             st.error("Debes iniciar sesión con un correo **@nomadic.agency**.")
@@ -107,19 +148,24 @@ def step0_google_identity():
         st.success(f"Identidad verificada y permisos listos: {ident['email']}")
         return ident
 
-    # ====== PARCHE: rehidratación de state para redirección ======
+    # ===== Rehidratación en modo redirección =====
     if oo.get("use_redirect") and code:
         expected_state = oo.get("flow_state")
         flow = None
         store = oauth_flow_store()
 
-        # 1) Intentar recuperar el Flow usando el state recibido
+        # 1) Intentar recuperar usando el state RECIBIDO
         if state_in and state_in in store:
             flow = store.pop(state_in)["flow"]
 
-        # 2) Si no está en memoria, rehidratar/recrear con el state de la URL
+        # 2) Fallback: si no hay state_in o no está en el store, probar expected_state
+        if (not flow) and expected_state and expected_state in store:
+            flow = store.pop(expected_state)["flow"]
+
+        # 3) Si aún no hay flow, recrear con el state_in (o expected_state si no vino)
         if not flow:
             st.info("Intentando recuperar sesión…")
+            effective_state = state_in or expected_state
             if has_web:
                 from google_auth_oauthlib.flow import Flow
                 client_secrets = {"web": {
@@ -130,18 +176,17 @@ def step0_google_identity():
                     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                     "redirect_uris": [redirect_uri],
                 }}
-                flow = Flow.from_client_config(client_secrets, scopes=scopes_step0, state=state_in)
+                flow = Flow.from_client_config(client_secrets, scopes=scopes_step0, state=effective_state)
                 flow.redirect_uri = redirect_uri
             else:
-                # Modo installed/manual
                 acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
                 flow = build_flow(acct_for_dest, scopes_step0)
                 try:
-                    setattr(flow, "_state", state_in)
+                    setattr(flow, "_state", effective_state)
                 except Exception:
                     pass
 
-        # 3) Avisar si el state no coincide, pero continuar con el flujo rehidratado
+        # 4) Avisar si hay mismatch, pero continuar con el flow rehidratado
         if expected_state and state_in and state_in != expected_state:
             st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando el flujo rehidratado con el state recibido…")
 
@@ -156,6 +201,7 @@ def step0_google_identity():
             st.error(f"No se pudo verificar identidad: {e}")
             st.stop()
 
+    # 3) Presentar acción según modo
     if oo.get("use_redirect"):
         try:
             st.link_button("Continuar con Google", auth_url)
@@ -180,7 +226,7 @@ def step0_google_identity():
         )
         c1, c2 = st.columns(2)
         with c1:
-            # ====== PARCHE: rehidratación de state en modo manual ======
+            # ===== Rehidratación en modo manual =====
             if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
                 raw = (url or "").strip()
                 if not raw:
@@ -199,7 +245,7 @@ def step0_google_identity():
                     store = oauth_flow_store()
                     flow = None
 
-                    # 1) Priorizar el Flow guardado para el state que vino en la URL
+                    # 1) Priorizar el Flow guardado con el state pegado
                     key_state = state_in_manual or flow_state
                     if key_state and key_state in store:
                         flow = store.pop(key_state)["flow"]
@@ -229,6 +275,7 @@ def step0_google_identity():
 
     return st.session_state.get("_google_identity")
 
+
 # ------------------------------------------------------------
 # Pantalla de LOGOUT
 # ------------------------------------------------------------
@@ -245,6 +292,7 @@ def _revoke_google_token(token: str | None) -> None:
     except Exception:
         pass
 
+
 def logout_screen(app_home: str):
     st.header("Cerrar sesión")
     ident = st.session_state.get("_google_identity") or {}
@@ -254,7 +302,7 @@ def logout_screen(app_home: str):
     revoke = st.checkbox("Revocar permisos de Google (Drive/Sheets y Search Console)", value=True)
     wipe_pkg = st.checkbox("Borrar caché del paquete externo (.ext_pkgs/)", value=False)
 
-    col1, col2 = st.columns([1,1])
+    col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("🔒 Cerrar sesión y limpiar", type="primary"):
             if revoke:
@@ -262,10 +310,14 @@ def logout_screen(app_home: str):
                     data = st.session_state.get(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
-            try: st.cache_data.clear()
-            except Exception: pass
-            try: st.cache_resource.clear()
-            except Exception: pass
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
             if wipe_pkg:
                 import shutil
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
