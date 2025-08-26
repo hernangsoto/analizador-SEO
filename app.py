@@ -81,7 +81,8 @@ from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 # ====== Google modules ya existentes en tu repo ======
 from modules.auth import (
     pick_destination_oauth,
-    pick_source_oauth,
+    pick_source_oauth,  # puede quedar sin usar si preferimos el flujo robusto
+    build_flow,         # necesario para rehidratar Flow en Paso 2 (GSC)
 )
 from modules.drive import (
     ensure_drive_clients,
@@ -90,6 +91,7 @@ from modules.drive import (
     share_controls,
 )
 from modules.gsc import ensure_sc_client
+from modules.app_constants import SCOPES_GSC  # scopes de GSC para build_flow
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
@@ -423,6 +425,183 @@ def _csrf_mismatch_hint(step_label: str = "Paso 2"):
         clear_qp()
         st.rerun()
 
+# --- Helpers de Paso 2 (GSC) para flujo robusto ---
+def _append_hd(auth_url: str, domain: str = "nomadic.agency") -> str:
+    sep = "&" if "?" in auth_url else "?"
+    return f"{auth_url}{sep}hd={domain}"
+
+def step2_connect_gsc(sc_choice: str):
+    """
+    Flujo robusto para conectar la cuenta de Search Console (Acceso / Acceso Medios),
+    con rehidratación de Flow si cambia el 'state' en la redirección.
+    Devuelve un objeto Credentials o None si el usuario aún no finalizó.
+    """
+    # Si ya hay credenciales listas, devolvelas
+    if st.session_state.get("step3_done") and st.session_state.get("creds_src"):
+        try:
+            return Credentials(**st.session_state["creds_src"])
+        except Exception:
+            pass  # si fallan, seguimos abajo para regenerar
+
+    # Construcción/reuso del flujo OAuth para la cuenta elegida
+    store = oauth_flow_store()
+    oo = st.session_state.get("oauth_src")
+
+    # Si cambió la cuenta o no hay sesión, empezamos limpio
+    if not oo or (oo.get("account") != sc_choice):
+        st.session_state.pop("oauth_src", None)
+
+        # Armamos el Flow con el client correspondiente a sc_choice
+        flow = build_flow(sc_choice, SCOPES_GSC)
+        # Armamos la URL de autorización
+        auth_url, state = flow.authorization_url(
+            prompt="consent select_account",
+            access_type="offline",
+            include_granted_scopes="true",
+        )
+        auth_url = _append_hd(auth_url)
+
+        # Detección simple del modo: redirect si no es localhost manual
+        redirect_uri = getattr(flow, "redirect_uri", "") or ""
+        use_redirect = not redirect_uri.startswith("http://localhost")
+
+        st.session_state["oauth_src"] = {
+            "account": sc_choice,
+            "flow_state": state,
+            "use_redirect": use_redirect,
+            "redirect_uri": redirect_uri or "http://localhost",
+            "auth_url": auth_url,
+        }
+        store[state] = {"flow": flow, "created": time.time(), "mode": "web" if use_redirect else "installed"}
+        oo = st.session_state["oauth_src"]
+
+    # Si estamos en retorno de OAuth (hay ?code=...), intentamos rehidratar y canjear token
+    qp = get_qp()
+    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
+    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
+
+    if oo.get("use_redirect") and code:
+        expected_state = oo.get("flow_state")
+        flow = None
+
+        # 1) Usar Flow guardado con la clave 'state' que vino en la URL
+        if state_in and state_in in store:
+            flow = store.pop(state_in)["flow"]
+
+        # 2) Si no está en memoria, re-crear con el state recibido (rehidratación)
+        if not flow:
+            try:
+                flow = build_flow(sc_choice, SCOPES_GSC)
+                try:
+                    setattr(flow, "_state", state_in)  # best-effort
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"No pude reconstruir el flujo OAuth: {e}")
+                st.stop()
+
+        # 3) Avisar si el state difiere (pestaña nueva / rerun), pero continuar
+        if expected_state and state_in and state_in != expected_state:
+            st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Continuando con el flujo rehidratado…")
+
+        # 4) Intercambiar código por tokens
+        from urllib.parse import urlencode
+        current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
+        try:
+            flow.fetch_token(authorization_response=current_url)
+            creds = flow.credentials
+            # Persistimos en session_state
+            st.session_state["creds_src"] = {
+                "token": creds.token,
+                "refresh_token": getattr(creds, "refresh_token", None),
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
+            st.session_state["src_account_label"] = sc_choice
+            st.session_state["step3_done"] = True
+            clear_qp()
+            return creds
+        except Exception as e:
+            msg = str(e)
+            if "csrf" in msg.lower() or "state" in msg.lower() or "mismatch" in msg.lower():
+                _csrf_mismatch_hint("Paso 2")
+                st.stop()
+            st.error(f"No se pudo completar la autorización de Search Console: {e}")
+            st.stop()
+
+    # UI: seguimos en fase previa a retorno (primera vez)
+    if oo.get("use_redirect"):
+        try:
+            st.link_button(f"Conectar cuenta ({sc_choice})", oo["auth_url"])
+        except Exception:
+            st.markdown(
+                f'<a href="{oo["auth_url"]}" target="_self" rel="noopener" '
+                f'style="display:inline-block;padding=.6rem 1rem;border-radius:8px;'
+                f'background:#8e7cc3;color:#fff;text-decoration:none;font-weight:600;">'
+                f'Conectar cuenta ({sc_choice})</a>',
+                unsafe_allow_html=True
+            )
+        st.caption("Tras autorizar, volverás automáticamente a esta app.")
+        st.stop()
+    else:
+        # Modo manual (installed)
+        st.info(f"Modo manual activo para **{sc_choice}**.")
+        st.markdown(f"🔗 **Paso A (GSC)**: [Abrir autorización]({oo['auth_url']})")
+        with st.expander("Ver/copiar URL de autorización (GSC)"):
+            st.code(oo["auth_url"])
+        raw = st.text_input(
+            "🔑 Paso B (GSC): pegá la URL completa (http://localhost/?code=...&state=...)",
+            key="auth_response_url_gsc",
+            placeholder="http://localhost/?code=...&state=..."
+        )
+        if st.button("Conectar cuenta (GSC)", type="primary", key="btn_src_connect"):
+            if not raw.strip():
+                st.error("Pegá la URL completa de redirección (incluye code y state).")
+                st.stop()
+
+            try:
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(raw).query)
+                state_in_manual = q.get("state", [None])[0]
+
+                flow = None
+                # Priorizar Flow guardado por el state pegado
+                if state_in_manual and state_in_manual in store:
+                    flow = store.pop(state_in_manual)["flow"]
+                if not flow:
+                    # Re-crear y setear state best-effort
+                    flow = build_flow(sc_choice, SCOPES_GSC)
+                    try:
+                        setattr(flow, "_state", state_in_manual or oo.get("flow_state"))
+                    except Exception:
+                        pass
+
+                flow.fetch_token(authorization_response=raw)
+                creds = flow.credentials
+                st.session_state["creds_src"] = {
+                    "token": creds.token,
+                    "refresh_token": getattr(creds, "refresh_token", None),
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": creds.scopes,
+                }
+                st.session_state["src_account_label"] = sc_choice
+                st.session_state["step3_done"] = True
+                clear_qp()
+                return creds
+            except Exception as e:
+                msg = str(e)
+                if "csrf" in msg.lower() or "state" in msg.lower() or "mismatch" in msg.lower():
+                    _csrf_mismatch_hint("Paso 2")
+                    st.stop()
+                st.error(f"No se pudo completar la autorización GSC (manual): {e}")
+                st.stop()
+
+    return None  # si aún no terminó
+
 # --- PASO 3: Conectar Search Console (fuente de datos) ---
 sc_service = None
 
@@ -474,75 +653,25 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 else:
-    wanted_norm = norm(sc_choice)
-    have_label = st.session_state.get("src_account_label")
-    have_norm = norm(have_label)
-    need_new_auth = (
-        not st.session_state.get("step3_done")
-        or (have_norm != wanted_norm)
-        or (have_norm == norm("Acceso en cuenta personal de Nomadic"))
-    )
-
-    if need_new_auth:
-        for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
-            st.session_state.pop(k, None)
-
-        st.info(f"Conectá la cuenta **{sc_choice}** para Search Console.")
-        try:
-            creds_src_obj = pick_source_oauth()
-        except Exception as e:
-            msg = str(e)
-            if "csrf" in msg.lower() or "state" in msg.lower() or "mismatch" in msg.lower():
-                _csrf_mismatch_hint("Paso 2")
-                st.stop()
-            else:
-                raise
-
-        if not creds_src_obj:
-            st.stop()
-
-        picked_label = (st.session_state.get("oauth_src") or {}).get("account") or ""
-        picked_norm = norm(picked_label)
-
-        if picked_norm != wanted_norm:
-            st.error(
-                f"Autorizaste **{picked_label}**, pero seleccionaste **{sc_choice}**. "
-                "Reintentá el login eligiendo la cuenta correcta."
-            )
-            if st.button("Reiniciar selección de cuenta", key="retry_wrong_sc_account"):
-                for k in ("creds_src", "oauth_src", "step3_done", "src_account_label"):
-                    st.session_state.pop(k, None)
-                st.rerun()
-            st.stop()
-
-        st.session_state["creds_src"] = {
-            "token": creds_src_obj.token,
-            "refresh_token": getattr(creds_src_obj, "refresh_token", None),
-            "token_uri": creds_src_obj.token_uri,
-            "client_id": creds_src_obj.client_id,
-            "client_secret": creds_src_obj.client_secret,
-            "scopes": creds_src_obj.scopes,
-        }
-        st.session_state["src_account_label"] = picked_label
-        st.session_state["step3_done"] = True
-        st.rerun()
-    else:
-        try:
-            creds_src = Credentials(**st.session_state["creds_src"])
-            sc_service = ensure_sc_client(creds_src)
-            src_label = st.session_state.get("src_account_label") or sc_choice
-            st.markdown(
-                f'''
-                <div class="success-inline">
-                    Cuenta de acceso (Search Console): <strong>{src_label}</strong>
-                    <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
-                </div>
-                ''',
-                unsafe_allow_html=True
-            )
-        except Exception as e:
-            st.error(f"No pude inicializar el cliente de Search Console: {e}")
-            st.stop()
+    # Flujo robusto para "Acceso" / "Acceso Medios"
+    creds_src_obj = step2_connect_gsc(sc_choice)
+    if not creds_src_obj:
+        st.stop()
+    try:
+        sc_service = ensure_sc_client(creds_src_obj)
+        src_label = st.session_state.get("src_account_label") or sc_choice
+        st.markdown(
+            f'''
+            <div class="success-inline">
+                Cuenta de acceso (Search Console): <strong>{src_label}</strong>
+                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+            </div>
+            ''',
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"No pude inicializar el cliente de Search Console: {e}")
+        st.stop()
 
 # --- PASO 4: sitio + PASO 5: análisis ---
 def pick_site(sc_service):
