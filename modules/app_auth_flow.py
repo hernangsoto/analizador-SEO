@@ -127,10 +127,36 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
         st.success(f"Sesión iniciada: {ident.get('email','(sin email)')}")
         return ident
 
-    # UI inicial: un botón que redirige a Google en la MISMA pestaña
+    # UI inicial: dos opciones para evitar iframes
+c1, c2 = st.columns([1, 1])
+
+with c1:
+    # Preferimos abrir en pestaña nueva: evita completamente iframes/sandbox
+    if hasattr(st, "link_button"):
+        st.link_button("Continuar con Google (pestaña nueva)", oo["auth_url"])
+    else:
+        st.markdown(
+            f'<a href="{oo["auth_url"]}" target="_blank" rel="noopener">'
+            f'<button type="button">Continuar con Google (pestaña nueva)</button></a>',
+            unsafe_allow_html=True
+        )
+
+with c2:
+    # Alternativa: misma pestaña, forzando la navegación del top-level window
+    if st.button("Continuar aquí (si la otra falla)"):
+        st.session_state["_do_oidc_redirect"] = True
+
+# Ejecuta la redirección top-level (nunca dentro de iframes)
+if st.session_state.get("_do_oidc_redirect"):
+    st.session_state.pop("_do_oidc_redirect", None)
     st.markdown(
-        f'<a href="{oo["auth_url"]}" target="_self"><button type="button">Continuar con Google</button></a>',
-        unsafe_allow_html=True
+        f"""
+        <script>
+        // Evita navegación dentro de iframes/sandbox
+        window.top.location.assign("{oo['auth_url']}");
+        </script>
+        """,
+        unsafe_allow_html=True,
     )
 
     # Botón de reinicio del paso (por si quedó mal un estado previo)
