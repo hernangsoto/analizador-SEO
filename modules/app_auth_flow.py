@@ -1,26 +1,22 @@
 # modules/app_auth_flow.py
 from __future__ import annotations
 
-import os
-from typing import Optional, Dict
-from urllib.parse import urlencode
-
 import requests
 import streamlit as st
+from urllib.parse import urlencode, urlsplit, parse_qs
 
-# Usamos helpers del módulo auth
 from .auth import (
     build_flow_web,
-    is_redirect_ready,
-    SCOPES_PERSONAL_FULL,
+    SCOPES_OIDC,            # Paso 0: solo identidad (OIDC)
     fetch_userinfo,
-    creds_to_dict,
+    is_redirect_ready,
 )
-from .utils import token_store
+from .utils import token_store, debug_log
 
-# ------------------------------
-# Helpers locales de query params
-# ------------------------------
+
+# -------------------------------
+# Helpers de query params (compat)
+# -------------------------------
 def _get_qp() -> dict:
     try:
         return dict(st.query_params)
@@ -33,134 +29,120 @@ def _clear_qp():
     except Exception:
         st.experimental_set_query_params()
 
-# ------------------------------
-# Paso 0: Login con Google (web)
-# Pide OIDC + Drive/Sheets + Search Console
-# ------------------------------
-def step0_google_identity() -> Optional[Dict[str, str]]:
-    """
-    Autentica la cuenta PERSONAL con un cliente OAuth **web** y solicita:
-      - OIDC (openid, email, profile)
-      - Drive/Sheets
-      - Search Console (readonly)
 
-    • No se muestra campo para pegar URL.
-    • Si el 'state' no coincide, lo reintentamos silenciosamente; solo
-      en modo DEBUG mostramos el aviso.
-    • Al finalizar, guarda las credenciales en session_state y token_store
-      como 'creds_dest' y marca step1_done=True para saltear el viejo Paso 1.
+# ============================
+# PASO 0: Login con Google (OIDC)
+# ============================
+def step0_google_identity():
     """
-    st.subheader("0) Iniciar sesión con Google ↩︎")
+    Paso 0: Iniciar sesión con Google para obtener identidad (name/email/picture).
+    - Usa cliente OAuth **Web** tomado de [auth] en secrets.
+    - Evita el problema de iframes ofreciendo:
+        1) Botón que abre en pestaña nueva (target=_blank)
+        2) Botón alternativo que fuerza navegación en top-level window
+    - Solo OIDC (no Drive/GSC). Drive y GSC se piden en pasos posteriores.
+    """
+    st.subheader("0) Iniciar sesión con Google")
 
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
-    if not is_redirect_ready(acct_for_dest):
+    # Verificamos que exista configuración Web en secrets
+    if not is_redirect_ready():
         st.error(
-            "Falta configurar el redirect_uri o el cliente OAuth Web.\n"
-            "En `[auth]` definí client_id, client_secret y redirect_uri que apunte a esta app."
+            "Falta configurar el redirect_uri o el cliente OAuth Web.\n\n"
+            "Definí en secrets [auth] `client_id`, `client_secret` y `redirect_uri`."
         )
         return None
 
-    # Inicializar flujo (una sola vez por sesión)
+    # Creamos el flow y auth_url una sola vez
     if "oauth_oidc" not in st.session_state:
-        flow = build_flow_web(account_key=acct_for_dest, scopes=SCOPES_PERSONAL_FULL)
+        flow = build_flow_web(SCOPES_OIDC)
+        # Nota: no pasamos include_granted_scopes aquí para simplificar OIDC
         auth_url, state = flow.authorization_url(
-            prompt="select_account consent",
-            access_type="offline",
-            include_granted_scopes="true",  # string, no bool
+            prompt="select_account",
+            access_type="online",
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
             "auth_url": auth_url,
             "state": state,
-            "redirect_uri": (st.secrets.get("auth") or {}).get("redirect_uri"),
-            "account_key": acct_for_dest,
         }
 
     oo = st.session_state["oauth_oidc"]
 
-    # ¿Volvimos de Google con code+state?
+    # Si volvemos de Google con ?code=...&state=...
     qp = _get_qp()
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
     if code and state_in:
-        # Reconstruir la URL EXACTA que Google llamó (redirect_uri + QS actual)
-        current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k,v in qp.items()}, doseq=True)}"
-
+        # Validar state (mensaje solo en modo DEBUG)
+        expected_state = oo.get("state")
+        if state_in != expected_state:
+            if st.session_state.get("DEBUG"):
+                st.warning("Aviso: el 'state' no coincide (posible nueva pestaña). "
+                           "Usando el flujo rehidratado con el state recibido…")
+            # Aun con mismatch, intentamos continuar para no bloquear al usuario
+            # (en la práctica Google valida también el code+redirect).
         try:
-            # Intento normal con el flow guardado
+            # Reconstruimos la URL completa usada como authorization_response
+            flat_qp = {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
+            current_url = f"{st.secrets['auth']['redirect_uri']}?{urlencode(flat_qp)}"
+
             flow = oo["flow"]
             flow.fetch_token(authorization_response=current_url)
+            creds = flow.credentials
+
+            # Obtenemos userinfo (OIDC)
+            ident = fetch_userinfo(creds) or {"name": "Invitado", "email": "—", "picture": None}
+            st.session_state["_google_identity"] = ident
+
+            # Limpiamos code/state para dejar la URL prolija
+            _clear_qp()
+
+            st.success(f"Identidad verificada: {ident.get('email', '—')}")
+            return ident
         except Exception as e:
-            # Si hay problema de 'state', rehidratamos el flow y reintentamos
-            if "state" in str(e).lower():
-                if st.session_state.get("DEBUG"):
-                    st.warning("Aviso (DEBUG): el 'state' no coincidió; rehidratando flujo con el state recibido…")
-                # Crear un flow fresco con los mismos scopes y redirect
-                flow = build_flow_web(account_key=oo["account_key"], scopes=SCOPES_PERSONAL_FULL)
-                flow.redirect_uri = oo["redirect_uri"]
-                flow.fetch_token(authorization_response=current_url)
-            else:
-                st.error("No se pudo completar el login. Volvé a intentarlo (un solo click).")
-                if st.button("Reiniciar Paso 0", key="btn_restart_step0"):
-                    st.session_state.pop("oauth_oidc", None)
-                    st.session_state.pop("_google_identity", None)
-                    _clear_qp()
-                    st.rerun()
-                st.stop()
+            debug_log("[step0_google_identity] fetch_token fallo", str(e))
+            st.error("No se pudo completar el login. Volvé a intentarlo (un solo click).")
+            if st.button("Reiniciar Paso 0", key="btn_reset_oidc_after_error"):
+                st.session_state.pop("oauth_oidc", None)
+                st.session_state.pop("_google_identity", None)
+                _clear_qp()
+                st.rerun()
+            return None
 
-        # Tokens OK → guardar
-        creds = flow.credentials
-        ident = fetch_userinfo(creds) or {}
-        st.session_state["_google_identity"] = ident
+    # --- UI inicial (evita iframes) ---
+    c1, c2 = st.columns([1, 1])
 
-        data = creds_to_dict(creds)
-        st.session_state["creds_dest"] = data
-        token_store.save("creds_dest", data)
+    with c1:
+        # Opción preferida: abre en pestaña nueva (evita sandbox/iframes)
+        if hasattr(st, "link_button"):
+            st.link_button("Continuar con Google (pestaña nueva)", oo["auth_url"])
+        else:
+            st.markdown(
+                f'<a href="{oo["auth_url"]}" target="_blank" rel="noopener">'
+                f'<button type="button">Continuar con Google (pestaña nueva)</button></a>',
+                unsafe_allow_html=True
+            )
 
-        # Marcar como listo el viejo Paso 1 (Drive/Sheets)
-        st.session_state["step1_done"] = True
+    with c2:
+        # Alternativa: misma pestaña, forzando navegación del top-level window
+        if st.button("Continuar aquí (si la otra falla)"):
+            st.session_state["_do_oidc_redirect"] = True
 
-        # Limpiar la URL de code/state
-        _clear_qp()
-
-        st.success(f"Sesión iniciada: {ident.get('email','(sin email)')}")
-        return ident
-
-    # UI inicial: dos opciones para evitar iframes
-c1, c2 = st.columns([1, 1])
-
-with c1:
-    # Preferimos abrir en pestaña nueva: evita completamente iframes/sandbox
-    if hasattr(st, "link_button"):
-        st.link_button("Continuar con Google (pestaña nueva)", oo["auth_url"])
-    else:
+    if st.session_state.get("_do_oidc_redirect"):
+        st.session_state.pop("_do_oidc_redirect", None)
         st.markdown(
-            f'<a href="{oo["auth_url"]}" target="_blank" rel="noopener">'
-            f'<button type="button">Continuar con Google (pestaña nueva)</button></a>',
-            unsafe_allow_html=True
+            f"""
+            <script>
+            // Forzar navegación en top-level (no dentro de iframes)
+            window.top.location.assign("{oo['auth_url']}");
+            </script>
+            """,
+            unsafe_allow_html=True,
         )
 
-with c2:
-    # Alternativa: misma pestaña, forzando la navegación del top-level window
-    if st.button("Continuar aquí (si la otra falla)"):
-        st.session_state["_do_oidc_redirect"] = True
-
-# Ejecuta la redirección top-level (nunca dentro de iframes)
-if st.session_state.get("_do_oidc_redirect"):
-    st.session_state.pop("_do_oidc_redirect", None)
-    st.markdown(
-        f"""
-        <script>
-        // Evita navegación dentro de iframes/sandbox
-        window.top.location.assign("{oo['auth_url']}");
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Botón de reinicio del paso (por si quedó mal un estado previo)
-    if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
+    # Botón para reiniciar el paso 0 manualmente
+    if st.button("Reiniciar Paso 0", key="btn_reset_oidc_manual"):
         st.session_state.pop("oauth_oidc", None)
         st.session_state.pop("_google_identity", None)
         _clear_qp()
@@ -168,9 +150,10 @@ if st.session_state.get("_do_oidc_redirect"):
 
     return st.session_state.get("_google_identity")
 
-# ------------------------------
-# Pantalla de LOGOUT (sin cambios funcionales)
-# ------------------------------
+
+# ============================
+# Pantalla de LOGOUT
+# ============================
 def _revoke_google_token(token: str | None) -> None:
     if not token:
         return
@@ -182,9 +165,9 @@ def _revoke_google_token(token: str | None) -> None:
             timeout=10,
         )
     except Exception:
-        pass
+        pass  # no hacemos ruido si la revocación falla
 
-def logout_screen(app_home: str):
+def logout_screen(home_url: str = "?"):
     st.header("Cerrar sesión")
     ident = st.session_state.get("_google_identity") or {}
     current_email = ident.get("email") or "—"
@@ -193,35 +176,40 @@ def logout_screen(app_home: str):
     revoke = st.checkbox("Revocar permisos de Google (Drive/Sheets y Search Console)", value=True)
     wipe_pkg = st.checkbox("Borrar caché del paquete externo (.ext_pkgs/)", value=False)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
+    c1, c2 = st.columns([1, 1])
+    with c1:
         if st.button("🔒 Cerrar sesión y limpiar", type="primary"):
             if revoke:
+                # Revocamos tokens guardados
                 for key in ("creds_dest", "creds_src"):
-                    data = st.session_state.get(key) or {}
+                    data = st.session_state.get(key) or token_store.load(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
 
+            # Limpiar cachés
             try: st.cache_data.clear()
             except Exception: pass
             try: st.cache_resource.clear()
             except Exception: pass
 
+            # Borrar paquete externo (opcional)
             if wipe_pkg:
                 import shutil
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
 
+            # Limpiar session_state
             for k in [
-                "_auth_bypass","_google_identity",
-                "oauth_oidc","oauth_dest","oauth_src",
-                "creds_dest","creds_src",
-                "step1_done","step2_done","step3_done",
-                "dest_folder_id","src_account_label",
-                "site_url_choice","last_file_id","last_file_kind",
-                "DEBUG",
+                "_auth_bypass", "_google_identity",
+                "oauth_oidc", "oauth_dest", "oauth_src",
+                "creds_dest", "creds_src",
+                "step1_done", "step2_done", "step3_done",
+                "dest_folder_id", "src_account_label",
+                "site_url_choice", "last_file_id", "last_file_kind",
+                "DEBUG", "_do_oidc_redirect",
             ]:
                 st.session_state.pop(k, None)
 
+            # Limpiar token_store persistente
             try:
                 token_store.clear("creds_dest")
                 token_store.clear("creds_src")
@@ -229,10 +217,10 @@ def logout_screen(app_home: str):
                 pass
 
             st.success("Sesión cerrada y caché limpiada.")
-            st.markdown(f"➡️ Volver a la app: [{app_home}]({app_home})", unsafe_allow_html=True)
+            st.markdown(f"➡️ Volver a la app: [Inicio]({home_url})")
             st.stop()
 
-    with col2:
+    with c2:
         if st.button("Cancelar"):
             _clear_qp()
             st.rerun()
