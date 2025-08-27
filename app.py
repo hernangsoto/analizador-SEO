@@ -130,7 +130,9 @@ sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 st.session_state.setdefault("step1_done", False)
 st.session_state.setdefault("step2_done", False)
 st.session_state.setdefault("step3_done", False)
-
+# Si el Paso 0 ya dejó credenciales personales listas, salteamos el Paso 1
+if not st.session_state["step1_done"] and st.session_state.get("creds_dest"):
+    st.session_state["step1_done"] = True
 # === Acciones de query ===
 _qp = get_qp()
 _action = _qp.get("action")
