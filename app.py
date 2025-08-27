@@ -59,7 +59,8 @@ from modules.app_auth_flow import step0_google_identity, logout_screen
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # ====== Google modules ======
-from modules.auth import pick_destination_oauth, pick_source_oauth, build_flow
+# ⬇️ quitamos build_flow del import para evitar el fallo de importación
+from modules.auth import pick_destination_oauth, pick_source_oauth
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
 
@@ -297,7 +298,7 @@ if analisis == "7":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "names"
-                gemini_summary(gs_client, sid, kind="names", widget_suffix="after_run")
+                # 👇 Ya no mostramos aquí el toggle de resumen (solo una vez al final)
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
         st.divider(); st.subheader("📄 Resumen del análisis")
         st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
@@ -322,15 +323,17 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
     """
     Igual a pick_source_oauth pero bloqueando la cuenta (sin radio).
     """
+    # Import local para evitar fallos de importación a nivel módulo
+    from modules.auth import build_flow
+
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
-    # Rehidratación por account_key
     key = f"oauth_src_{account_key}"
     if key not in st.session_state:
         flow = build_flow(account_key, GSC_SCOPES)
+        # ⚠️ Evitamos include_granted_scopes para no provocar 400
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes=True,
         )
         st.session_state[key] = {
             "account": account_key,
@@ -436,7 +439,7 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 else:
-    # >>> Aquí va el cambio: mostramos DIRECTO el login de la cuenta elegida, sin radio duplicado
+    # >>> Cambio: mostramos DIRECTO el login de la cuenta elegida, sin radio duplicado
     wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
     need_new_auth = (
         not st.session_state.get("step3_done") or
@@ -445,7 +448,6 @@ else:
     )
 
     if need_new_auth:
-        # Ejecutar directamente el flujo para la cuenta elegida
         creds_src_obj = pick_source_oauth_forced(wanted_key)
         if not creds_src_obj:
             st.stop()
@@ -537,7 +539,7 @@ if analisis == "4":
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
-            gemini_summary(gs_client, sid, kind="core", force_prompt_key="core", widget_suffix="after_run")
+            # 👇 Ya no mostramos aquí el toggle de resumen (solo una vez al final)
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -571,7 +573,7 @@ elif analisis == "5":
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
-            gemini_summary(gs_client, sid, kind="evergreen", widget_suffix="after_run")
+            # 👇 Ya no mostramos aquí el toggle de resumen
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -605,7 +607,7 @@ elif analisis == "6":
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
-            gemini_summary(gs_client, sid, kind="audit", widget_suffix="after_run")
+            # 👇 Ya no mostramos aquí el toggle de resumen
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
