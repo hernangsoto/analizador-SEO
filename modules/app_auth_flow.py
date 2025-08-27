@@ -186,9 +186,13 @@ def step0_google_identity():
         _force_flow_state(flow, state_in)
 
         # 4) Aviso si el state no coincide, pero continuar
-        if expected_state and state_in and state_in != expected_state:
+        if returned_state != expected_state:
+    # Mostrar el aviso solo en DEBUG
+        if st.session_state.get("DEBUG"):
             st.info("Aviso: el 'state' no coincide (posible nueva pestaña). Usando el flujo rehidratado con el state recibido…")
-
+    # sigue la lógica de rehidratación / reemplazo de state sin mostrar nada en modo normal
+        state = returned_state  # o la estrategia que ya estés usando
+    
         # 5) Intercambiar código por tokens
         from urllib.parse import urlencode
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
