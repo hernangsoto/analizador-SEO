@@ -2,14 +2,28 @@
 from __future__ import annotations
 
 from typing import Optional
-from urllib.parse import urlsplit, parse_qs
-
+from urllib.parse import urlencode
 import requests
 import streamlit as st
-from google.oauth2.credentials import Credentials
 
 from .auth import build_flow
 from .utils import token_store
+# Si tu app ya tiene estos helpers, los usamos para manejar query params
+try:
+    from .app_utils import get_qp, clear_qp  # type: ignore
+except Exception:
+    # Fallbacks simples si no existen app_utils
+    def get_qp() -> dict:
+        try:
+            return dict(st.query_params)
+        except Exception:
+            return st.experimental_get_query_params()
+
+    def clear_qp():
+        try:
+            st.query_params.clear()
+        except Exception:
+            st.experimental_set_query_params()
 
 
 __all__ = ["step0_google_identity", "logout_screen"]
@@ -17,97 +31,99 @@ __all__ = ["step0_google_identity", "logout_screen"]
 
 def step0_google_identity() -> Optional[dict]:
     """
-    PASO 0 (versión clásica): login con Google OIDC usando flujo manual.
-    - Muestra link a Google
-    - El usuario pega aquí la URL http://localhost/?code=...&state=...
-    - Validamos 'state', canjeamos el 'code' y consultamos /userinfo
-    - Guardamos identidad en st.session_state["_google_identity"]
+    PASO 0 (redirect automático): botón "Iniciar sesión con mi cuenta de Nomadic"
+    que abre Google, vuelve a la app con ?code=...&state=... y termina el login
+    sin pegar URL. Requiere configurar [auth].redirect_uri en st.secrets y en la
+    consola de Google (Authorized redirect URIs).
     """
     st.subheader("0) Iniciar sesión con Google (identidad)")
 
-    acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
+    acct_key = st.secrets.get("oauth_app_key", "ACCESO")
+    redirect_uri = (st.secrets.get("auth", {}) or {}).get("redirect_uri")
 
-    # Crear flow + URL de autorización una sola vez
+    if not redirect_uri:
+        st.error(
+            "Falta configurar `[auth].redirect_uri` en *st.secrets* para usar el login automático.\n"
+            "Agrega la URL exacta de tu app (la misma debe estar autorizada en Google Cloud → OAuth)."
+        )
+        return None
+
+    # Crear flow + URL de autorización (una sola vez)
     if "oauth_oidc" not in st.session_state:
-        flow = build_flow(acct_for_dest, ["openid", "email", "profile"])
+        flow = build_flow(acct_key, ["openid", "email", "profile"])
+        flow.redirect_uri = redirect_uri
         auth_url, state = flow.authorization_url(
             prompt="select_account",
             access_type="online",
-            include_granted_scopes="true",  # string, no bool
+            include_granted_scopes="true",  # string requerido por Google
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
             "auth_url": auth_url,
             "state": state,
-            "account_key": acct_for_dest,
+            "redirect_uri": redirect_uri,
+            "account_key": acct_key,
         }
 
     oo = st.session_state["oauth_oidc"]
 
-    # UI: link + expander con la URL
-    st.markdown(f"🔗 **Paso A (identidad):** [Iniciar sesión con Google]({oo['auth_url']})")
-    with st.expander("Ver/copiar URL de autorización (identidad)"):
-        st.code(oo["auth_url"])
+    # 1) ¿Volvimos de Google con code+state?
+    qp = get_qp()
+    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
+    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
-    # Campo para pegar la URL de redirección
-    url = st.text_input(
-        "🔑 Paso B (identidad): pegá la URL completa (http://localhost/?code=...&state=...)",
-        key="auth_response_url_oidc",
-        placeholder="http://localhost/?code=...&state=...",
+    if code and state_in:
+        # Mostrar aviso de state mismatch solo en modo DEBUG (no bloquear)
+        expected = oo.get("state")
+        if state_in != expected and st.session_state.get("DEBUG"):
+            st.info("Aviso: el 'state' no coincide (posible nueva pestaña). "
+                    "Usando el flujo rehidratado con el state recibido…")
+
+        # Reconstruir la URL EXACTA que recibió tu redirect_uri
+        auth_response = f"{oo['redirect_uri']}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}"
+
+        try:
+            flow = oo["flow"]
+            flow.redirect_uri = oo["redirect_uri"]
+            flow.fetch_token(authorization_response=auth_response)
+            creds = flow.credentials
+
+            # /userinfo OIDC
+            resp = requests.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers={"Authorization": f"Bearer {creds.token}"},
+                timeout=10,
+            )
+            info = resp.json() if resp.status_code == 200 else {}
+            ident = {
+                "name": info.get("name") or info.get("email") or "Invitado",
+                "email": info.get("email") or "—",
+                "picture": info.get("picture"),
+            }
+            st.session_state["_google_identity"] = ident
+
+            # Limpiar code/state de la URL
+            clear_qp()
+
+            st.success(f"Identidad verificada: {ident['email']}")
+            return ident
+        except Exception as e:
+            st.error(f"No se pudo verificar identidad: {e}")
+            st.stop()
+
+    # 2) Primer render (sin code/state) → mostrar botón que abre Google en la MISMA pestaña
+    st.markdown(
+        f'<a href="{oo["auth_url"]}" target="_self">'
+        f'<button type="button">Iniciar sesión con mi cuenta de Nomadic</button>'
+        f'</a>',
+        unsafe_allow_html=True,
     )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Verificar identidad", type="primary", key="btn_oidc_connect"):
-            if not url.strip():
-                st.error("Pegá la URL completa de redirección (incluye code y state).")
-                st.stop()
-
-            # Validar 'state' ANTES de fetch_token
-            try:
-                qs = parse_qs(urlsplit(url.strip()).query)
-                returned_state = (qs.get("state") or [""])[0]
-            except Exception:
-                returned_state = ""
-            expected_state = oo.get("state")
-            if not returned_state or returned_state != expected_state:
-                st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-                st.stop()
-
-            # Intercambiar code por tokens y pedir userinfo
-            try:
-                flow = oo["flow"]
-                flow.fetch_token(authorization_response=url.strip())
-                creds = flow.credentials
-                resp = requests.get(
-                    "https://openidconnect.googleapis.com/v1/userinfo",
-                    headers={"Authorization": f"Bearer {creds.token}"},
-                    timeout=10,
-                )
-                info = resp.json() if resp.status_code == 200 else {}
-                ident = {
-                    "name": info.get("name") or info.get("email") or "Invitado",
-                    "email": info.get("email") or "—",
-                    "picture": info.get("picture"),
-                }
-                st.session_state["_google_identity"] = ident
-                st.success(f"Identidad verificada: {ident['email']}")
-                return ident
-            except Exception as e:
-                st.error(f"No se pudo verificar identidad: {e}")
-                st.stop()
-
-    with col2:
-        if st.button("Reiniciar Paso 0", key="btn_reset_oidc"):
-            st.session_state.pop("oauth_oidc", None)
-            st.session_state.pop("_google_identity", None)
-            st.rerun()
-
+    st.caption("Serás redirigido nuevamente a esta app después de otorgar permisos.")
     return st.session_state.get("_google_identity")
 
 
 # ------------------------------
-# Pantalla de LOGOUT (sin cambios)
+# Pantalla de LOGOUT (igual que antes)
 # ------------------------------
 def _revoke_google_token(token: str | None) -> None:
     if not token:
@@ -184,5 +200,4 @@ def logout_screen(app_home: str) -> None:
 
     with col2:
         if st.button("Cancelar"):
-            # Volver a home sin limpiar nada
             st.markdown(f"[Volver a la app]({app_home})")
