@@ -1,7 +1,7 @@
 # modules/auth.py
 from __future__ import annotations
 
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -23,22 +23,41 @@ SCOPES_DRIVE: List[str] = [
 SCOPES_GSC: List[str] = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
+# OIDC para identidad (Paso 0)
+SCOPES_OIDC: List[str] = ["openid", "email", "profile"]
 
 
 # =============================
-# Helpers
+# Helpers comunes
+# =============================
+def _get_account(account_key: str) -> Dict[str, str]:
+    try:
+        return dict(st.secrets["accounts"][account_key])
+    except Exception:
+        st.error(f"No encontré credenciales en st.secrets['accounts']['{account_key}'].")
+        st.stop()  # corta la app
+
+
+def creds_to_dict(creds: Credentials) -> dict:
+    return {
+        "token": creds.token,
+        "refresh_token": getattr(creds, "refresh_token", None),
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": creds.scopes,
+    }
+
+
+# =============================
+# Flujo "Installed app" (copy/paste) — usado SOLO para pasos 1 y 2
 # =============================
 def build_flow(account_key: str, scopes: List[str]) -> Flow:
     """
-    Crea un flujo OAuth2 a partir de st.secrets['accounts'][account_key] con los scopes provistos.
-    Usa redirect http://localhost (compatible con pegar la URL de redirección en Streamlit).
+    Crea un flujo OAuth2 tipo 'installed' (redirect http://localhost).
+    Esto se usa para PASO 1 (Drive/Sheets) y PASO 2 (GSC) en modo manual.
     """
-    try:
-        acc = st.secrets["accounts"][account_key]
-    except Exception:
-        st.error(f"No encontré credenciales en st.secrets['accounts']['{account_key}'].")
-        st.stop()
-
+    acc = _get_account(account_key)
     client_secrets = {
         "installed": {
             "client_id": acc["client_id"],
@@ -54,15 +73,54 @@ def build_flow(account_key: str, scopes: List[str]) -> Flow:
     return flow
 
 
-def creds_to_dict(creds: Credentials) -> dict:
-    return {
-        "token": creds.token,
-        "refresh_token": getattr(creds, "refresh_token", None),
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
+# =============================
+# Flujo "Web" (redirect a la app) — usado para PASO 0 con BOTÓN
+# =============================
+def _discover_web_keys(acc: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Acepta varias convenciones de keys para el cliente 'web'.
+    """
+    cid = acc.get("web_client_id") or acc.get("client_id_web") or acc.get("client_id_webapp")
+    csec = acc.get("web_client_secret") or acc.get("client_secret_web") or acc.get("client_secret_webapp")
+    return cid, csec
+
+
+def is_redirect_ready(account_key: str) -> bool:
+    acc = _get_account(account_key)
+    redirect_uri = (st.secrets.get("auth", {}) or {}).get("redirect_uri") or acc.get("redirect_uri")
+    cid, csec = _discover_web_keys(acc)
+    return bool(redirect_uri and cid and csec)
+
+
+def build_flow_web(account_key: str, scopes: List[str]) -> Flow:
+    """
+    Crea un flujo OAuth2 'web' que redirige de vuelta a esta app (sin copiar URL).
+    Requiere:
+      - accounts[account_key].web_client_id / web_client_secret  (o alias compatibles)
+      - auth.redirect_uri (o accounts[account_key].redirect_uri)
+    """
+    acc = _get_account(account_key)
+    redirect_uri = (st.secrets.get("auth", {}) or {}).get("redirect_uri") or acc.get("redirect_uri")
+    cid, csec = _discover_web_keys(acc)
+
+    if not (redirect_uri and cid and csec):
+        raise RuntimeError(
+            "Falta configurar el cliente OAuth Web o el redirect_uri. "
+            "Agregá en secrets: [accounts.<key>.web_client_id, web_client_secret] y [auth.redirect_uri]."
+        )
+
+    client_secrets = {
+        "web": {
+            "client_id": cid,
+            "client_secret": csec,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [redirect_uri],
+        }
     }
+    flow = Flow.from_client_config(client_secrets, scopes=scopes)
+    flow.redirect_uri = redirect_uri
+    return flow
 
 
 # =============================
@@ -72,12 +130,10 @@ def get_cached_personal_creds() -> Optional[Credentials]:
     """
     Devuelve Credentials de la CUENTA PERSONAL (Drive/Sheets) si está cacheado.
     """
-    # Preferir construir Credentials directamente desde el token_store
     creds = token_store.as_credentials("creds_dest")
     if creds:
         return creds
 
-    # Fallback por compatibilidad: leer dict crudo si existe en session_state
     data = token_store.load("creds_dest")
     if not data:
         data = st.session_state.get("creds_dest")
@@ -90,28 +146,19 @@ def get_cached_personal_creds() -> Optional[Credentials]:
 
 
 # =============================
-# OAuth PERSONAL (Drive/Sheets)
+# OAuth PERSONAL (Drive/Sheets) — Paso 1 (modo manual)
 # =============================
 def pick_destination_oauth():
-    """
-    OAuth para la cuenta PERSONAL (Drive/Sheets).
-    - Genera la URL una sola vez por sesión.
-    - Verifica el 'state' devuelto en la URL pegada.
-    - Permite 'Reiniciar Paso 1' si hay mismatch.
-    """
     st.subheader("1) Conectar Google PERSONAL (Drive/Sheets)")
 
     acct_for_dest = st.secrets.get("oauth_app_key", "ACCESO")
 
-    # Si cambia la app key (raro), resetea flujo
     if st.session_state.get("oauth_dest", {}).get("account_key") != acct_for_dest:
         st.session_state.pop("oauth_dest", None)
 
-    # Construye el flow y auth_url solo si no existe ya
     if "oauth_dest" not in st.session_state:
         from .utils import build_flow_drive  # helper con scopes de Drive/Sheets
         flow = build_flow_drive(acct_for_dest)
-        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False" capitalizado.
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -120,12 +167,11 @@ def pick_destination_oauth():
             "account_key": acct_for_dest,
             "flow": flow,
             "auth_url": auth_url,
-            "state": state,              # ← guardamos el state generado
+            "state": state,
         }
 
     od = st.session_state["oauth_dest"]
     st.markdown(f"🔗 **Paso A (personal):** [Autorizar Drive/Sheets]({od['auth_url']})")
-
     with st.expander("Ver/copiar URL de autorización (personal)"):
         st.code(od["auth_url"])
 
@@ -143,35 +189,23 @@ def pick_destination_oauth():
             if not url.strip():
                 st.error("Pegá la URL completa de redirección (incluye code y state).")
                 st.stop()
-
-            # --- Validar 'state' explícitamente antes de fetch_token ---
             try:
                 qs = parse_qs(urlsplit(url.strip()).query)
                 returned_state = (qs.get("state") or [""])[0]
             except Exception:
                 returned_state = ""
 
-            if not returned_state:
-                st.error("La URL pegada no contiene parámetro 'state'. Verificá que sea la URL completa.")
-                st.stop()
-
             expected_state = od.get("state")
-            if returned_state != expected_state:
-                st.error(
-                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
-                    f"state esperado: `{expected_state}`\n"
-                    f"state recibido: `{returned_state}`"
-                )
+            if not returned_state or returned_state != expected_state:
+                st.error("CSRF Warning: el 'state' devuelto **no coincide** con el generado.")
                 st.info("Hacé clic en **Reiniciar Paso 1** y repetí la autorización (un solo click).")
                 st.stop()
 
-            # Si el state coincide, procedemos a intercambiar el code por tokens
             try:
                 flow: Flow = od["flow"]
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
                 data = creds_to_dict(creds)
-                # Guardar en ambos para consistencia
                 st.session_state["creds_dest"] = data
                 token_store.save("creds_dest", data)
                 st.success("Cuenta PERSONAL conectada.")
@@ -182,14 +216,12 @@ def pick_destination_oauth():
 
     with col2:
         if st.button("Reiniciar Paso 1", key="btn_reset_dest"):
-            # Limpia solo lo relacionado al flujo personal
             st.session_state.pop("oauth_dest", None)
             st.session_state.pop("creds_dest", None)
             token_store.clear("creds_dest")
             st.success("Restaurado. Volvé a hacer clic en 'Autorizar Drive/Sheets'.")
             st.stop()
 
-    # Rehidratar desde cache si ya está autenticado
     if not creds and st.session_state.get("creds_dest"):
         try:
             creds = Credentials(**st.session_state["creds_dest"])
@@ -200,13 +232,9 @@ def pick_destination_oauth():
 
 
 # =============================
-# OAuth FUENTE (Search Console)
+# OAuth FUENTE (Search Console) — Paso 2 (manual)
 # =============================
 def pick_source_oauth() -> Optional[Credentials]:
-    """
-    Autentica la cuenta FUENTE para Search Console (ACCESO o ACCESO_MEDIOS),
-    validando también el parámetro 'state' para evitar CSRF.
-    """
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
 
     acct = st.radio(
@@ -217,14 +245,11 @@ def pick_source_oauth() -> Optional[Credentials]:
         key="acct_choice_sc",
     )
 
-    # Reset si cambia la cuenta
     if st.session_state.get("oauth_src", {}).get("account") != acct:
         st.session_state.pop("oauth_src", None)
 
-    # Construye flow + auth_url si no existe
     if "oauth_src" not in st.session_state:
         flow = build_flow(acct, SCOPES_GSC)
-        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False" capitalizado.
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -256,24 +281,15 @@ def pick_source_oauth() -> Optional[Credentials]:
                 st.error("Pegá la URL completa de redirección (incluye code y state).")
                 st.stop()
 
-            # --- Validar 'state' explícitamente antes de fetch_token ---
             try:
                 qs = parse_qs(urlsplit(url.strip()).query)
                 returned_state = (qs.get("state") or [""])[0]
             except Exception:
                 returned_state = ""
 
-            if not returned_state:
-                st.error("La URL pegada no contiene parámetro 'state'. Verificá que sea la URL completa.")
-                st.stop()
-
             expected_state = osrc.get("state")
-            if returned_state != expected_state:
-                st.error(
-                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
-                    f"state esperado: `{expected_state}`\n"
-                    f"state recibido: `{returned_state}`"
-                )
+            if not returned_state or returned_state != expected_state:
+                st.error("CSRF Warning: el 'state' devuelto **no coincide** con el generado.")
                 st.info("Hacé clic en **Reiniciar Paso 2** y repetí la autorización (un solo click).")
                 st.stop()
 
@@ -295,7 +311,6 @@ def pick_source_oauth() -> Optional[Credentials]:
             st.success("Restaurado. Volvé a hacer clic en 'Autorizar acceso a Search Console'.")
             st.stop()
 
-    # Rehidratar si ya guardamos en este mismo run
     if not creds:
         creds_dict = token_store.load("creds_src")
         if creds_dict:
