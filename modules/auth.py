@@ -1,7 +1,7 @@
 # modules/auth.py
 from __future__ import annotations
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -17,23 +17,27 @@ from .utils import debug_log, token_store
 # =============================
 # Scopes
 # =============================
+SCOPES_OIDC: List[str] = ["openid", "email", "profile"]
+
 SCOPES_DRIVE: List[str] = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
 SCOPES_GSC: List[str] = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
 # Paso 0 (cuenta personal, con botón Google): identidad + Drive/Sheets + GSC
 SCOPES_PERSONAL_FULL: List[str] = [
-    "openid", "email", "profile",
+    *SCOPES_OIDC,
     *SCOPES_DRIVE,
     *SCOPES_GSC,
 ]
 
 # =============================
-# Helpers (CLIENTE INSTALLED = Paso 1: Drive/Sheets y Paso 2: GSC)
+# Compat: helper 'installed' (copy/paste a http://localhost)
+# — usado por Paso 1 (Drive/Sheets) y Paso 2 (GSC)
 # =============================
 def build_flow(account_key: str, scopes: List[str]) -> Flow:
     """
@@ -62,27 +66,42 @@ def build_flow(account_key: str, scopes: List[str]) -> Flow:
     return flow
 
 # =============================
-# Helper (CLIENTE WEB = Paso 0 identidad+Drive+GSC SIN copy/paste)
+# Paso 0 (botón Google) — cliente OAuth WEB
 # =============================
+def is_redirect_ready() -> Tuple[bool, str]:
+    """
+    Verifica que esté configurado el cliente OAuth Web en secrets:
+      [auth].client_id, [auth].client_secret, [auth].redirect_uri
+    Devuelve (ok, msg). Si ok=False, msg describe lo que falta.
+    """
+    auth = st.secrets.get("auth", {}) or {}
+    missing = [k for k in ("client_id", "client_secret", "redirect_uri") if not auth.get(k)]
+    if missing:
+        return (
+            False,
+            "Falta configurar el cliente OAuth Web: completa en secrets [auth] "
+            f"los campos {', '.join(missing)}."
+        )
+    return True, ""
+
 def build_flow_web(scopes: List[str]) -> Flow:
     """
     Crea un flujo OAuth2 tipo 'web' usando EXCLUSIVAMENTE st.secrets['auth'].
     Para el PASO 0 (login con botón, sin copiar URL) en tu cuenta personal,
-    pidiendo a la vez identidad + Drive/Sheets + GSC (usa SCOPES_PERSONAL_FULL).
+    pidiendo identidad + Drive/Sheets + GSC (usa SCOPES_PERSONAL_FULL).
     Requiere en secrets:
       [auth].client_id, [auth].client_secret, [auth].redirect_uri
-    El redirect_uri debe estar autorizado en el cliente OAuth (Google Cloud).
     """
-    auth = st.secrets.get("auth", {}) or {}
-    client_id = auth.get("client_id")
-    client_secret = auth.get("client_secret")
-    redirect_uri = auth.get("redirect_uri")
-
-    if not (client_id and client_secret and redirect_uri):
+    ok, msg = is_redirect_ready()
+    if not ok:
         raise RuntimeError(
-            "Falta configurar el cliente OAuth Web para el PASO 0. "
-            "Definí en secrets [auth]: client_id, client_secret y redirect_uri (p. ej. https://tu-app.streamlit.app/)."
+            msg + " Ej.: redirect_uri=https://<tu-app>.streamlit.app/ (debe coincidir con el cliente en Google Cloud)."
         )
+
+    auth = st.secrets.get("auth", {}) or {}
+    client_id = auth["client_id"]
+    client_secret = auth["client_secret"]
+    redirect_uri = auth["redirect_uri"]
 
     client_secrets = {
         "web": {
@@ -101,7 +120,7 @@ def fetch_userinfo(creds: Credentials) -> Dict[str, str]:
     """
     Devuelve {name, email, picture} desde el endpoint OIDC /userinfo.
     """
-    info = {}
+    info: Dict[str, str] = {}
     try:
         resp = requests.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
@@ -120,7 +139,7 @@ def fetch_userinfo(creds: Credentials) -> Dict[str, str]:
     return info
 
 # =============================
-# Creds → dict
+# Creds ↔ dict
 # =============================
 def creds_to_dict(creds: Credentials) -> dict:
     return {
@@ -133,7 +152,7 @@ def creds_to_dict(creds: Credentials) -> dict:
     }
 
 # =============================
-# Cache de credenciales (cuenta PERSONAL para Drive/Sheets)
+# Cache de credenciales (cuenta PERSONAL / Drive-Sheets)
 # =============================
 def get_cached_personal_creds() -> Optional[Credentials]:
     """
@@ -177,7 +196,6 @@ def pick_destination_oauth():
     if "oauth_dest" not in st.session_state:
         from .utils import build_flow_drive  # helper con scopes de Drive/Sheets
         flow = build_flow_drive(acct_for_dest)
-        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False"
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -290,7 +308,6 @@ def pick_source_oauth() -> Optional[Credentials]:
     # Construye flow + auth_url si no existe
     if "oauth_src" not in st.session_state:
         flow = build_flow(acct, SCOPES_GSC)
-        # ⚠️ No pasar include_granted_scopes para evitar 400 por "True"/"False"
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
