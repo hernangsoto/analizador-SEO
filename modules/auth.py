@@ -23,27 +23,38 @@ SCOPES_DRIVE: List[str] = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 SCOPES_GSC: List[str] = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
-# Paso 0 (cuenta personal, con botón Google): identidad + Drive/Sheets + GSC
-SCOPES_PERSONAL_FULL: List[str] = [
-    *SCOPES_OIDC,
-    *SCOPES_DRIVE,
-    *SCOPES_GSC,
-]
+SCOPES_PERSONAL_FULL: List[str] = [*SCOPES_OIDC, *SCOPES_DRIVE, *SCOPES_GSC]
+
 
 # =============================
-# Compat: helper 'installed' (copy/paste a http://localhost)
-# — usado por Paso 1 (Drive/Sheets) y Paso 2 (GSC)
+# Helpers comunes
+# =============================
+def _creds_to_dict(creds: Credentials) -> dict:
+    return {
+        "token": creds.token,
+        "refresh_token": getattr(creds, "refresh_token", None),
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": list(creds.scopes) if getattr(creds, "scopes", None) else None,
+    }
+
+def creds_to_dict(creds: Credentials) -> dict:
+    return _creds_to_dict(creds)
+
+
+# =============================
+# Cliente OAuth "installed" (copy/paste a http://localhost)
+# — Usado en Paso 1 (Drive/Sheets) y Paso 2 (GSC)
 # =============================
 def build_flow(account_key: str, scopes: List[str]) -> Flow:
     """
     Crea un flujo OAuth2 tipo 'installed' tomando credenciales de
     st.secrets['accounts'][account_key]. Redirect: http://localhost
-    (usado en Paso 1: Drive/Sheets y Paso 2: Search Console).
     """
     try:
         acc = st.secrets["accounts"][account_key]
@@ -65,56 +76,105 @@ def build_flow(account_key: str, scopes: List[str]) -> Flow:
     flow.redirect_uri = "http://localhost"
     return flow
 
+
 # =============================
 # Paso 0 (botón Google) — cliente OAuth WEB
 # =============================
-def is_redirect_ready() -> Tuple[bool, str]:
+def _get_web_oauth_config(account_key: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """
-    Verifica que esté configurado el cliente OAuth Web en secrets:
-      [auth].client_id, [auth].client_secret, [auth].redirect_uri
-    Devuelve (ok, msg). Si ok=False, msg describe lo que falta.
+    Devuelve (client_id, client_secret, redirect_uri, source_label)
+    Busca primero en [auth] y, si no alcanza, intenta en [accounts][account_key] con
+    claves web_client_id, web_client_secret, web_redirect_uri (alias opcionales).
     """
+    # Preferir [auth] (flujo personal)
     auth = st.secrets.get("auth", {}) or {}
-    missing = [k for k in ("client_id", "client_secret", "redirect_uri") if not auth.get(k)]
-    if missing:
-        return (
-            False,
-            "Falta configurar el cliente OAuth Web: completa en secrets [auth] "
-            f"los campos {', '.join(missing)}."
-        )
-    return True, ""
+    cid = auth.get("client_id")
+    csec = auth.get("client_secret")
+    ruri = auth.get("redirect_uri")
+    if cid and csec and ruri:
+        return cid, csec, ruri, "auth"
 
-def build_flow_web(scopes: List[str]) -> Flow:
+    # Fallback: mirar dentro de accounts[account_key] (si se pide explícito)
+    if account_key:
+        try:
+            acc = (st.secrets.get("accounts") or {}).get(account_key) or {}
+            cid2 = acc.get("web_client_id") or acc.get("client_id")
+            csec2 = acc.get("web_client_secret") or acc.get("client_secret")
+            ruri2 = acc.get("web_redirect_uri") or ruri  # usa redirect global si no hay uno específico
+            if cid2 and csec2 and ruri2:
+                return cid2, csec2, ruri2, f"accounts.{account_key}"
+        except Exception:
+            pass
+
+    return None, None, None, ""
+
+
+def is_redirect_status(account_key: Optional[str] = None) -> Tuple[bool, str]:
     """
-    Crea un flujo OAuth2 tipo 'web' usando EXCLUSIVAMENTE st.secrets['auth'].
-    Para el PASO 0 (login con botón, sin copiar URL) en tu cuenta personal,
-    pidiendo identidad + Drive/Sheets + GSC (usa SCOPES_PERSONAL_FULL).
-    Requiere en secrets:
-      [auth].client_id, [auth].client_secret, [auth].redirect_uri
+    Devuelve (ok, msg) verificando si hay config suficiente para el flujo Web.
     """
-    ok, msg = is_redirect_ready()
-    if not ok:
+    cid, csec, ruri, src = _get_web_oauth_config(account_key)
+    if cid and csec and ruri:
+        return True, ""
+    return (
+        False,
+        "Falta configurar el redirect_uri o el cliente OAuth Web. "
+        "Define en secrets [auth] client_id, client_secret y redirect_uri; "
+        "o en [accounts].<key> usa web_client_id / web_client_secret / web_redirect_uri."
+    )
+
+
+def is_redirect_ready(account_key: Optional[str] = None) -> bool:
+    """
+    API compatible con app_auth_flow: devuelve SOLO bool y acepta account_key.
+    """
+    ok, _ = is_redirect_status(account_key)
+    return ok
+
+
+def build_flow_web(*args, **kwargs) -> Flow:
+    """
+    Compatible con ambos usos:
+      - build_flow_web(scopes)
+      - build_flow_web(account_key, scopes)
+
+    Si existen credenciales en [auth], las usa. Si no, intenta con
+    [accounts][account_key] (web_client_id/secret/redirect_uri).
+    """
+    # Parseo flexible de parámetros
+    account_key: Optional[str] = None
+    scopes: List[str] = []
+
+    if len(args) == 1 and isinstance(args[0], list):
+        scopes = args[0]
+    elif len(args) >= 2 and isinstance(args[1], list):
+        account_key = args[0]
+        scopes = args[1]
+    else:
+        scopes = kwargs.get("scopes", [])
+        account_key = kwargs.get("account_key")
+
+    cid, csec, ruri, src = _get_web_oauth_config(account_key)
+    if not (cid and csec and ruri):
         raise RuntimeError(
-            msg + " Ej.: redirect_uri=https://<tu-app>.streamlit.app/ (debe coincidir con el cliente en Google Cloud)."
+            "Falta configurar el redirect_uri o el cliente OAuth Web.\n"
+            "secrets [auth].redirect_uri debe apuntar a tu app (p. ej., https://<tu-app>.streamlit.app/).\n"
+            "en [accounts].<key> definí web_client_id y web_client_secret (o sus alias)."
         )
-
-    auth = st.secrets.get("auth", {}) or {}
-    client_id = auth["client_id"]
-    client_secret = auth["client_secret"]
-    redirect_uri = auth["redirect_uri"]
 
     client_secrets = {
         "web": {
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "client_id": cid,
+            "client_secret": csec,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [redirect_uri],
+            "redirect_uris": [ruri],
         }
     }
     flow = Flow.from_client_config(client_secrets, scopes=scopes)
-    flow.redirect_uri = redirect_uri
+    flow.redirect_uri = ruri
     return flow
+
 
 def fetch_userinfo(creds: Credentials) -> Dict[str, str]:
     """
@@ -138,21 +198,9 @@ def fetch_userinfo(creds: Credentials) -> Dict[str, str]:
         debug_log("[fetch_userinfo] fallo userinfo", str(e))
     return info
 
-# =============================
-# Creds ↔ dict
-# =============================
-def creds_to_dict(creds: Credentials) -> dict:
-    return {
-        "token": creds.token,
-        "refresh_token": getattr(creds, "refresh_token", None),
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes) if getattr(creds, "scopes", None) else None,
-    }
 
 # =============================
-# Cache de credenciales (cuenta PERSONAL / Drive-Sheets)
+# Cache de credenciales
 # =============================
 def get_cached_personal_creds() -> Optional[Credentials]:
     """
@@ -173,6 +221,7 @@ def get_cached_personal_creds() -> Optional[Credentials]:
         except Exception as e:
             debug_log("[get_cached_personal_creds] no pude construir Credentials desde dict", str(e))
     return None
+
 
 # =============================
 # OAuth PERSONAL (Drive/Sheets) — PASO 1 (installed)
@@ -196,6 +245,7 @@ def pick_destination_oauth():
     if "oauth_dest" not in st.session_state:
         from .utils import build_flow_drive  # helper con scopes de Drive/Sheets
         flow = build_flow_drive(acct_for_dest)
+        # ⚠️ Sin include_granted_scopes para evitar 400 por bool capitalizado
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
@@ -254,7 +304,7 @@ def pick_destination_oauth():
                 flow: Flow = od["flow"]
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
-                data = creds_to_dict(creds)
+                data = _creds_to_dict(creds)
                 # Guardar en ambos para consistencia
                 st.session_state["creds_dest"] = data
                 token_store.save("creds_dest", data)
@@ -282,6 +332,7 @@ def pick_destination_oauth():
 
     return creds
 
+
 # =============================
 # OAuth FUENTE (Search Console) — PASO 2 (installed)
 # =============================
@@ -289,7 +340,6 @@ def pick_source_oauth() -> Optional[Credentials]:
     """
     Autentica la cuenta FUENTE para Search Console (ACCESO o ACCESO_MEDIOS),
     validando también el parámetro 'state' para evitar CSRF.
-    (Flujo 'installed' con redirect http://localhost, copy/paste).
     """
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
 
@@ -364,7 +414,7 @@ def pick_source_oauth() -> Optional[Credentials]:
                 flow: Flow = osrc["flow"]
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
-                data = creds_to_dict(creds)
+                data = _creds_to_dict(creds)
                 token_store.save("creds_src", data)
                 st.success("Cuenta SC conectada.")
             except Exception as e:
