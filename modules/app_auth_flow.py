@@ -36,7 +36,7 @@ def step0_google_identity():
     Inicia sesión con Google usando el flujo WEB (redirect a tu app).
     - No requiere pegar ninguna URL.
     - Pide scopes: openid, email, profile (identidad).
-    - Muestra advertencias de 'state mismatch' SOLO en modo DEBUG.
+    - Si el 'state' no coincide o se perdió la sesión, rehidrata el flujo automáticamente.
     Guarda en session_state['_google_identity'] => {name, email, picture}
     """
     st.subheader("0) Iniciar sesión con Google")
@@ -50,7 +50,7 @@ def step0_google_identity():
         )
         st.stop()
 
-    # Construir el flujo una sola vez
+    # Construir el flujo una sola vez (primer render)
     if "oauth_oidc_web" not in st.session_state:
         flow = build_flow_web(SCOPES_OIDC)
         auth_url, state = flow.authorization_url(
@@ -72,27 +72,33 @@ def step0_google_identity():
 
     # 1) ¿Volvimos de Google con ?code&state?
     if code and state_in:
-        expected_state = oo.get("state")
-        if state_in != expected_state:
-            # Solo en DEBUG mostramos el detalle técnico
-            if st.session_state.get("DEBUG"):
-                st.warning("Aviso: el 'state' no coincide (posible nueva pestaña). "
-                           "Intentando con el flujo rehidratado…")
-            else:
-                st.error("No se pudo completar el login. Volvé a intentarlo (un solo click).")
-                # permitir reinicio del paso
-                if st.button("Reiniciar Paso 0"):
-                    st.session_state.pop("oauth_oidc_web", None)
-                    st.session_state.pop("_google_identity", None)
-                    _clear_qp()
-                    st.rerun()
-                st.stop()
-
         # Reconstruir la URL exacta de redirección
         current_url = f"{oo['redirect_uri']}?{urlencode({k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}, doseq=True)}"
 
+        # Preferir flujo existente; si falta o hay mismatch, rehidratar y forzar state
+        flow = oo.get("flow")
+        expected_state = oo.get("state")
+
+        # Si no hay flow (sesión perdida) o el state no coincide -> rehidratar
+        if (flow is None) or (expected_state != state_in):
+            if st.session_state.get("DEBUG"):
+                st.info("Aviso (DEBUG): state no coincide o sesión perdida. Rehidratando flujo con el state recibido…")
+            # reconstruir flujo SIN generar un state nuevo (no llamamos authorization_url)
+            flow = build_flow_web(SCOPES_OIDC)
+            # forzar el state entrante en el objeto flow (propiedad privada/segura)
+            try:
+                setattr(flow, "state", state_in)
+            except Exception:
+                pass
+            try:
+                setattr(flow, "_state", state_in)
+            except Exception:
+                pass
+            # guardarlo de nuevo por si lo necesitamos luego
+            st.session_state["oauth_oidc_web"]["flow"] = flow
+
+        # Intercambiar el code por tokens
         try:
-            flow = oo["flow"]
             flow.fetch_token(authorization_response=current_url)
             creds = flow.credentials
             info = fetch_userinfo(creds)
@@ -102,12 +108,21 @@ def step0_google_identity():
                 "picture": info.get("picture"),
             }
             st.session_state["_google_identity"] = ident
-            # Limpio la query de ?code=…&state=…
+            # Limpiar la query ?code=&state= para dejar la URL prolija
             _clear_qp()
             st.success(f"Sesión iniciada como {ident['email']}")
             return ident
         except Exception as e:
-            st.error(f"No se pudo verificar identidad: {e}")
+            # Mensaje corto para usuario; detalle técnico solo en DEBUG
+            st.error("No se pudo completar el login. Volvé a intentarlo (un solo click).")
+            if st.session_state.get("DEBUG"):
+                st.caption(f"Detalle técnico: {e}")
+            # botón para reiniciar flujo
+            if st.button("Reiniciar Paso 0"):
+                st.session_state.pop("oauth_oidc_web", None)
+                st.session_state.pop("_google_identity", None)
+                _clear_qp()
+                st.rerun()
             st.stop()
 
     # 2) Primera carga (sin code/state): mostrar botón que abre Google en la MISMA pestaña
@@ -160,7 +175,6 @@ def logout_screen(home_url: str = "?"):
                     data = st.session_state.get(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
-                # también intentar tokens del token_store
                 for key in ("creds_dest", "creds_src"):
                     data = token_store.load(key)
                     if isinstance(data, dict):
