@@ -258,7 +258,21 @@ def pick_destination_oauth():
         }
 
     od = st.session_state["oauth_dest"]
-    st.markdown(f"🔗 **Paso A (personal):** [Autorizar Drive/Sheets]({od['auth_url']})")
+
+    # --- Lanzadores seguros (misma pestaña o nueva) para evitar iframes ---
+    st.write("🔗 **Paso A (personal):** Autorizar Drive/Sheets")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Abrir en esta pestaña", key="btn_dest_launch"):
+            st.session_state["_oauth_launch_url_dest"] = od["auth_url"]
+            st.rerun()
+    with c2:
+        st.link_button("Abrir en pestaña nueva", od["auth_url"])
+
+    # Redirección en top window (evita 'accounts.google.com ha rechazado la conexión')
+    if st.session_state.get("_oauth_launch_url_dest") == od["auth_url"]:
+        st.markdown(f'<script>window.top.location.href="{od["auth_url"]}";</script>', unsafe_allow_html=True)
+        st.stop()
 
     with st.expander("Ver/copiar URL de autorización (personal)"):
         st.code(od["auth_url"])
@@ -291,12 +305,14 @@ def pick_destination_oauth():
 
             expected_state = od.get("state")
             if returned_state != expected_state:
-                st.error(
-                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
-                    f"state esperado: `{expected_state}`\n"
-                    f"state recibido: `{returned_state}`"
-                )
-                st.info("Hacé clic en **Reiniciar Paso 1** y repetí la autorización (un solo click).")
+                if st.session_state.get("DEBUG"):
+                    st.warning(
+                        "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
+                        f"state esperado: `{expected_state}`\n"
+                        f"state recibido: `{returned_state}`"
+                    )
+                else:
+                    st.error("No se pudo completar la autorización. Reiniciá el Paso 1 e intentá nuevamente.")
                 st.stop()
 
             # Si el state coincide, procedemos a intercambiar el code por tokens
@@ -370,7 +386,21 @@ def pick_source_oauth() -> Optional[Credentials]:
         }
 
     osrc = st.session_state["oauth_src"]
-    st.markdown(f"🔗 **Paso A (fuente):** [Autorizar acceso a Search Console]({osrc['auth_url']})")
+
+    # --- Lanzadores seguros (misma pestaña o nueva) ---
+    st.write("🔗 **Paso A (fuente):** Autorizar acceso a Search Console")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Abrir en esta pestaña", key="btn_src_launch"):
+            st.session_state["_oauth_launch_url_src"] = osrc["auth_url"]
+            st.rerun()
+    with c2:
+        st.link_button("Abrir en pestaña nueva", osrc["auth_url"])
+
+    if st.session_state.get("_oauth_launch_url_src") == osrc["auth_url"]:
+        st.markdown(f'<script>window.top.location.href="{osrc["auth_url"]}";</script>', unsafe_allow_html=True)
+        st.stop()
+
     with st.expander("Ver/copiar URL de autorización (fuente)"):
         st.code(osrc["auth_url"])
 
@@ -402,12 +432,14 @@ def pick_source_oauth() -> Optional[Credentials]:
 
             expected_state = osrc.get("state")
             if returned_state != expected_state:
-                st.error(
-                    "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
-                    f"state esperado: `{expected_state}`\n"
-                    f"state recibido: `{returned_state}`"
-                )
-                st.info("Hacé clic en **Reiniciar Paso 2** y repetí la autorización (un solo click).")
+                if st.session_state.get("DEBUG"):
+                    st.warning(
+                        "CSRF Warning: el 'state' devuelto **no coincide** con el generado.\n\n"
+                        f"state esperado: `{expected_state}`\n"
+                        f"state recibido: `{returned_state}`"
+                    )
+                else:
+                    st.error("No se pudo completar la autorización. Reiniciá el Paso 2 e intentá nuevamente.")
                 st.stop()
 
             try:
