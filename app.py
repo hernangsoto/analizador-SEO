@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
-from streamlit.components.v1 import html as st_html  # ⬅️ para el logo flotante
 
 # ====== Config base ======
 try:
@@ -53,34 +52,45 @@ from modules.drive import ensure_drive_clients, get_google_identity, pick_destin
 from modules.gsc import ensure_sc_client
 
 # ====== Estilo / branding ======
-# ====== Estilo / branding ======
 apply_base_style_and_logo()
 
-# ⬇️ Forzar que NO haya banda/espacio arriba (solo desde app.py)
+# ⬇️ Sin espacios arriba + logo que acompaña al sidebar (solo CSS)
 st.markdown("""
 <style>
-/* 1) Si existiera alguna “banda” decorativa, ocúltala por las dudas */
+/* 0) Remover cualquier “banda” o espaciador que pueda dejar la capa de estilo base */
 #nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
-  display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important;
+  display: none !important; height:0 !important; margin:0 !important; padding:0 !important;
 }
 
-/* 2) Streamlit suele dejar padding-top para el header: lo anulamos */
+/* 1) Quitar padding/margen superior que Streamlit agrega por el header */
 div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
+main .block-container { margin-top: 0 !important; padding-top: .75rem !important; }
 
-/* 3) Contenedores principales sin margen/padding superior extra */
-main, section.main, div.block-container {
-  margin-top: 0 !important;
-  padding-top: 0.75rem !important;  /* un pequeño respiro bajo el header */
+/* 2) Asegurar el header por encima y sin “empujar” contenido */
+header[data-testid="stHeader"] { z-index: 1500 !important; }
+
+/* 3) Mover el logo del header para que siga al sidebar.
+   El logo está puesto por app_config.py como ::before del header.
+   Con :has() detectamos si el sidebar está abierto o cerrado. */
+
+/* Sidebar ABIERTO (ajusta 288–304px si tu sidebar es más ancho/angosto) */
+:root:has([data-testid="stSidebar"][aria-expanded="true"])
+  header[data-testid="stHeader"]::before {
+  left: 296px !important;  /* ancho típico del sidebar en Streamlit */
 }
 
-/* 4) Por si algún wrapper mete un “spacer” vacío al principio */
-section.main > div:empty:first-child,
-div.block-container > div:empty:first-child {
-  display: none !important; height: 0 !important;
+/* Sidebar CERRADO */
+:root:has([data-testid="stSidebar"][aria-expanded="false"])
+  header[data-testid="stHeader"]::before {
+  left: 16px !important;
+}
+
+/* Fallback por si no existe el atributo (algunas versiones) */
+:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before {
+  left: 16px !important;
 }
 </style>
 """, unsafe_allow_html=True)
-
 
 # === Logo que sigue al sidebar ===
 st_html("""
