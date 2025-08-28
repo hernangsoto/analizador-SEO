@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
-from streamlit.components.v1 import html as st_html  # ⬅️ para el logo flotante
 
 # ====== Config base ======
 try:
@@ -54,71 +53,6 @@ from modules.gsc import ensure_sc_client
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
-
-# === Logo que sigue al sidebar ===
-st_html("""
-<style>
-/* Contenedor del logo flotante */
-#__nmdBrandFloat {
-  position: fixed !important;
-  top: 12px;
-  left: calc(var(--sb-offset, 0px) + 16px) !important;
-  z-index: 3000 !important;
-  display: inline-flex; align-items: center;
-  transition: left 180ms ease;
-}
-/* Evitar solapamiento con el header */
-header[data-testid="stHeader"] { z-index: 1500 !important; background: transparent; }
-</style>
-<script>
-(() => {
-  const doc = window.parent?.document || document;
-
-  function setSbOffset() {
-    const sb = doc.querySelector('[data-testid="stSidebar"]');
-    const w = sb ? sb.getBoundingClientRect().width : 0;
-    doc.documentElement.style.setProperty('--sb-offset', (w > 1 ? w : 0) + 'px');
-  }
-
-  function ensureBrand() {
-    if (doc.getElementById('__nmdBrandFloat')) return true;
-
-    // Logo oficial de Streamlit o el tuyo si contiene "nomadic"
-    const logoImg =
-      doc.querySelector('img[data-testid="stLogo"]') ||
-      doc.querySelector('img[alt*="nomadic" i], img[src*="nomadic" i]');
-
-    if (!logoImg) return false;
-
-    const wrap = doc.createElement('div');
-    wrap.id = '__nmdBrandFloat';
-    const clone = logoImg.cloneNode(true);
-    clone.style.maxHeight = (parseInt(getComputedStyle(logoImg).height) || 32) + 'px';
-    wrap.appendChild(clone);
-    doc.body.appendChild(wrap);
-
-    // Ocultar el original para no duplicar
-    const holder = logoImg.closest('a,div,span') || logoImg;
-    holder.style.opacity = '0';
-    holder.style.pointerEvents = 'none';
-    return true;
-  }
-
-  const tryInit = () => {
-    if (!ensureBrand()) setTimeout(tryInit, 150);
-    setSbOffset();
-  };
-
-  const sb = doc.querySelector('[data-testid="stSidebar"]') || doc.body;
-  new ResizeObserver(setSbOffset).observe(sb);
-  window.addEventListener('resize', setSbOffset);
-
-  tryInit();
-})();
-</script>
-""", height=0)
-# === Fin bloque logo/side-bar ===
-
 st.title("Analizador SEO 🚀")
 
 # ---------- IA / Prompts ----------
