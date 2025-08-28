@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import requests
 import streamlit as st
-from urllib.parse import urlencode, urlsplit, parse_qs
+from urllib.parse import urlencode
 
 from .auth import (
     build_flow_web,
-    SCOPES_OIDC,            # Paso 0: solo identidad (OIDC)
+    SCOPES_OIDC,
+    SCOPES_PERSONAL_FULL,   # ← para pedir Drive + GSC también en Paso 0 si se desea
     fetch_userinfo,
     is_redirect_ready,
 )
@@ -31,20 +32,25 @@ def _clear_qp():
 
 
 # ============================
-# PASO 0: Login con Google (OIDC)
+# PASO 0: Login con Google
 # ============================
 def step0_google_identity():
     """
     Paso 0: Iniciar sesión con Google para obtener identidad (name/email/picture).
-    - Usa cliente OAuth **Web** tomado de [auth] en secrets.
-    - Evita el problema de iframes ofreciendo:
-        1) Botón que abre en pestaña nueva (target=_blank)
-        2) Botón alternativo que fuerza navegación en top-level window
-    - Solo OIDC (no Drive/GSC). Drive y GSC se piden en pasos posteriores.
+
+    - Usa cliente OAuth Web de [auth] en secrets.
+    - Evita el problema de iframes con dos opciones:
+        a) botón que abre en pestaña nueva (target=_blank)
+        b) forzar navegación del top-level window (misma pestaña)
+    - Canjea el token con `code=...` (no con la URL entera), para ser tolerante
+      a pequeñas variaciones del redirect.
+
+    Scopes:
+      * Por defecto solo OIDC (identidad).
+      * Si pones `auth.step0_full = true` en secrets pedirá también Drive/Sheets y GSC.
     """
     st.subheader("0) Iniciar sesión con Google")
 
-    # Verificamos que exista configuración Web en secrets
     if not is_redirect_ready():
         st.error(
             "Falta configurar el redirect_uri o el cliente OAuth Web.\n\n"
@@ -52,18 +58,22 @@ def step0_google_identity():
         )
         return None
 
+    # ¿Querés también Drive + GSC en el Paso 0?
+    use_full_scopes = bool((st.secrets.get("auth") or {}).get("step0_full", False))
+    scopes = SCOPES_PERSONAL_FULL if use_full_scopes else SCOPES_OIDC
+
     # Creamos el flow y auth_url una sola vez
     if "oauth_oidc" not in st.session_state:
-        flow = build_flow_web(SCOPES_OIDC)
-        # Nota: no pasamos include_granted_scopes aquí para simplificar OIDC
+        flow = build_flow_web(scopes)
         auth_url, state = flow.authorization_url(
             prompt="select_account",
-            access_type="online",
+            access_type="offline" if use_full_scopes else "online",
         )
         st.session_state["oauth_oidc"] = {
             "flow": flow,
             "auth_url": auth_url,
             "state": state,
+            "use_full_scopes": use_full_scopes,
         }
 
     oo = st.session_state["oauth_oidc"]
@@ -73,25 +83,20 @@ def step0_google_identity():
     code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
     state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
-    if code and state_in:
-        # Validar state (mensaje solo en modo DEBUG)
+    if code:
+        # Nota: sólo mostramos el aviso de state mismatch en modo DEBUG
         expected_state = oo.get("state")
-        if state_in != expected_state:
-            if st.session_state.get("DEBUG"):
-                st.warning("Aviso: el 'state' no coincide (posible nueva pestaña). "
-                           "Usando el flujo rehidratado con el state recibido…")
-            # Aun con mismatch, intentamos continuar para no bloquear al usuario
-            # (en la práctica Google valida también el code+redirect).
-        try:
-            # Reconstruimos la URL completa usada como authorization_response
-            flat_qp = {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
-            current_url = f"{st.secrets['auth']['redirect_uri']}?{urlencode(flat_qp)}"
+        if state_in and state_in != expected_state and st.session_state.get("DEBUG"):
+            st.warning("Aviso: el 'state' no coincide (posible nueva pestaña). "
+                       "Se continuará con el código recibido…")
 
+        try:
             flow = oo["flow"]
-            flow.fetch_token(authorization_response=current_url)
+            # 👉 canje robusto con code (sin depender de la URL exacta)
+            flow.fetch_token(code=code)
             creds = flow.credentials
 
-            # Obtenemos userinfo (OIDC)
+            # Userinfo (OIDC)
             ident = fetch_userinfo(creds) or {"name": "Invitado", "email": "—", "picture": None}
             st.session_state["_google_identity"] = ident
 
@@ -114,7 +119,7 @@ def step0_google_identity():
     c1, c2 = st.columns([1, 1])
 
     with c1:
-        # Opción preferida: abre en pestaña nueva (evita sandbox/iframes)
+        # Opción preferida: abrir en pestaña nueva (evita sandbox)
         if hasattr(st, "link_button"):
             st.link_button("Continuar con Google (pestaña nueva)", oo["auth_url"])
         else:
@@ -125,7 +130,7 @@ def step0_google_identity():
             )
 
     with c2:
-        # Alternativa: misma pestaña, forzando navegación del top-level window
+        # Alternativa: forzar navegación del top-level window
         if st.button("Continuar aquí (si la otra falla)"):
             st.session_state["_do_oidc_redirect"] = True
 
@@ -134,14 +139,13 @@ def step0_google_identity():
         st.markdown(
             f"""
             <script>
-            // Forzar navegación en top-level (no dentro de iframes)
             window.top.location.assign("{oo['auth_url']}");
             </script>
             """,
             unsafe_allow_html=True,
         )
 
-    # Botón para reiniciar el paso 0 manualmente
+    # Botón para reiniciar manualmente
     if st.button("Reiniciar Paso 0", key="btn_reset_oidc_manual"):
         st.session_state.pop("oauth_oidc", None)
         st.session_state.pop("_google_identity", None)
@@ -165,7 +169,7 @@ def _revoke_google_token(token: str | None) -> None:
             timeout=10,
         )
     except Exception:
-        pass  # no hacemos ruido si la revocación falla
+        pass  # sin ruido si falla
 
 def logout_screen(home_url: str = "?"):
     st.header("Cerrar sesión")
@@ -180,24 +184,20 @@ def logout_screen(home_url: str = "?"):
     with c1:
         if st.button("🔒 Cerrar sesión y limpiar", type="primary"):
             if revoke:
-                # Revocamos tokens guardados
                 for key in ("creds_dest", "creds_src"):
                     data = st.session_state.get(key) or token_store.load(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
 
-            # Limpiar cachés
             try: st.cache_data.clear()
             except Exception: pass
             try: st.cache_resource.clear()
             except Exception: pass
 
-            # Borrar paquete externo (opcional)
             if wipe_pkg:
                 import shutil
                 shutil.rmtree(".ext_pkgs", ignore_errors=True)
 
-            # Limpiar session_state
             for k in [
                 "_auth_bypass", "_google_identity",
                 "oauth_oidc", "oauth_dest", "oauth_src",
@@ -209,7 +209,6 @@ def logout_screen(home_url: str = "?"):
             ]:
                 st.session_state.pop(k, None)
 
-            # Limpiar token_store persistente
             try:
                 token_store.clear("creds_dest")
                 token_store.clear("creds_src")
