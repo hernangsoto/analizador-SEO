@@ -74,13 +74,13 @@ header[data-testid="stHeader"] { z-index: 1500 !important; }
 /* Sidebar ABIERTO (ajusta 288–304px si tu sidebar es distinto) */
 :root:has([data-testid="stSidebar"][aria-expanded="true"])
   header[data-testid="stHeader"]::before {
-  left: 296px !important;
+  left: 350px !important;
 }
 
 /* Sidebar CERRADO */
 :root:has([data-testid="stSidebar"][aria-expanded="false"])
   header[data-testid="stHeader"]::before {
-  left: 16px !important;
+  left: 30px !important;
 }
 
 /* Fallback por si no existe el atributo en alguna versión */
