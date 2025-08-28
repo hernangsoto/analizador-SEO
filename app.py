@@ -187,36 +187,7 @@ except Exception as e:
     st.error(f"No pude inicializar Drive/Sheets con la cuenta personal: {e}")
     st.stop()
 
-# --- Carpeta destino (opcional) ---
-if "step2_done" not in st.session_state:
-    st.session_state["step2_done"] = False
-
-if not st.session_state["step2_done"]:
-    with st.expander("2) Destino de la copia (opcional)", expanded=False):
-        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
-                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
-        dest_folder_id = pick_destination(drive_service, _me, show_header=False)
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            if st.button("Guardar selección", key="btn_save_step2"):
-                st.session_state["step2_done"] = True
-                st.rerun()
-        with c2:
-            st.caption("Podés dejar este paso cerrado para usar **Mi unidad** por defecto.")
-else:
-    chosen = st.session_state.get("dest_folder_id")
-    pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    st.markdown(
-        f'''
-        <div class="success-inline">
-            Destino de la copia: <strong>{pretty}</strong>
-            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-
-# ---------- Elegir análisis ----------
+# ---------- Paso 1: Elegir análisis ----------
 include_auditoria = run_traffic_audit is not None
 def pick_analysis(include_auditoria: bool, include_names: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
@@ -240,6 +211,36 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
     return "0"
 
 analisis = pick_analysis(include_auditoria, include_names=True)
+
+# ---------- (Opcional) Destino de la copia ----------
+# (mantener como util, sin numeración de paso para no confundir)
+if "step2_done" not in st.session_state:
+    st.session_state["step2_done"] = False
+
+if not st.session_state["step2_done"]:
+    with st.expander("Destino de la copia (opcional)", expanded=False):
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
+                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
+        dest_folder_id = pick_destination(drive_service, _me, show_header=False)
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("Guardar selección", key="btn_save_step2"):
+                st.session_state["step2_done"] = True
+                st.rerun()
+        with c2:
+            st.caption("Podés dejar este paso cerrado para usar **Mi unidad** por defecto.")
+else:
+    chosen = st.session_state.get("dest_folder_id")
+    pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
+    st.markdown(
+        f'''
+        <div class="success-inline">
+            Destino de la copia: <strong>{pretty}</strong>
+            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
 
 # ---------- Rama especial: Nombres (no usa GSC) ----------
 if analisis == "7":
@@ -283,7 +284,7 @@ if analisis == "7":
                        kind=st.session_state["last_file_kind"], widget_suffix="panel")
     st.stop()
 
-# ======== Resto de análisis (requieren GSC) ========
+# ======== Paso 2: Seleccionar cuenta de Search Console (y login directo) ========
 
 def _csrf_mismatch_hint(step_label: str = "Paso 2"):
     st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
@@ -372,7 +373,7 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
     return creds
 
 # --- Selección de cuenta SC (sin duplicar pregunta luego)
-st.subheader("Selecciona la cuenta con acceso a Search Console")
+st.subheader("Paso 2 — Selecciona la cuenta con acceso a Search Console")
 account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
 _default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
 default_idx = account_options.index(_default_label) if _default_label in account_options else 2
@@ -455,7 +456,7 @@ else:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
 
-# --- PASO: elegir sitio ---
+# --- Elegir sitio (después de cuenta SC) ---
 def pick_site(sc_service):
     st.subheader("Elige el sitio a analizar")
     try:
@@ -475,7 +476,7 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
-# ============== Flujos por análisis (requieren GSC) ==============
+# ============== Ejecución por análisis (requieren GSC) ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
