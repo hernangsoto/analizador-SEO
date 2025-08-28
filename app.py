@@ -54,6 +54,11 @@ from modules.gsc import ensure_sc_client
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
+st.markdown("""
+<style>
+main .block-container { padding-top: 0.75rem !important; margin-top: 0 !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # === Logo que sigue al sidebar ===
 st_html("""
