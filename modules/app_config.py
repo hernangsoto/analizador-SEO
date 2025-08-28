@@ -1,4 +1,4 @@
-# app_config.py
+# modules/app_config.py
 import os
 import streamlit as st
 from modules.ui import apply_page_style
@@ -16,20 +16,66 @@ def _resolve_gemini_model() -> str:
         or "gemini-2.5-flash"
     )
 
+def _inject_sidebar_observer_js():
+    """
+    Define la variable CSS --sb-offset con el ancho actual del sidebar
+    y la actualiza cuando se abre/cierra o cambia de tamaño.
+    """
+    st.markdown(
+        """
+        <script>
+        (function() {
+          const doc = window.parent?.document || document;
+
+          function setSbOffset() {
+            const sb = doc.querySelector('[data-testid="stSidebar"]');
+            const w = sb ? sb.getBoundingClientRect().width : 0;
+            doc.documentElement.style.setProperty('--sb-offset', (w > 1 ? w : 0) + 'px');
+          }
+
+          // Primera medición
+          setSbOffset();
+
+          // Observar cambios de tamaño del sidebar
+          const target = doc.querySelector('[data-testid="stSidebar"]') || doc.body;
+          new ResizeObserver(setSbOffset).observe(target);
+
+          // Ajustar también en resize de ventana
+          window.addEventListener('resize', setSbOffset);
+        })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def _pin_nomadic_logo_css(logo_url: str):
-    """Pega el logo sobre el header nativo de Streamlit, fijo al hacer scroll."""
+    """
+    Pega el logo sobre el header nativo de Streamlit.
+    La posición horizontal reacciona al ancho del sidebar (--sb-offset).
+    """
     st.markdown(
         f"""
         <style>
+        /* Mantener el header por encima del contenido */
         header[data-testid="stHeader"] {{
             position: sticky !important;
             top: 0;
             z-index: 1500 !important;
+            background: transparent; /* El color de banda lo da apply_page_style */
         }}
+
+        /* Oculta el logo nativo de Streamlit para no duplicar */
+        header [data-testid="stLogo"] img {{
+            opacity: 0 !important;
+            pointer-events: none !important;
+        }}
+
+        /* Logo Nomadic como pseudo-element del header */
         header[data-testid="stHeader"]::before {{
             content: "";
             position: fixed;
-            left: 40px;
+            /* Se desplaza según el ancho actual del sidebar */
+            left: calc(var(--sb-offset, 0px) + 16px);
             top: 14px;
             width: 140px;
             height: 27px;
@@ -38,10 +84,13 @@ def _pin_nomadic_logo_css(logo_url: str):
             background-size: contain;
             pointer-events: none;
             z-index: 4000;
+            transition: left 180ms ease;  /* suave al abrir/cerrar sidebar */
         }}
+
+        /* Responsive */
         @media (max-width: 600px) {{
             header[data-testid="stHeader"]::before {{
-                left: 16px;
+                left: calc(var(--sb-offset, 0px) + 12px);
                 top: 12px;
                 width: 120px;
                 height: 24px;
@@ -71,7 +120,7 @@ def _inject_global_styles():
         .success-inline strong { margin-left:.25rem; }
 
         /* Mantener el header siempre por encima */
-        header[data-testid="stHeader"] { z-index:1500 !important; }
+        header[data-testid="stHeader"] {{ z-index:1500 !important; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -94,8 +143,13 @@ def apply_base_style_and_logo():
         band_height_px=110,
     )
 
-    # Logo fijo + CSS global
+    # Primero observamos el sidebar y publicamos --sb-offset
+    _inject_sidebar_observer_js()
+
+    # Luego inyectamos el logo que usa esa variable
     _pin_nomadic_logo_css(LOGO_URL)
+
+    # CSS global de la app
     _inject_global_styles()
 
 def get_app_home() -> str:
