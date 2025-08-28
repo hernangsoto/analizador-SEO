@@ -6,9 +6,10 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 import json
+import time
 import sys
 from types import SimpleNamespace
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 import pandas as pd
 import streamlit as st
@@ -18,11 +19,10 @@ from google.oauth2.credentials import Credentials
 try:
     st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 except Exception:
-    # Evita el warning "Already configured" en reruns o multipágina
     pass
 
 # ------------------------------------------------------------------
-# Shims de compatibilidad (si moviste archivos a modules/)
+# Shims de compatibilidad
 # ------------------------------------------------------------------
 for _name in [
     "app_constants","app_config","app_ext","app_utils","app_params",
@@ -36,7 +36,7 @@ for _name in [
 
 # ====== UI / Branding ======
 from modules.ui import (
-    apply_page_style,  # usado dentro de config
+    apply_page_style,
     get_user,
     sidebar_user_info,
     login_screen,
@@ -45,7 +45,7 @@ from modules.ui import (
 # ====== Carga de módulos locales ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
 from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
-from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm
+from modules.app_utils import get_qp, clear_qp, oauth_flow_store, has_gsc_scope, norm
 from modules.app_ai import (
     load_prompts, ai_source, ai_import_error, prompts_map, gemini_healthcheck,
     render_prompt_probe, gemini_summary,
@@ -54,14 +54,48 @@ from modules.app_params import (
     params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names,
 )
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
-from modules.app_errors import run_with_indicator
+from modules.app_errors import show_google_error, run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # ====== Google modules ======
-from modules.auth import pick_destination_oauth, pick_source_oauth, build_flow
+from modules.auth import pick_destination_oauth, pick_source_oauth
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
+
+# ---- Import opcional de build_flow (installed). Si no está, usamos fallback local.
+try:
+    from modules.auth import build_flow as _build_flow_installed  # type: ignore
+except Exception:
+    _build_flow_installed = None
+
+def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
+    """
+    Usa modules.auth.build_flow si existe; de lo contrario crea el Flow
+    tipo 'installed' (redirect http://localhost) leyendo st.secrets.
+    """
+    if _build_flow_installed is not None:
+        return _build_flow_installed(account_key, scopes)
+
+    # Fallback local
+    from google_auth_oauthlib.flow import Flow
+    acc = (st.secrets.get("accounts") or {}).get(account_key) or {}
+    if not (acc.get("client_id") and acc.get("client_secret")):
+        st.error(f"No encontré credenciales en secrets['accounts']['{account_key}'] (client_id/client_secret).")
+        st.stop()
+    client_secrets = {
+        "installed": {
+            "client_id": acc["client_id"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_secret": acc["client_secret"],
+            "redirect_uris": ["http://localhost"],
+        }
+    }
+    flow = Flow.from_client_config(client_secrets, scopes=scopes)
+    flow.redirect_uri = "http://localhost"
+    return flow
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
@@ -95,18 +129,15 @@ prefer_oidc = bool(st.secrets.get("auth", {}).get("prefer_oidc", True))
 ident = st.session_state.get("_google_identity")
 user = get_user()
 
-# Si había bypass activo y preferimos OIDC, lo limpiamos para mostrar Paso 0
 if prefer_oidc and st.session_state.get("_auth_bypass"):
     st.session_state.pop("_auth_bypass", None)
     user = None
 
-# ----- PASO 0: login con Google (flujo WEB – sin copiar URL) -----
 if prefer_oidc and not ident:
     ident = step0_google_identity()
     if not ident:
         st.stop()
 
-# Crear user sintético si no vino de Streamlit
 if not user:
     if ident:
         user = SimpleNamespace(
@@ -119,7 +150,6 @@ if not user:
         login_screen()
         st.stop()
 
-# Sidebar → mantenimiento
 def maintenance_extra_ui():
     if USING_EXT:
         st.caption("🧩 Usando análisis del paquete externo (repo privado).")
@@ -205,7 +235,6 @@ if st.session_state["step1_done"] and st.session_state.get("creds_dest"):
             ''',
             unsafe_allow_html=True
         )
-        # Log de login
         activity_log_append(
             drive_service, gs_client,
             user_email=email_txt, event="login",
@@ -267,7 +296,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
 
 analisis = pick_analysis(include_auditoria, include_names=True)
 
-# ---------- Rama especial: Nombres (no requiere GSC) ----------
+# ---------- Rama especial: Nombres ----------
 if analisis == "7":
     if run_names_analysis is None:
         st.warning("Este despliegue no incluye `run_names_analysis`.")
@@ -302,7 +331,6 @@ if analisis == "7":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "names"
-    # Panel persistente (único lugar con el botón de resumen)
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
         st.divider(); st.subheader("📄 Resumen del análisis")
         st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
@@ -312,22 +340,30 @@ if analisis == "7":
 
 # ======== Resto de análisis (requieren GSC) ========
 
-# --- Flujo forzado para SC (según la cuenta elegida) ---
+def _csrf_mismatch_hint(step_label: str = "Paso 2"):
+    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+    st.info(f"Hacé clic en **Reiniciar {step_label}** y repetí la autorización (un solo click).")
+    if st.button(f"Reiniciar {step_label}", key=f"btn_restart_{step_label.replace(' ', '_').lower()}"):
+        for k in ("creds_src","oauth_src","step3_done","src_account_label","_src_oauth_in_progress","_src_target_label"):
+            st.session_state.pop(k, None)
+        clear_qp(); st.rerun()
+
+# --- NUEVO: flujo forzado para SC (sin radio duplicado) ---
 GSC_SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 def pick_source_oauth_forced(account_key: str) -> Credentials | None:
     """
     Igual a pick_source_oauth pero bloqueando la cuenta (sin radio).
-    IMPORTANTE: sin include_granted_scopes para evitar 400.
     """
     st.subheader("2) Conectar cuenta de Search Console (fuente de datos)")
+    # Rehidratación por account_key
     key = f"oauth_src_{account_key}"
     if key not in st.session_state:
-        flow = build_flow(account_key, GSC_SCOPES)
+        flow = _build_flow_installed_or_local(account_key, GSC_SCOPES)
+        # ⚠️ No usar include_granted_scopes para evitar 400 de Google
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            # (no incluir include_granted_scopes aquí)
         )
         st.session_state[key] = {
             "account": account_key,
@@ -362,13 +398,7 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
                 returned_state = ""
             expected_state = osrc.get("state")
             if not returned_state or returned_state != expected_state:
-                st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-                if st.button("Reiniciar Paso 2", key=f"btn_restart_src_{account_key}"):
-                    st.session_state.pop(key, None)
-                    for k in ("creds_src","oauth_src","step3_done","src_account_label",
-                              "_src_oauth_in_progress","_src_target_label"):
-                        st.session_state.pop(k, None)
-                    clear_qp(); st.rerun()
+                _csrf_mismatch_hint("Paso 2")
                 st.stop()
             try:
                 flow = osrc["flow"]
@@ -405,13 +435,10 @@ def _choice_to_key(label: str) -> str | None:
     if norm(label) == norm("Acceso Medios"): return "ACCESO_MEDIOS"
     return None  # personal usa creds_dest
 
-sc_service = None
-
 if sc_choice == "Acceso en cuenta personal de Nomadic":
     creds_dest_dict = st.session_state.get("creds_dest")
     if not creds_dest_dict:
-        st.error("No encuentro la sesión principal. Volvé a iniciar sesión en el Paso 0.")
-        st.stop()
+        st.error("No encuentro la sesión principal. Volvé a iniciar sesión en el Paso 0."); st.stop()
     if not has_gsc_scope(creds_dest_dict.get("scopes")):
         st.warning("Tu cuenta personal no tiene permisos de Search Console todavía.")
         c1, c2 = st.columns([1,3])
@@ -419,8 +446,7 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
             if st.button("➕ Añadir permiso de Search Console", key="btn_add_gsc_scope"):
                 for k in ("oauth_oidc","_google_identity","creds_dest","step1_done"):
                     st.session_state.pop(k, None)
-                clear_qp()
-                st.rerun()
+                clear_qp(); st.rerun()
         with c2:
             st.caption("Se reabrirá el Paso 0 pidiendo también el permiso de Search Console.")
         st.stop()
@@ -443,17 +469,19 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 else:
-    # Mostramos DIRECTO el login de la cuenta elegida (ACCESO o ACCESO_MEDIOS)
-    wanted_key = _choice_to_key(sc_choice)
+    # Mostrar DIRECTO el login de la cuenta elegida, sin radio duplicado
+    wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
     need_new_auth = (
         not st.session_state.get("step3_done") or
         norm(st.session_state.get("src_account_label")) != norm(sc_choice) or
         norm(st.session_state.get("src_account_label")) == norm("Acceso en cuenta personal de Nomadic")
     )
+
     if need_new_auth:
         creds_src_obj = pick_source_oauth_forced(wanted_key)
         if not creds_src_obj:
             st.stop()
+
         st.session_state["creds_src"] = {
             "token": creds_src_obj.token,
             "refresh_token": getattr(creds_src_obj, "refresh_token", None),
@@ -611,7 +639,7 @@ elif analisis == "6":
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
 
-# --- Panel persistente de resumen (único lugar con el botón de IA) ---
+# --- Panel persistente de resumen (aparece una sola vez) ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     st.divider()
     st.subheader("📄 Resumen del análisis")
@@ -624,7 +652,6 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
         widget_suffix="panel"
     )
 
-# Debug opcional
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
