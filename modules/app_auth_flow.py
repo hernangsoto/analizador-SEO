@@ -7,9 +7,9 @@ import streamlit as st
 from google_auth_oauthlib.flow import Flow
 
 # Guardado cross-pestaña
-from .utils import token_store  # <— clave para compartir tokens entre pestañas
+from .utils import token_store
 
-# ----- Scopes completos para el Paso 0 (OIDC + Drive/Sheets + GSC)
+# Scopes para Paso 0 (OIDC + Drive/Sheets + GSC)
 SCOPES_PERSONAL_FULL = [
     "openid", "email", "profile",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -17,7 +17,7 @@ SCOPES_PERSONAL_FULL = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
-# ---------- helpers de query params ----------
+# ---- helpers de query params
 def _get_qp() -> dict:
     try:
         return dict(st.query_params)
@@ -30,13 +30,10 @@ def _clear_qp():
     except Exception:
         st.experimental_set_query_params()
 
-# ---------- helpers de OAuth WEB ----------
+# ---- helpers OAuth WEB
 def _get_web_oauth_config() -> tuple[Optional[str], Optional[str], Optional[str]]:
     auth = st.secrets.get("auth", {}) or {}
-    cid = auth.get("client_id")
-    csec = auth.get("client_secret")
-    ruri = auth.get("redirect_uri")
-    return cid, csec, ruri
+    return auth.get("client_id"), auth.get("client_secret"), auth.get("redirect_uri")
 
 def _build_flow_web(scopes: list[str]) -> Flow:
     cid, csec, ruri = _get_web_oauth_config()
@@ -59,7 +56,6 @@ def _build_flow_web(scopes: list[str]) -> Flow:
     return flow
 
 def _creds_to_dict_web(creds) -> dict:
-    # Aseguramos guardar client_id/secret desde [auth] para los refresh
     cid, csec, _ = _get_web_oauth_config()
     return {
         "token": creds.token,
@@ -73,13 +69,13 @@ def _creds_to_dict_web(creds) -> dict:
 def _fetch_userinfo(creds) -> Dict[str, str]:
     info: Dict[str, str] = {}
     try:
-        resp = requests.get(
+        r = requests.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
             headers={"Authorization": f"Bearer {creds.token}"},
             timeout=10,
         )
-        if resp.status_code == 200:
-            j = resp.json()
+        if r.status_code == 200:
+            j = r.json()
             info = {
                 "name": j.get("name") or j.get("email") or "Invitado",
                 "email": j.get("email") or "—",
@@ -89,32 +85,19 @@ def _fetch_userinfo(creds) -> Dict[str, str]:
         pass
     return info
 
-# ---------- Paso 0: Login con botón Google (web) ----------
+# ---- PASO 0
 def step0_google_identity() -> Optional[Dict[str, str]]:
-    """
-    UI minimalista del Paso 0:
-      • Título + botón "Iniciar sesión con Google" (abre pestaña nueva).
-      • Al volver con ?code&state, canjea token y guarda:
-          - st.session_state["creds_dest"]  (Drive/Sheets + GSC)
-          - token_store["creds_dest"]       (compartido entre pestañas)
-          - st.session_state["_google_identity"]
-    """
     st.subheader("Inicia sesión con tu cuenta personal de Nomadic")
 
-    # Pre-chequeo de config web
     cid, csec, ruri = _get_web_oauth_config()
     if not (cid and csec and ruri):
         st.error(
             "No se pudo completar el inicio de sesión. Verificá el cliente web y el redirect_uri.\n\n"
-            "Asegurate de definir en Secrets:\n"
-            "  [auth]\n"
-            '  client_id = "..." \n'
-            '  client_secret = "..." \n'
-            '  redirect_uri = "https://<tu-app>.streamlit.app"\n'
+            "Secrets esperados:\n[auth]\nclient_id=...\nclient_secret=...\nredirect_uri=https://<tu-app>.streamlit.app"
         )
         return None
 
-    # Construir o reutilizar flow + URL de autorización
+    # Construir una sola vez la URL de autorización
     if "oauth_oidc" not in st.session_state:
         flow = _build_flow_web(SCOPES_PERSONAL_FULL)
         auth_url, state = flow.authorization_url(
@@ -130,52 +113,44 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
 
     oo = st.session_state["oauth_oidc"]
 
-    # Botón único (pestaña nueva, como querés)
+    # Botón único (pestaña nueva)
     st.markdown(
         f'<a href="{oo["auth_url"]}" target="_blank" rel="noopener">'
         f'<button type="button">Iniciar sesión con Google</button></a>',
         unsafe_allow_html=True,
     )
 
-    # ¿Volvimos con code/state?
+    # ¿volvimos con ?code&
     qp = _get_qp()
-    code = qp.get("code", [None])[0] if isinstance(qp.get("code"), list) else qp.get("code")
-    state_in = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
+    code  = qp.get("code",  [None])[0] if isinstance(qp.get("code"), list)  else qp.get("code")
+    state = qp.get("state", [None])[0] if isinstance(qp.get("state"), list) else qp.get("state")
 
-    if code and state_in:
-        # Reconstruir la URL de redirección exacta para fetch_token
-        from urllib.parse import urlencode
-        current_url = f'{oo["redirect_uri"]}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}'
-
-        # Si el state no coincide, sólo avisa en DEBUG (no ruido en producción)
-        if st.session_state.get("DEBUG") and state_in != oo.get("state"):
-            st.info("Aviso (DEBUG): state recibido distinto al generado; rehidratando flujo…")
-
+    if code and state:
+        # Usar SIEMPRE fetch_token(code=...) (evita problemas de URL exacta)
         flow = oo.get("flow") or _build_flow_web(SCOPES_PERSONAL_FULL)
         try:
-            flow.fetch_token(authorization_response=current_url)
+            flow.fetch_token(code=code)
             creds = flow.credentials
 
-            # Guardar credenciales personales (Drive/Sheets + GSC) y la identidad
             data = _creds_to_dict_web(creds)
             st.session_state["creds_dest"] = data
-            token_store.save("creds_dest", data)   # <— 🔑 hace visible en la otra pestaña
+            token_store.save("creds_dest", data)  # comparte con otras pestañas
+
             ident = _fetch_userinfo(creds) or {"name": "Invitado", "email": "—", "picture": None}
             st.session_state["_google_identity"] = ident
 
-            # Limpiar los query params feos
             _clear_qp()
             return ident
         except Exception as e:
+            # Mostrar SIEMPRE el detalle para diagnosticar (lo verás debajo del cartel rojo)
             st.error("No se pudo completar el login. Volvé a intentarlo (un solo click).")
-            if st.session_state.get("DEBUG"):
-                st.caption(f"Detalle técnico: {e}")
+            st.caption(f"Detalle técnico: {e}")
             return None
 
-    # Aún sin code/state: devolvemos lo que haya en sesión (o None)
+    # Sin code: devolver identidad si ya existe
     return st.session_state.get("_google_identity")
 
-# ---------- Logout ----------
+# ---- Logout
 def _revoke_google_token(token: str | None) -> None:
     if not token:
         return
@@ -198,15 +173,14 @@ def logout_screen(app_home_url: str = "?"):
     revoke = st.checkbox("Revocar permisos de Google (Drive/Sheets y Search Console)", value=True)
     wipe_pkg = st.checkbox("Borrar caché del paquete externo (.ext_pkgs/)", value=False)
 
-    col1, col2 = st.columns([1,1])
-    with col1:
+    c1, c2 = st.columns([1,1])
+    with c1:
         if st.button("🔒 Cerrar sesión y limpiar", type="primary"):
             if revoke:
                 for key in ("creds_dest", "creds_src"):
                     data = st.session_state.get(key)
                     if isinstance(data, dict):
                         _revoke_google_token(data.get("token") or data.get("refresh_token"))
-
             try: st.cache_data.clear()
             except Exception: pass
             try: st.cache_resource.clear()
@@ -227,7 +201,6 @@ def logout_screen(app_home_url: str = "?"):
             ]:
                 st.session_state.pop(k, None)
 
-            # También limpiar token_store
             try:
                 token_store.clear("creds_dest")
                 token_store.clear("creds_src")
@@ -239,7 +212,7 @@ def logout_screen(app_home_url: str = "?"):
             st.markdown(f"➡️ Volver a la app: [{app_home_url}]({app_home_url})")
             st.stop()
 
-    with col2:
+    with c2:
         if st.button("Cancelar"):
             _clear_qp()
             st.rerun()
