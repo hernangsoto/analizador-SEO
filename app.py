@@ -53,12 +53,34 @@ from modules.drive import ensure_drive_clients, get_google_identity, pick_destin
 from modules.gsc import ensure_sc_client
 
 # ====== Estilo / branding ======
+# ====== Estilo / branding ======
 apply_base_style_and_logo()
+
+# ⬇️ Forzar que NO haya banda/espacio arriba (solo desde app.py)
 st.markdown("""
 <style>
-main .block-container { padding-top: 0.75rem !important; margin-top: 0 !important; }
+/* 1) Si existiera alguna “banda” decorativa, ocúltala por las dudas */
+#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
+  display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important;
+}
+
+/* 2) Streamlit suele dejar padding-top para el header: lo anulamos */
+div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
+
+/* 3) Contenedores principales sin margen/padding superior extra */
+main, section.main, div.block-container {
+  margin-top: 0 !important;
+  padding-top: 0.75rem !important;  /* un pequeño respiro bajo el header */
+}
+
+/* 4) Por si algún wrapper mete un “spacer” vacío al principio */
+section.main > div:empty:first-child,
+div.block-container > div:empty:first-child {
+  display: none !important; height: 0 !important;
+}
 </style>
 """, unsafe_allow_html=True)
+
 
 # === Logo que sigue al sidebar ===
 st_html("""
