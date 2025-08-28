@@ -44,19 +44,15 @@ from modules.ui import (
 from modules.app_config import apply_base_style_and_logo, get_app_home
 from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm
-from modules.app_ai import (
-    load_prompts, gemini_healthcheck, gemini_summary,
-)
-from modules.app_params import (
-    params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names,
-)
+from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
+from modules.app_params import params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # ====== Google modules ======
-# (OJO: ya NO importamos pick_destination_oauth ni pick_source_oauth ni build_flow)
+# ⚠️ Ya NO importamos pick_destination_oauth / pick_source_oauth
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
 
@@ -86,7 +82,7 @@ if _view == "logout":
     logout_screen(APP_HOME)
     st.stop()
 
-# Preferir Paso 0 (OIDC) con scopes completos
+# Preferir Paso 0 (OIDC + Drive/Sheets + GSC en un solo botón)
 prefer_oidc = bool(st.secrets.get("auth", {}).get("prefer_oidc", True))
 
 ident = st.session_state.get("_google_identity")
@@ -97,9 +93,9 @@ if prefer_oidc and st.session_state.get("_auth_bypass"):
     st.session_state.pop("_auth_bypass", None)
     user = None
 
-# --- PASO 0: Login botón Google (OIDC + Drive/Sheets + GSC) ---
+# --- PASO 0: Login botón Google (web) ---
 if prefer_oidc and not ident:
-    ident = step0_google_identity()  # esta función maneja el flujo web y guarda creds en session
+    ident = step0_google_identity()  # guarda st.session_state["creds_dest"]
     if not ident:
         st.stop()
 
@@ -134,7 +130,7 @@ if isinstance(_action, list):
 
 if _action == "change_personal":
     # Reiniciar el login personal del Paso 0
-    for k in ("oauth_oidc","_google_identity","creds_dest","step1_done"):
+    for k in ("oauth_oidc","_google_identity","creds_dest"):
         st.session_state.pop(k, None)
     clear_qp(); st.rerun()
 elif _action == "change_folder":
@@ -169,7 +165,7 @@ if not creds_dest:
 try:
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
-    # Refrescar identidad, por si viene con foto/nombre de la cuenta
+    # Refrescar identidad por si llega con foto/nombre
     st.session_state["_google_identity"] = _me or st.session_state.get("_google_identity", {})
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
     st.markdown(
@@ -181,7 +177,6 @@ try:
         ''',
         unsafe_allow_html=True
     )
-    # Log de actividad: login
     activity_log_append(
         drive_service, gs_client,
         user_email=email_txt, event="login",
@@ -192,7 +187,7 @@ except Exception as e:
     st.error(f"No pude inicializar Drive/Sheets con la cuenta personal: {e}")
     st.stop()
 
-# --- Paso: Carpeta destino (opcional) ---
+# --- Carpeta destino (opcional) ---
 if "step2_done" not in st.session_state:
     st.session_state["step2_done"] = False
 
@@ -246,7 +241,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
 
 analisis = pick_analysis(include_auditoria, include_names=True)
 
-# ---------- Rama especial: Nombres ----------
+# ---------- Rama especial: Nombres (no usa GSC) ----------
 if analisis == "7":
     if run_names_analysis is None:
         st.warning("Este despliegue no incluye `run_names_analysis`.")
@@ -588,7 +583,7 @@ elif analisis == "6":
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
 
-# --- Panel persistente de resumen (aparece una sola vez) ---
+# --- Panel persistente de resumen (una sola vez) ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     st.divider()
     st.subheader("📄 Resumen del análisis")
