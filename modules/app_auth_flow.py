@@ -1,11 +1,13 @@
 # modules/app_auth_flow.py
 from __future__ import annotations
 
-import os
 from typing import Optional, Dict
 import requests
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
+
+# Guardado cross-pestaña
+from .utils import token_store  # <— clave para compartir tokens entre pestañas
 
 # ----- Scopes completos para el Paso 0 (OIDC + Drive/Sheets + GSC)
 SCOPES_PERSONAL_FULL = [
@@ -93,7 +95,8 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
     UI minimalista del Paso 0:
       • Título + botón "Iniciar sesión con Google" (abre pestaña nueva).
       • Al volver con ?code&state, canjea token y guarda:
-          - st.session_state["creds_dest"] (Drive/Sheets + GSC)
+          - st.session_state["creds_dest"]  (Drive/Sheets + GSC)
+          - token_store["creds_dest"]       (compartido entre pestañas)
           - st.session_state["_google_identity"]
     """
     st.subheader("Inicia sesión con tu cuenta personal de Nomadic")
@@ -105,9 +108,9 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
             "No se pudo completar el inicio de sesión. Verificá el cliente web y el redirect_uri.\n\n"
             "Asegurate de definir en Secrets:\n"
             "  [auth]\n"
-            "  client_id = \"...\"\n"
-            "  client_secret = \"...\"\n"
-            "  redirect_uri = \"https://<tu-app>.streamlit.app\"\n"
+            '  client_id = "..." \n'
+            '  client_secret = "..." \n'
+            '  redirect_uri = "https://<tu-app>.streamlit.app"\n'
         )
         return None
 
@@ -127,7 +130,7 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
 
     oo = st.session_state["oauth_oidc"]
 
-    # Botón único (pestaña nueva)
+    # Botón único (pestaña nueva, como querés)
     st.markdown(
         f'<a href="{oo["auth_url"]}" target="_blank" rel="noopener">'
         f'<button type="button">Iniciar sesión con Google</button></a>',
@@ -144,7 +147,7 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
         from urllib.parse import urlencode
         current_url = f'{oo["redirect_uri"]}?{urlencode({k: v[0] if isinstance(v, list) else v for k, v in qp.items()}, doseq=True)}'
 
-        # Rehidratación: si el flow no está (pestaña nueva) o el state no coincide, reconstruimos sin ruido.
+        # Si el state no coincide, sólo avisa en DEBUG (no ruido en producción)
         if st.session_state.get("DEBUG") and state_in != oo.get("state"):
             st.info("Aviso (DEBUG): state recibido distinto al generado; rehidratando flujo…")
 
@@ -154,7 +157,9 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
             creds = flow.credentials
 
             # Guardar credenciales personales (Drive/Sheets + GSC) y la identidad
-            st.session_state["creds_dest"] = _creds_to_dict_web(creds)
+            data = _creds_to_dict_web(creds)
+            st.session_state["creds_dest"] = data
+            token_store.save("creds_dest", data)   # <— 🔑 hace visible en la otra pestaña
             ident = _fetch_userinfo(creds) or {"name": "Invitado", "email": "—", "picture": None}
             st.session_state["_google_identity"] = ident
 
@@ -221,6 +226,13 @@ def logout_screen(app_home_url: str = "?"):
                 "DEBUG",
             ]:
                 st.session_state.pop(k, None)
+
+            # También limpiar token_store
+            try:
+                token_store.clear("creds_dest")
+                token_store.clear("creds_src")
+            except Exception:
+                pass
 
             _clear_qp()
             st.success("Sesión cerrada y caché limpiada.")
