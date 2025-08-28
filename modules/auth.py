@@ -6,7 +6,6 @@ import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-from urllib.parse import urlsplit, parse_qs
 import requests
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
@@ -80,14 +79,17 @@ def build_flow_web(*args, **kwargs) -> Flow:
         account_key = kwargs.get("account_key")
 
     auth = st.secrets.get("auth", {}) or {}
-    cid = auth.get("client_id")
-    csec = auth.get("client_secret")
-    ruri = auth.get("redirect_uri")
+    cid = (auth.get("client_id") or "").strip()
+    csec = (auth.get("client_secret") or "").strip()
+    ruri_raw = auth.get("redirect_uri") or ""
+    ruri = ruri_raw.strip()  # ← quita espacios/linebreaks invisibles
+
     if not (cid and csec and ruri):
         raise RuntimeError(
             "Falta configurar el redirect_uri o el cliente OAuth Web.\n"
             "Define en secrets [auth] client_id, client_secret y redirect_uri."
         )
+
     client_secrets = {
         "web": {
             "client_id": cid,
