@@ -13,15 +13,13 @@ import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
 
-# ====== Config base (debe ser el 1er st.*)
+# ====== Config base ======
 try:
     st.set_page_config(layout="wide", page_title="Análisis SEO", page_icon="📊")
 except Exception:
     pass
 
-# ------------------------------------------------------------------
-# Shims de compatibilidad
-# ------------------------------------------------------------------
+# ---- Shims de compatibilidad
 for _name in [
     "app_constants","app_config","app_ext","app_utils","app_params",
     "app_errors","app_activity","app_auth_flow","app_diagnostics","app_ai",
@@ -33,12 +31,7 @@ for _name in [
         pass
 
 # ====== UI / Branding ======
-from modules.ui import (
-    apply_page_style,
-    get_user,
-    sidebar_user_info,
-    login_screen,
-)
+from modules.ui import apply_page_style, get_user, sidebar_user_info, login_screen
 
 # ====== Carga de módulos locales ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
@@ -51,8 +44,10 @@ from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
+# 🔑 para leer tokens guardados por el Paso 0 en otra pestaña
+from modules.utils import token_store
+
 # ====== Google modules ======
-# ⚠️ Ya NO importamos pick_destination_oauth / pick_source_oauth
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
 
@@ -95,7 +90,7 @@ if prefer_oidc and st.session_state.get("_auth_bypass"):
 
 # --- PASO 0: Login botón Google (web) ---
 if prefer_oidc and not ident:
-    ident = step0_google_identity()  # guarda st.session_state["creds_dest"]
+    ident = step0_google_identity()  # guarda st.session_state["creds_dest"] y token_store["creds_dest"]
     if not ident:
         st.stop()
 
@@ -132,6 +127,10 @@ if _action == "change_personal":
     # Reiniciar el login personal del Paso 0
     for k in ("oauth_oidc","_google_identity","creds_dest"):
         st.session_state.pop(k, None)
+    try:
+        token_store.clear("creds_dest")
+    except Exception:
+        pass
     clear_qp(); st.rerun()
 elif _action == "change_folder":
     st.session_state.pop("dest_folder_id", None)
@@ -140,6 +139,10 @@ elif _action == "change_src":
     for k in ("creds_src", "step3_done", "src_account_label"):
         st.session_state.pop(k, None)
     st.session_state.pop("sc_account_choice", None)
+    try:
+        token_store.clear("creds_src")
+    except Exception:
+        pass
     clear_qp(); st.rerun()
 
 # --- Inicializar Drive/Sheets usando LAS CREDENCIALES del Paso 0 ---
@@ -147,6 +150,7 @@ drive_service = None
 gs_client = None
 _me = None
 
+# 1) Intentar desde session_state
 creds_dest = None
 if st.session_state.get("creds_dest"):
     try:
@@ -154,10 +158,27 @@ if st.session_state.get("creds_dest"):
     except Exception:
         creds_dest = None
 
+# 2) Fallback cross-pestaña: token_store (si el login se hizo en otra pestaña)
+if not creds_dest:
+    try:
+        creds_dest = token_store.as_credentials("creds_dest")
+        if creds_dest:
+            # hidratar también el session_state para el resto del flujo
+            st.session_state["creds_dest"] = {
+                "token": creds_dest.token,
+                "refresh_token": getattr(creds_dest, "refresh_token", None),
+                "token_uri": creds_dest.token_uri,
+                "client_id": creds_dest.client_id,
+                "client_secret": creds_dest.client_secret,
+                "scopes": list(getattr(creds_dest, "scopes", [])),
+            }
+    except Exception:
+        creds_dest = None
+
 if not creds_dest:
     st.error(
         "No recibí credenciales personales tras el Paso 0. "
-        "Asegurate de que el botón de login solicitó **Drive/Sheets y Search Console** además de OIDC."
+        "Volvé a pulsar **Iniciar sesión con Google** (un solo click)."
     )
     st.stop()
 
@@ -187,7 +208,36 @@ except Exception as e:
     st.error(f"No pude inicializar Drive/Sheets con la cuenta personal: {e}")
     st.stop()
 
-# ---------- Paso 1: Elegir análisis ----------
+# --- Carpeta destino (opcional) ---
+if "step2_done" not in st.session_state:
+    st.session_state["step2_done"] = False
+
+if not st.session_state["step2_done"]:
+    with st.expander("2) Destino de la copia (opcional)", expanded=False):
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
+                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
+        dest_folder_id = pick_destination(drive_service, _me, show_header=False)
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("Guardar selección", key="btn_save_step2"):
+                st.session_state["step2_done"] = True
+                st.rerun()
+        with c2:
+            st.caption("Podés dejar este paso cerrado para usar **Mi unidad** por defecto.")
+else:
+    chosen = st.session_state.get("dest_folder_id")
+    pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
+    st.markdown(
+        f'''
+        <div class="success-inline">
+            Destino de la copia: <strong>{pretty}</strong>
+            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
+
+# ---------- Elegir análisis ----------
 include_auditoria = run_traffic_audit is not None
 def pick_analysis(include_auditoria: bool, include_names: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
@@ -211,36 +261,6 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
     return "0"
 
 analisis = pick_analysis(include_auditoria, include_names=True)
-
-# ---------- (Opcional) Destino de la copia ----------
-# (mantener como util, sin numeración de paso para no confundir)
-if "step2_done" not in st.session_state:
-    st.session_state["step2_done"] = False
-
-if not st.session_state["step2_done"]:
-    with st.expander("Destino de la copia (opcional)", expanded=False):
-        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
-                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
-        dest_folder_id = pick_destination(drive_service, _me, show_header=False)
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            if st.button("Guardar selección", key="btn_save_step2"):
-                st.session_state["step2_done"] = True
-                st.rerun()
-        with c2:
-            st.caption("Podés dejar este paso cerrado para usar **Mi unidad** por defecto.")
-else:
-    chosen = st.session_state.get("dest_folder_id")
-    pretty = "Mi unidad (raíz)" if not chosen else "Carpeta personalizada seleccionada"
-    st.markdown(
-        f'''
-        <div class="success-inline">
-            Destino de la copia: <strong>{pretty}</strong>
-            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
 
 # ---------- Rama especial: Nombres (no usa GSC) ----------
 if analisis == "7":
@@ -284,15 +304,7 @@ if analisis == "7":
                        kind=st.session_state["last_file_kind"], widget_suffix="panel")
     st.stop()
 
-# ======== Paso 2: Seleccionar cuenta de Search Console (y login directo) ========
-
-def _csrf_mismatch_hint(step_label: str = "Paso 2"):
-    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
-    st.info(f"Hacé clic en **Reiniciar {step_label}** y repetí la autorización (un solo click).")
-    if st.button(f"Reiniciar {step_label}", key=f"btn_restart_{step_label.replace(' ', '_').lower()}"):
-        for k in ("creds_src","step3_done","src_account_label"):
-            st.session_state.pop(k, None)
-        clear_qp(); st.rerun()
+# ======== Resto de análisis (requieren GSC) ========
 
 # --- Builder local para flujo 'installed' (SC cuentas ACCESO / ACCESO_MEDIOS)
 def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
@@ -356,7 +368,8 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
                 returned_state = ""
             expected_state = osrc.get("state")
             if not returned_state or returned_state != expected_state:
-                _csrf_mismatch_hint("Paso 2"); st.stop()
+                st.error("CSRF Warning: el 'state' devuelto no coincide con el generado.")
+                st.stop()
             try:
                 flow = osrc["flow"]
                 flow.fetch_token(authorization_response=url.strip())
@@ -373,7 +386,7 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
     return creds
 
 # --- Selección de cuenta SC (sin duplicar pregunta luego)
-st.subheader("Paso 2 — Selecciona la cuenta con acceso a Search Console")
+st.subheader("Selecciona la cuenta con acceso a Search Console")
 account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
 _default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
 default_idx = account_options.index(_default_label) if _default_label in account_options else 2
@@ -391,7 +404,7 @@ def _choice_to_key(label: str) -> str | None:
 # Inicializar sc_service según selección
 sc_service = None
 if sc_choice == "Acceso en cuenta personal de Nomadic":
-    creds_dest_dict = st.session_state.get("creds_dest")
+    creds_dest_dict = st.session_state.get("creds_dest") or token_store.load("creds_dest")
     if not creds_dest_dict:
         st.error("No encuentro la sesión personal. Volvé a iniciar sesión en el Paso 0."); st.stop()
     if not has_gsc_scope(creds_dest_dict.get("scopes")):
@@ -433,13 +446,20 @@ else:
             "token_uri": creds_src_obj.token_uri,
             "client_id": creds_src_obj.client_id,
             "client_secret": creds_src_obj.client_secret,
-            "scopes": creds_src_obj.scopes,
+            "scopes": list(getattr(creds_src_obj, "scopes", [])),
         }
+        # Guardá también la fuente por si cambiás de pestaña
+        token_store.save("creds_src", st.session_state["creds_src"])
         st.session_state["src_account_label"] = sc_choice
         st.session_state["step3_done"] = True
         clear_qp(); st.rerun()
     else:
         try:
+            # Rehidratar si fuese necesario
+            if not st.session_state.get("creds_src"):
+                cdict = token_store.load("creds_src")
+                if cdict:
+                    st.session_state["creds_src"] = cdict
             creds_src = Credentials(**st.session_state["creds_src"])
             sc_service = ensure_sc_client(creds_src)
             src_label = st.session_state.get("src_account_label") or sc_choice
@@ -456,7 +476,7 @@ else:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
 
-# --- Elegir sitio (después de cuenta SC) ---
+# --- PASO: elegir sitio ---
 def pick_site(sc_service):
     st.subheader("Elige el sitio a analizar")
     try:
@@ -476,7 +496,7 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
-# ============== Ejecución por análisis (requieren GSC) ==============
+# ============== Flujos por análisis (requieren GSC) ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
