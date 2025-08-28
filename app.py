@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
+from streamlit.components.v1 import html as st_html  # ⬅️ (nuevo) para inyectar JS
 
 # ====== Config base ======
 try:
@@ -54,6 +55,62 @@ from modules.gsc import ensure_sc_client
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
 st.title("Analizador SEO 🚀")
+
+# --- ⬇️ Nuevo: hacer que el logo siga al sidebar abierto/cerrado
+st.markdown("""
+<style>
+/* El contenedor del logo (identificado más abajo) se fija y se desplaza
+   con una variable CSS que refleja el ancho actual del sidebar */
+#__nmdBrand, [data-nmd-brand] {
+  position: fixed !important;
+  top: 12px;
+  left: calc(var(--sb-offset, 0px) + 16px) !important; /* margen visual */
+  z-index: 3000 !important;
+  transition: left 180ms ease;
+}
+/* Evitar solapamiento visual del header */
+header[data-testid="stHeader"] { z-index: 1500 !important; background: transparent; }
+</style>
+""", unsafe_allow_html=True)
+
+st_html("""
+<script>
+const doc = parent.document;
+
+function setSbOffset() {
+  const sb = doc.querySelector('[data-testid="stSidebar"]');
+  const w = sb ? sb.getBoundingClientRect().width : 0;
+  doc.documentElement.style.setProperty('--sb-offset', (w > 1 ? w : 0) + 'px');
+}
+
+function markBrand() {
+  const header = doc.querySelector('header[data-testid="stHeader"]');
+  if (!header) return void setTimeout(markBrand, 120);
+
+  if (header.querySelector('#__nmdBrand,[data-nmd-brand]')) return;
+
+  // Heurísticas: encontrar el logo ya renderizado por tu branding
+  let node =
+    header.querySelector('[data-nmd-brand]') ||
+    (header.querySelector('img[alt*="nomadic" i], img[src*="nomadic" i]') || {}).closest?.('a,div') ||
+    header.querySelector('img')?.closest?.('a,div');
+
+  if (node) {
+    node.id = '__nmdBrand';
+    node.style.zIndex = 3000;
+  } else {
+    setTimeout(markBrand, 120);
+  }
+}
+
+// Observar cambios del sidebar (abre/cierra) y al cargar
+const sb = doc.querySelector('[data-testid="stSidebar"]');
+(new ResizeObserver(setSbOffset)).observe(sb || doc.body);
+setSbOffset();
+markBrand();
+</script>
+""", height=0)
+# --- ⬆️ Fin bloque logo/side-bar ---
 
 # ---------- IA / Prompts ----------
 load_prompts()
