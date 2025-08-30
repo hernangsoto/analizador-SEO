@@ -283,3 +283,141 @@ def params_for_names():
         "match_mode": match_mode_val,
         "global_terms": global_terms or "",
     }
+
+# ----------------- Parámetros: Discover Snoop (CSV externo, sin GSC) -----------------
+
+def params_for_discover_snoop() -> dict:
+    """
+    Construye parámetros para el análisis 'Discover Snoop'.
+    No depende del CSV (que se carga en app.py) para no romper el layout.
+    """
+    st.markdown("#### Parámetros (Discover Snoop)")
+    st.caption(
+        "Subí el CSV en la pantalla principal y usá estas opciones para filtrar, deduplicar y detectar señales."
+    )
+
+    # --- Ventana temporal ---
+    lag_days = st.number_input("Lag de datos (evitar días incompletos)", 0, 10, LAG_DAYS_DEFAULT, key="ds_lag")
+    end_default = date.today() - timedelta(days=lag_days)
+
+    modo_periodo = st.selectbox(
+        "Período a considerar",
+        ["Últimos 28 días", "Últimos 60 días", "Últimos 90 días", "Rango personalizado"],
+        index=0, key="ds_period_mode"
+    )
+
+    start_date = None
+    end_date = None
+    if modo_periodo == "Rango personalizado":
+        c1, c2 = st.columns(2)
+        with c1:
+            start_date = st.date_input("Desde (YYYY-MM-DD)", key="ds_start")  # puede quedar None
+        with c2:
+            end_date = st.date_input("Hasta (YYYY-MM-DD)", value=end_default, key="ds_end")
+    else:
+        days = 28 if "28" in modo_periodo else (60 if "60" in modo_periodo else 90)
+        end_date = end_default
+        start_date = end_date - timedelta(days=days - 1)
+        st.caption(f"Ventana estimada: **{start_date} → {end_date}**")
+
+    # --- Filtros por publisher / categoría / entidades ---
+    st.markdown("##### Filtros (listas separadas por coma)")
+    pub_inc = st.text_input("Incluir solo publishers (opcional)", value="", key="ds_pub_inc", placeholder="ej.: Clarín, La Nación")
+    pub_exc = st.text_input("Excluir publishers (opcional)", value="", key="ds_pub_exc", placeholder="ej.: Sitio X, Sitio Y")
+
+    cat_inc = st.text_input("Incluir solo categorías (opcional)", value="", key="ds_cat_inc", placeholder="ej.: Deportes, Espectáculos")
+    cat_exc = st.text_input("Excluir categorías (opcional)", value="", key="ds_cat_exc", placeholder="ej.: Política")
+
+    ent_inc = st.text_input("Incluir solo entidades (opcional)", value="", key="ds_ent_inc", placeholder="ej.: Lionel Messi, iPhone 16")
+    ent_exc = st.text_input("Excluir entidades (opcional)", value="", key="ds_ent_exc", placeholder="ej.: TikTok")
+
+    # --- Filtro por secciones (paths) + subsecciones (como en Core) ---
+    st.markdown("##### Filtro por secciones (paths)")
+    sec_mode = st.radio("¿Cómo aplicar el filtro de sección?", ["No filtrar", "Incluir solo", "Excluir"], index=0, horizontal=True, key="ds_sec_mode")
+    sec_list_txt = st.text_input("Secciones (ej.: /deportes/, /espectaculos/)", value="", key="ds_sec_list", placeholder="/deportes/, /espectaculos/")
+
+    st.markdown("##### Filtro por subsecciones (opcional)")
+    sub_enabled = st.checkbox("Activar filtro por subsecciones", value=False, key="ds_sub_en")
+    sub_mode = None
+    sub_list_txt = None
+    if sub_enabled:
+        sub_mode = st.radio("Modo de subsecciones", ["Incluir solo", "Excluir"], index=0, horizontal=True, key="ds_sub_mode")
+        sub_list_txt = st.text_input("Subsecciones (ej.: /deportes/futbol/)", value="", key="ds_sub_list", placeholder="/deportes/futbol/")
+
+    sec_paths = _parse_paths_csv(sec_list_txt)
+    sub_paths = _parse_paths_csv(sub_list_txt) if sub_list_txt is not None else None
+    adv_payload = _build_advanced_filters_payload(sec_mode, sec_paths, sub_enabled, sub_mode, sub_paths)
+
+    # --- Deduplicación / normalización de URLs ---
+    st.markdown("##### Normalización y deduplicación")
+    dedupe_mode = st.selectbox(
+        "Modo de deduplicación",
+        ["Por URL exacta", "Por ruta sin querystring", "Por slug + título (agresivo)"],
+        index=1, key="ds_dedupe"
+    )
+    strip_query = st.checkbox("Quitar parámetros de tracking (utm, gclid, etc.)", value=True, key="ds_strip_qs")
+    normalize_trailing = st.checkbox("Normalizar / y mayúsculas/minúsculas en path", value=True, key="ds_norm_trailing")
+
+    # --- Umbrales y señales ---
+    st.markdown("##### Umbrales")
+    min_views = st.number_input("Mínimo de apariciones (views) para considerar una URL", 1, 1000, 2, key="ds_min_views")
+    min_days_visible = st.number_input("Mínimo de días vista en la ventana", 1, 90, 1, key="ds_min_days")
+    top_n_entities = st.number_input("Top entidades a destacar", 5, 100, 20, key="ds_topn_entities")
+    top_n_categories = st.number_input("Top categorías a destacar", 5, 100, 20, key="ds_topn_categories")
+
+    st.markdown("##### Alertas")
+    st.caption("Marcamos picos/caídas comparando tramos internos en la ventana y contenido viejo.")
+    spike_mult = st.number_input("Umbral de pico (x veces sobre su mediana)", 1.0, 10.0, 2.5, step=0.1, key="ds_spike_mult")
+    drop_mult = st.number_input("Umbral de caída (dividido por x respecto a su mediana)", 1.0, 10.0, 2.5, step=0.1, key="ds_drop_mult")
+    stale_days = st.number_input("Staleness: días sin verse para marcar contenido viejo", 7, 180, 30, key="ds_stale_days")
+
+    include_raw = st.checkbox("Incluir pestaña de datos crudos (RAW)", value=False, key="ds_include_raw")
+
+    # --- Ensamblar parámetros ---
+    return {
+        "lag_days": int(lag_days),
+        "period": {
+            "mode": "custom" if modo_periodo == "Rango personalizado" else "last",
+            "start_date": start_date,
+            "end_date": end_date,
+            "days": None if modo_periodo == "Rango personalizado" else (28 if "28" in modo_periodo else (60 if "60" in modo_periodo else 90)),
+        },
+        "filters": {
+            "publishers": {
+                "include": _parse_paths_csv(pub_inc),
+                "exclude": _parse_paths_csv(pub_exc),
+            },
+            "categories": {
+                "include": _parse_paths_csv(cat_inc),
+                "exclude": _parse_paths_csv(cat_exc),
+            },
+            "entities": {
+                "include": _parse_paths_csv(ent_inc),
+                "exclude": _parse_paths_csv(ent_exc),
+            },
+            "sections_payload": adv_payload,  # mismo formato que core/evergreen
+        },
+        "dedupe": {
+            "mode": ("url" if dedupe_mode.startswith("Por URL")
+                     else "path" if "ruta" in dedupe_mode
+                     else "slug_title"),
+            "strip_query": bool(strip_query),
+            "normalize_trailing": bool(normalize_trailing),
+        },
+        "thresholds": {
+            "min_views": int(min_views),
+            "min_days_visible": int(min_days_visible),
+        },
+        "highlights": {
+            "top_n_entities": int(top_n_entities),
+            "top_n_categories": int(top_n_categories),
+        },
+        "alerts": {
+            "spike_multiplier": float(spike_mult),
+            "drop_multiplier": float(drop_mult),
+            "stale_days": int(stale_days),
+        },
+        "output": {
+            "include_raw": bool(include_raw),
+        },
+    }
