@@ -36,9 +36,14 @@ from modules.ui import apply_page_style, get_user, sidebar_user_info, login_scre
 # ====== Carga de módulos locales ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
 from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
+# 👇 nuevo import del análisis Discover Snoop (repo externo)
+from modules.app_ext import run_discover_snoop
+
 from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm
 from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
 from modules.app_params import params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names
+# 👇 nuevos params para Discover Snoop
+from modules.app_params import params_for_discover_snoop
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
@@ -276,7 +281,7 @@ else:
 
 # ---------- Elegir análisis ----------
 include_auditoria = run_traffic_audit is not None
-def pick_analysis(include_auditoria: bool, include_names: bool = True):
+def pick_analysis(include_auditoria: bool, include_names: bool = True, include_discover: bool = True):
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
@@ -289,15 +294,18 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True):
         opciones.append("6. Auditoría de tráfico ✅")
     if include_names:
         opciones.append("7. Análisis de Nombres (KG + Wikipedia) ✅")
+    if include_discover:
+        opciones.append("8. Análisis en base a Discover Snoop ✅")
 
     key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
     if key.startswith("7."): return "7"
+    if key.startswith("8."): return "8"
     return "0"
 
-analisis = pick_analysis(include_auditoria, include_names=True)
+analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True)
 
 # ---------- Rama especial: Nombres (no usa GSC) ----------
 if analisis == "7":
@@ -334,6 +342,68 @@ if analisis == "7":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "names"
+    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
+        st.divider(); st.subheader("📄 Resumen del análisis")
+        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
+        gemini_summary(gs_client, st.session_state["last_file_id"],
+                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
+    st.stop()
+
+# ---------- Rama especial: Discover Snoop (no usa GSC) ----------
+if analisis == "8":
+    if run_discover_snoop is None:
+        st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
+    else:
+        st.subheader("Subí el CSV exportado de Discover Snoop")
+        up = st.file_uploader("Archivo CSV", type=["csv"])
+        params_ds = params_for_discover_snoop()
+
+        with st.expander("Formato esperado (campos mínimos)"):
+            st.markdown("""
+            Debe contener **publisher, title, url, category, firstviewed, lastviewed**.  
+            `entities` es opcional pero recomendado.
+            """)
+
+        df = None
+        if up is not None:
+            try:
+                df = pd.read_csv(up)
+            except Exception:
+                up.seek(0)
+                df = pd.read_csv(up, encoding="latin-1")
+            st.success(f"CSV cargado: {len(df):,} filas")
+
+        if df is None:
+            st.info("Cargá el CSV para habilitar la ejecución.")
+        else:
+            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
+                sid = run_with_indicator(
+                    "Procesando Discover Snoop",
+                    run_discover_snoop,  # función del paquete externo
+                    drive_service, gs_client,  # servicios Google
+                    df, params_ds,            # datos + parámetros
+                    st.session_state.get("dest_folder_id")
+                )
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=(_me or {}).get("emailAddress") or "",
+                    event="analysis", site_url="",
+                    analysis_kind="Discover Snoop",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account="", notes=f"params={params_ds!r}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "discover"
+
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
         st.divider(); st.subheader("📄 Resumen del análisis")
         st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
