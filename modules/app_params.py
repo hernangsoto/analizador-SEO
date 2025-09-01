@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
@@ -421,3 +422,194 @@ def params_for_discover_snoop() -> dict:
             "include_raw": bool(include_raw),
         },
     }
+
+# ----------------- Parámetros: Análisis de contenido (GSC + scraping configurable) -----------------
+
+def params_for_content() -> dict:
+    """
+    Parámetros para 'Análisis de contenido':
+    - Origen: Search / Discover / Ambos
+    - Ventana temporal (presets o personalizada)
+    - Filtros GSC (país, dispositivo, secciones/subsecciones)
+    - Umbrales y límite de URLs
+    - Selectores de scraping editables (modo simple o JSON avanzado)
+    """
+    st.markdown("#### Parámetros (Análisis de contenido)")
+    lag_days = st.number_input("Lag de datos (evitar días incompletos)", 0, 10, LAG_DAYS_DEFAULT, key="cnt_lag")
+
+    # --- Origen ---
+    tipo_display = st.radio("Origen a analizar", ["Search", "Discover", "Search + Discover"], index=2, horizontal=True, key="cnt_tipo")
+    tipo_map = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}
+    tipo = tipo_map.get(tipo_display, "Ambos")
+
+    # --- Ventana temporal ---
+    end_default = date.today() - timedelta(days=lag_days)
+    modo_periodo = st.selectbox(
+        "Período",
+        ["Últimos 14 días", "Últimos 28 días", "Últimos 60 días", "Rango personalizado"],
+        index=1, key="cnt_period_mode"
+    )
+    start_date = None
+    end_date = None
+    if modo_periodo == "Rango personalizado":
+        c1, c2 = st.columns(2)
+        with c1:
+            start_date = st.date_input("Desde (YYYY-MM-DD)", key="cnt_start")
+        with c2:
+            end_date = st.date_input("Hasta (YYYY-MM-DD)", value=end_default, key="cnt_end")
+    else:
+        days = 14 if "14" in modo_periodo else (28 if "28" in modo_periodo else 60)
+        end_date = end_default
+        start_date = end_date - timedelta(days=days - 1)
+        st.caption(f"Ventana: **{start_date} → {end_date}**")
+
+    # --- Filtros GSC ---
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pais_choice = st.selectbox("País (ISO-3)", ["Todos", "ARG","MEX","ESP","USA","COL","PER","CHL","URY"], index=0, key="cnt_country")
+        country = None if pais_choice == "Todos" else pais_choice
+    with c2:
+        device = st.selectbox("Dispositivo", ["Todos", "Desktop", "Mobile"], index=0, key="cnt_device").lower()
+        device = None if device == "todos" else device
+    with c3:
+        order_by_label = st.selectbox("Ordenar URLs por", ["Clicks", "Impresiones", "CTR", "Posición"], index=0, key="cnt_order")
+        order_by = {"Clicks":"clicks","Impresiones":"impressions","CTR":"ctr","Posición":"position"}[order_by_label]
+
+    st.markdown("##### Filtro por secciones (paths)")
+    sec_mode = st.radio("¿Cómo aplicar el filtro de sección?", ["No filtrar", "Incluir solo", "Excluir"], index=0, horizontal=True, key="cnt_sec_mode")
+    sec_list_txt = st.text_input("Secciones (ej.: /deportes/, /espectaculos/)", value="", key="cnt_sec_list", placeholder="/deportes/, /espectaculos/")
+
+    st.markdown("##### Filtro por subsecciones (opcional)")
+    sub_enabled = st.checkbox("Activar filtro por subsecciones", value=False, key="cnt_sub_en")
+    sub_mode = None
+    sub_list_txt = None
+    if sub_enabled:
+        sub_mode = st.radio("Modo de subsecciones", ["Incluir solo", "Excluir"], index=0, horizontal=True, key="cnt_sub_mode")
+        sub_list_txt = st.text_input("Subsecciones (ej.: /deportes/futbol/)", value="", key="cnt_sub_list", placeholder="/deportes/futbol/")
+
+    sec_paths = _parse_paths_csv(sec_list_txt)
+    sub_paths = _parse_paths_csv(sub_list_txt) if sub_list_txt is not None else None
+    sections_payload = _build_advanced_filters_payload(sec_mode, sec_paths, sub_enabled, sub_mode, sub_paths)
+
+    st.markdown("##### Umbrales y límites")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        min_clicks = st.number_input("Mínimo de clicks por URL", 0, 100000, 0, key="cnt_min_clicks")
+    with c2:
+        min_impr = st.number_input("Mínimo de impresiones por URL", 0, 1000000, 50, key="cnt_min_impr")
+    with c3:
+        max_urls = st.number_input("Límite de URLs a analizar (top N)", 10, 5000, 300, key="cnt_max_urls")
+
+    # --- Selectores de scraping (modo simple + modo JSON avanzado) ---
+    st.markdown("##### Selectores para scrappear (editables por medio)")
+    DEFAULT_SELECTORS = {
+        "title": "h1, meta[property='og:title']::attr(content), meta[name='twitter:title']::attr(content)",
+        "subtitle": "h2, .subhead, .standfirst",
+        "author": "[itemprop='author'], .byline a, .byline",
+        "published": "time[datetime]::attr(datetime), meta[property='article:published_time']::attr(content)",
+        "updated": "meta[property='article:modified_time']::attr(content)",
+        "section": "meta[property='article:section']::attr(content), nav.breadcrumb a[aria-current='page']",
+        "tags": "meta[name='news_keywords']::attr(content), a[rel='tag'], .tags a",
+        "wordcount": "meta[name='wordcount']::attr(content)",
+        "img_count": "article img",
+        "video_count": "video, iframe[src*='youtube'], iframe[src*='vimeo']",
+        "paywall": "meta[name='metered_paywall']::attr(content)"
+    }
+    USE_JSON = st.checkbox("Editar selectores en JSON avanzado", value=False, key="cnt_use_json")
+
+    selectors: dict[str, str] = dict(DEFAULT_SELECTORS)
+
+    if USE_JSON:
+        default_json = json.dumps(DEFAULT_SELECTORS, ensure_ascii=False, indent=2)
+        json_txt = st.text_area("Pegá/edita el JSON de selectores", value=default_json, height=260, key="cnt_selectors_json")
+        try:
+            parsed = json.loads(json_txt) if json_txt.strip() else {}
+            if isinstance(parsed, dict) and parsed:
+                selectors = {str(k): (v if isinstance(v, str) else ", ".join(v) if isinstance(v, list) else "")
+                             for k, v in parsed.items()}
+            else:
+                st.warning("El JSON no es un objeto válido. Uso los selectores por defecto.")
+        except Exception:
+            st.warning("No pude parsear el JSON. Uso los selectores por defecto.")
+    else:
+        # Campos rápidos por cada selector frecuente
+        c1, c2 = st.columns(2)
+        with c1:
+            selectors["title"] = st.text_input("Selector de Título", value=selectors["title"], key="sel_title")
+            selectors["author"] = st.text_input("Selector de Autor", value=selectors["author"], key="sel_author")
+            selectors["published"] = st.text_input("Selector de Fecha Publicación", value=selectors["published"], key="sel_published")
+            selectors["section"] = st.text_input("Selector de Sección", value=selectors["section"], key="sel_section")
+            selectors["tags"] = st.text_input("Selector de Tags", value=selectors["tags"], key="sel_tags")
+        with c2:
+            selectors["subtitle"] = st.text_input("Selector de Subtítulo", value=selectors["subtitle"], key="sel_subtitle")
+            selectors["updated"] = st.text_input("Selector de Fecha Actualización", value=selectors["updated"], key="sel_updated")
+            selectors["wordcount"] = st.text_input("Selector de Wordcount (opcional)", value=selectors["wordcount"], key="sel_wordcount")
+            selectors["img_count"] = st.text_input("Selector de Imágenes (conteo)", value=selectors["img_count"], key="sel_img_count")
+            selectors["video_count"] = st.text_input("Selector de Videos (conteo)", value=selectors["video_count"], key="sel_video_count")
+            selectors["paywall"] = st.text_input("Selector de Paywall (opcional)", value=selectors["paywall"], key="sel_paywall")
+
+    st.markdown("##### Opciones de request y parseo")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        timeout = st.number_input("Timeout por URL (segundos)", 3, 120, 12, key="cnt_timeout")
+    with c2:
+        concurrency = st.number_input("Concurrencia (hilos)", 1, 32, 6, key="cnt_concurrency")
+    with c3:
+        ua = st.text_input("User-Agent (opcional)", value="", key="cnt_ua", placeholder="Mozilla/5.0 ...")
+
+    c4, c5 = st.columns(2)
+    with c4:
+        respect_robots = st.checkbox("Respetar robots.txt", value=False, key="cnt_robots")
+    with c5:
+        render_js = st.checkbox("Renderizar JS (si el scraper lo soporta)", value=False, key="cnt_render_js")
+
+    strip_sel = st.text_input("Selectores para remover del HTML antes de analizar (opcional)", value=".newsletter, .related-articles, .social-share", key="cnt_strip_sel")
+
+    # --- Salida ---
+    c1, c2 = st.columns(2)
+    with c1:
+        include_raw = st.checkbox("Incluir pestaña RAW (GSC/scrape)", value=False, key="cnt_include_raw")
+    with c2:
+        add_summary = st.checkbox("Agregar resumen automático (IA) si está disponible", value=True, key="cnt_add_summary")
+
+    # Ensamblar
+    params = {
+        "lag_days": int(lag_days),
+        "tipo": tipo,  # "Search" | "Discover" | "Ambos"
+        "window": {
+            "mode": "custom" if modo_periodo == "Rango personalizado" else "last",
+            "start_date": start_date,
+            "end_date": end_date,
+            "days": None if modo_periodo == "Rango personalizado" else (14 if "14" in modo_periodo else (28 if "28" in modo_periodo else 60)),
+        },
+        "filters": {
+            "country": country,
+            "device": device,  # None|"desktop"|"mobile"
+            "sections_payload": sections_payload,  # mismo formato avanzado que en otros análisis
+            "min_clicks": int(min_clicks),
+            "min_impressions": int(min_impr),
+        },
+        "order_by": order_by,           # clicks | impressions | ctr | position
+        "max_urls": int(max_urls),      # límite de URLs a scrapear
+        # Campo requerido por app.py para habilitar el botón (chequea que sea dict no vacío)
+        "selectors": selectors,
+        # Bloque de scraping más detallado (usa los mismos selectors)
+        "scrape": {
+            "selectors": selectors,
+            "request": {
+                "timeout": int(timeout),
+                "concurrency": int(concurrency),
+                "user_agent": ua or "",
+                "respect_robots_txt": bool(respect_robots),
+                "render_js": bool(render_js),
+            },
+            "parse": {
+                "strip_selectors": strip_sel or "",
+            },
+        },
+        "output": {
+            "include_raw": bool(include_raw),
+            "add_summary": bool(add_summary),
+        },
+    }
+    return params
