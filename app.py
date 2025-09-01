@@ -312,4 +312,4 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if key.startswith("9."): return "9"  # ⬅️ NUEVO
     return "0"
 
-analisis = pick_analysis(include_a
+analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True)
