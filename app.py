@@ -36,20 +36,36 @@ from modules.ui import apply_page_style, get_user, sidebar_user_info, login_scre
 # ====== Carga de módulos locales ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
 from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
-# Discover Snoop (repo externo)
-from modules.app_ext import run_discover_snoop
-# NUEVO: Análisis de contenido (repo externo)
-from modules.app_ext import run_content_analysis
+
+# Discover Snoop (repo externo) — proteger import por si no está disponible
+try:
+    from modules.app_ext import run_discover_snoop
+except Exception:
+    run_discover_snoop = None  # fallback
+
+# NUEVO: Análisis de contenido (repo externo) — proteger import
+try:
+    from modules.app_ext import run_content_analysis
+except Exception:
+    run_content_analysis = None  # fallback
 
 from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm
 from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
 from modules.app_params import (
     params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names,
 )
-# Params para Discover Snoop
-from modules.app_params import params_for_discover_snoop
-# NUEVO: params del análisis de contenido
-from modules.app_params import params_for_content
+
+# Params para Discover Snoop — proteger import
+try:
+    from modules.app_params import params_for_discover_snoop
+except Exception:
+    params_for_discover_snoop = lambda: {}
+
+# NUEVO: params del análisis de contenido — proteger import
+try:
+    from modules.app_params import params_for_content
+except Exception:
+    params_for_content = None
 
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
@@ -720,68 +736,72 @@ elif analisis == "6":
 
 elif analisis == "9":
     # ===== NUEVO: Análisis de contenido =====
-    params = params_for_content()  # defaults del repo externo
-    # Controles de UI para fuente y selectores editables
-    st.subheader("Configuración del Análisis de contenido")
+    if (run_content_analysis is None) or (params_for_content is None):
+        st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
+                   "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
+    else:
+        params = params_for_content()  # defaults del repo externo
 
-    src_map = {"Search": "search", "Discover": "discover", "Search + Discover": "both"}
-    inv_src_map = {v: k for k, v in src_map.items()}
-    default_source = inv_src_map.get(params.get("source", "both"), "Search + Discover")
-    fuente = st.radio("Fuente de tráfico", list(src_map.keys()), index=list(src_map.keys()).index(default_source))
+        st.subheader("Configuración del Análisis de contenido")
 
-    default_selectors = params.get("selectors") or {}
-    try:
-        default_selectors_str = json.dumps(default_selectors, ensure_ascii=False, indent=2)
-    except Exception:
-        default_selectors_str = "{}"
+        src_map = {"Search": "search", "Discover": "discover", "Search + Discover": "both"}
+        inv_src_map = {v: k for k, v in src_map.items()}
+        default_source = inv_src_map.get(params.get("source", "both"), "Search + Discover")
+        fuente = st.radio("Fuente de tráfico", list(src_map.keys()), index=list(src_map.keys()).index(default_source))
 
-    st.caption("Pegá/edita el JSON de selectores CSS/XPath para scrappear (título, autor, fecha, sección, etc.).")
-    selectors_str = st.text_area("Selectores (JSON)", value=default_selectors_str, height=200)
-
-    selectors_ok = False
-    selectors = {}
-    try:
-        selectors = json.loads(selectors_str) if selectors_str.strip() else {}
-        selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
-    except Exception:
-        selectors_ok = False
-
-    if not selectors_ok:
-        st.warning("Definí un JSON de selectores válido para poder ejecutar el análisis.")
-
-    # Actualizar params finales
-    params["source"] = src_map[fuente]
-    params["selectors"] = selectors if selectors_ok else params.get("selectors", {})
-
-    if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not selectors_ok):
-        sid = run_with_indicator(
-            "Procesando Análisis de contenido",
-            run_content_analysis,  # repo externo
-            sc_service, drive_service, gs_client,  # servicios
-            site_url, params,                      # sitio + parámetros (incluye fuente y selectores)
-            st.session_state.get("dest_folder_id")
-        )
-        maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        with st.expander("Compartir acceso al documento (opcional)"):
-            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+        default_selectors = params.get("selectors") or {}
         try:
-            meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-            sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            default_selectors_str = json.dumps(default_selectors, ensure_ascii=False, indent=2)
         except Exception:
-            sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-        activity_log_append(
-            drive_service, gs_client,
-            user_email=(_me or {}).get("emailAddress") or "",
-            event="analysis", site_url=site_url,
-            analysis_kind="Contenido",
-            sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-            gsc_account=st.session_state.get("src_account_label") or "",
-            notes=f"params={params!r}"
-        )
-        st.session_state["last_file_id"] = sid
-        st.session_state["last_file_kind"] = "content"
+            default_selectors_str = "{}"
+
+        st.caption("Pegá/edita el JSON de selectores CSS/XPath para scrappear (título, autor, fecha, sección, etc.).")
+        selectors_str = st.text_area("Selectores (JSON)", value=default_selectors_str, height=200)
+
+        selectors_ok = False
+        selectors = {}
+        try:
+            selectors = json.loads(selectors_str) if selectors_str.strip() else {}
+            selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
+        except Exception:
+            selectors_ok = False
+
+        if not selectors_ok:
+            st.warning("Definí un JSON de selectores válido para poder ejecutar el análisis.")
+
+        # Actualizar params finales
+        params["source"] = src_map[fuente]
+        params["selectors"] = selectors if selectors_ok else params.get("selectors", {})
+
+        if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not selectors_ok):
+            sid = run_with_indicator(
+                "Procesando Análisis de contenido",
+                run_content_analysis,  # repo externo
+                sc_service, drive_service, gs_client,  # servicios
+                site_url, params,                      # sitio + parámetros (incluye fuente y selectores)
+                st.session_state.get("dest_folder_id")
+            )
+            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            activity_log_append(
+                drive_service, gs_client,
+                user_email=(_me or {}).get("emailAddress") or "",
+                event="analysis", site_url=site_url,
+                analysis_kind="Contenido",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"params={params!r}"
+            )
+            st.session_state["last_file_id"] = sid
+            st.session_state["last_file_kind"] = "content"
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
