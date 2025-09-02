@@ -740,79 +740,56 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        params = params_for_content()  # defaults del repo externo
+        st.subheader("Análisis de contenido")
 
-        st.subheader("Configuración del Análisis de contenido")
+        # ⚠️ Construir los parámetros UNA sola vez por render (evita claves duplicadas)
+        params_cnt = params_for_content()
 
-        src_map = {"Search": "search", "Discover": "discover", "Search + Discover": "both"}
-        inv_src_map = {v: k for k, v in src_map.items()}
-        default_source = inv_src_map.get(params.get("source", "both"), "Search + Discover")
-        fuente = st.radio("Fuente de tráfico", list(src_map.keys()), index=list(src_map.keys()).index(default_source))
+        # Habilitar botón sólo si hay selectores definidos
+        ready = bool(params_cnt.get("selectors"))
+        run_btn = st.button("📰 Ejecutar Análisis de contenido", type="primary",
+                            key="btn_run_content", disabled=not ready)
 
-        default_selectors = params.get("selectors") or {}
-        try:
-            default_selectors_str = json.dumps(default_selectors, ensure_ascii=False, indent=2)
-        except Exception:
-            default_selectors_str = "{}"
+        if run_btn:
+            sid = run_with_indicator(
+                "Procesando Análisis de contenido",
+                run_content_analysis,
+                sc_service, drive_service, gs_client, site_url,
+                params_cnt,
+                st.session_state.get("dest_folder_id")
+            )
 
-        st.caption("Pegá/edita el JSON de selectores CSS/XPath para scrappear (título, autor, fecha, sección, etc.).")
-        selectors_str = st.text_area("Selectores (JSON)", value=default_selectors_str, height=200)
+            if not sid:
+                st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
+                with st.expander("Ver detalle técnico"):
+                    err = st.session_state.get("_rca_error", "(sin mensaje)")
+                    st.write(err)
+                    norm_params = st.session_state.get("_rca_norm_params", {})
+                    import json as _json
+                    st.code(_json.dumps(norm_params, ensure_ascii=False, indent=2))
+                st.stop()
 
-        selectors_ok = False
-        selectors = {}
-        try:
-            selectors = json.loads(selectors_str) if selectors_str.strip() else {}
-            selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
-        except Exception:
-            selectors_ok = False
-
-        if not selectors_ok:
-            st.warning("Definí un JSON de selectores válido para poder ejecutar el análisis.")
-
-        # Actualizar params finales
-        params["source"] = src_map[fuente]
-        params["selectors"] = selectors if selectors_ok else params.get("selectors", {})
-
-        # Dentro del branch del "Análisis de contenido"
-if st.button("📰 Ejecutar Análisis de contenido", type="primary"):
-    with st.spinner("Procesando Análisis de contenido..."):
-        sid = run_content_analysis(
-            sc_service, drive_service, gs_client, site_url,
-            params_for_content(),  # o tu dict de params ya armado
-            st.session_state.get("dest_folder_id")
-        )
-
-    if not sid:
-        st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
-        with st.expander("Ver detalle técnico"):
-            err = st.session_state.get("_rca_error", "(sin mensaje)")
-            st.write(err)
-            norm_params = st.session_state.get("_rca_norm_params", {})
-            import json as _json
-            st.code(_json.dumps(norm_params, ensure_ascii=False, indent=2))
-        st.stop()
-
-    # flujo OK
-    st.success("¡Listo! Tu documento está creado.")
-    st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-    with st.expander("Compartir acceso al documento (opcional)"):
-        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-    try:
-        meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-        sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-    except Exception:
-        sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-    activity_log_append(
-        drive_service, gs_client,
-        user_email=( _me or {}).get("emailAddress") or "",
-        event="analysis", site_url=site_url,
-        analysis_kind="Análisis de contenido",
-        sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-        gsc_account=st.session_state.get("src_account_label") or "",
-        notes="ok"
-    )
-    st.session_state["last_file_id"] = sid
-    st.session_state["last_file_kind"] = "content"
+            # flujo OK
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            activity_log_append(
+                drive_service, gs_client,
+                user_email=(_me or {}).get("emailAddress") or "",
+                event="analysis", site_url=site_url,
+                analysis_kind="Análisis de contenido",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes="ok"
+            )
+            st.session_state["last_file_id"] = sid
+            st.session_state["last_file_kind"] = "content"
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
