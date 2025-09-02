@@ -766,7 +766,7 @@ elif analisis == "9":
                 end_date = today_ok
                 start_date = end_date - _td(days=days - 1)
 
-            # Grabar resueltos y alias
+            # Grabar resueltos y alias DENTRO de window
             params.setdefault("window", {})
             params["window"]["start_date"] = start_date
             params["window"]["end_date"] = end_date
@@ -778,6 +778,15 @@ elif analisis == "9":
             params["window"]["end"] = end_date
             params["window"]["from"] = start_date
             params["window"]["to"] = end_date
+
+            # Alias TOP-LEVEL (compatibilidad con runners antiguos)
+            for k, v in [
+                ("start_date", start_date), ("end_date", end_date),
+                ("start", start_date), ("end", end_date),
+                ("from", start_date), ("to", end_date),
+            ]:
+                params[k] = v
+
         except Exception:
             today_ok = _date.today() - _td(days=int(params.get("lag_days", 0)))
             start_date = today_ok - _td(days=27)
@@ -793,6 +802,13 @@ elif analisis == "9":
             params["window"]["end"] = end_date
             params["window"]["from"] = start_date
             params["window"]["to"] = end_date
+            # Alias TOP-LEVEL también en fallback:
+            for k, v in [
+                ("start_date", start_date), ("end_date", end_date),
+                ("start", start_date), ("end", end_date),
+                ("from", start_date), ("to", end_date),
+            ]:
+                params[k] = v
 
         # Sinónimos source/tipo & order
         src_label = (params.get("tipo") or params.get("source") or "Ambos")
@@ -802,8 +818,22 @@ elif analisis == "9":
         if "order" not in params and "order_by" in params:
             params["order"] = params["order_by"]
 
-        # 3) Preflight GSC (para diagnosticar por qué sale vacío)
-        def _gsc_preflight(sc, site_url, start_d, end_d, kind, limit=20, country=None, device=None):
+        # Bloque GSC unificado + sinónimos de límites/umbrales
+        f = params.get("filters") or {}
+        country = f.get("country")
+        device = f.get("device")
+        params.setdefault("gsc", {})
+        params["gsc"]["country"] = country
+        params["gsc"]["device"] = device
+        params["gsc"]["min_impressions"] = f.get("min_impressions")
+        params["gsc"]["min_clicks"] = f.get("min_clicks")
+        params["gsc"]["order"] = params.get("order") or params.get("order_by") or "clicks"
+
+        params["limit"] = params.get("max_urls", 300)
+        params["top_n"] = params.get("top_n", params["limit"])
+
+        # 3) Preflight GSC (traer URLs reales y opcionalmente pasarlas como seed)
+        def _gsc_preflight(sc, site_url, start_d, end_d, kind, order="clicks", limit=100, country=None, device=None):
             # kind: 'search' | 'discover'
             api_type = "discover" if kind == "discover" else "web"
             body = {
@@ -811,43 +841,47 @@ elif analisis == "9":
                 "endDate": str(end_d),
                 "dimensions": ["page"],
                 "rowLimit": int(limit),
-                "type": api_type
+                "type": api_type,
+                "startRow": 0,
             }
-            # Filtros opcionales simples (defensivos)
+            # Orden simple
+            order_map = {
+                "clicks": {"dimension": "clicks", "descending": True},
+                "impressions": {"dimension": "impressions", "descending": True},
+                "ctr": {"dimension": "ctr", "descending": True},
+                "position": {"dimension": "position", "descending": False},
+            }
+            if order in order_map:
+                body["orderBy"] = [order_map[order]]
+
+            # Filtros opcionales
+            dfg = []
             if country:
-                try:
-                    body.setdefault("dimensionFilterGroups", []).append({
-                        "filters": [{
-                            "dimension": "country", "operator": "equals", "expression": country
-                        }]
-                    })
-                except Exception:
-                    pass
+                dfg.append({"filters": [{"dimension": "country", "operator": "equals", "expression": country}]})
             if device:
-                try:
-                    dev_map = {"desktop":"DESKTOP","mobile":"MOBILE","tablet":"TABLET"}
-                    body.setdefault("dimensionFilterGroups", []).append({
-                        "filters": [{
-                            "dimension": "device", "operator": "equals", "expression": dev_map.get(device.lower(), device.upper())
-                        }]
-                    })
-                except Exception:
-                    pass
+                dev_map = {"desktop":"DESKTOP","mobile":"MOBILE","tablet":"TABLET"}
+                dfg.append({"filters": [{"dimension": "device", "operator": "equals", "expression": dev_map.get(str(device).lower(), str(device).upper())}]})
+            if dfg:
+                body["dimensionFilterGroups"] = dfg
+
             try:
                 resp = sc.searchanalytics().query(siteUrl=site_url, body=body).execute()
                 rows = resp.get("rows", [])
                 pages = [r.get("keys", [""])[0] for r in rows if r.get("keys")]
-                return {"ok": True, "count": len(rows), "sample": pages[:10], "body": body}
+                return {"ok": True, "count": len(rows), "sample": pages[:10], "urls": pages, "body": body}
             except Exception as e:
-                return {"ok": False, "error": str(e), "body": body}
-
-        country = (params.get("filters") or {}).get("country")
-        device = (params.get("filters") or {}).get("device")
+                return {"ok": False, "error": str(e), "body": body, "urls": []}
 
         with st.expander("🔎 Preflight de datos GSC (previo a ejecutar)"):
             col1, col2 = st.columns(2)
+            # Search
             with col1:
-                pr_search = _gsc_preflight(sc_service, site_url, params["window"]["start_date"], params["window"]["end_date"], "search", limit=20, country=country, device=device)
+                pr_search = _gsc_preflight(
+                    sc_service, site_url,
+                    params["start_date"], params["end_date"],
+                    "search", order=params["gsc"]["order"], limit=min(500, params["limit"]),
+                    country=country, device=device
+                )
                 st.markdown("**Search (web)**")
                 if pr_search["ok"]:
                     st.write(f"Filas: {pr_search['count']}")
@@ -859,8 +893,14 @@ elif analisis == "9":
                 else:
                     st.warning("Error al consultar Search.")
                     st.code(pr_search["error"])
+            # Discover
             with col2:
-                pr_disc = _gsc_preflight(sc_service, site_url, params["window"]["start_date"], params["window"]["end_date"], "discover", limit=20, country=country, device=device)
+                pr_disc = _gsc_preflight(
+                    sc_service, site_url,
+                    params["start_date"], params["end_date"],
+                    "discover", order=params["gsc"]["order"], limit=min(500, params["limit"]),
+                    country=country, device=device
+                )
                 st.markdown("**Discover**")
                 if pr_disc["ok"]:
                     st.write(f"Filas: {pr_disc['count']}")
@@ -873,6 +913,21 @@ elif analisis == "9":
                     st.warning("Error al consultar Discover.")
                     st.code(pr_disc["error"])
 
+            # Armar seed según la fuente elegida
+            urls_seed = []
+            if params["source"] in ("search", "both") and pr_search.get("urls"):
+                urls_seed.extend(pr_search["urls"])
+            if params["source"] in ("discover", "both") and pr_disc.get("urls"):
+                urls_seed.extend(pr_disc["urls"])
+            # Dedup preservando orden
+            seen = set(); urls_seed = [u for u in urls_seed if (u not in seen and not seen.add(u))]
+            st.write(f"URLs candidatas (sin duplicar): {len(urls_seed)}")
+            st.session_state["content_seed_urls"] = urls_seed
+
+            use_seed = st.checkbox("Usar estas URLs como seed para el runner", value=True, key="content_use_seed")
+            if use_seed:
+                params["seed_urls"] = urls_seed[: params["limit"]]
+
         # 4) Previa: mostrar SIEMPRE el payload que se enviará
         with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
             st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
@@ -880,7 +935,7 @@ elif analisis == "9":
         # 5) Validaciones para habilitar botón
         selectors = params.get("selectors") or params.get("scrape", {}).get("selectors") or {}
         selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
-        can_run = selectors_ok  # fechas ya resueltas arriba
+        can_run = selectors_ok  # fechas/seed resueltas arriba
 
         if not selectors_ok:
             st.warning("Definí **selectores válidos** en la sección de selectores.")
@@ -913,7 +968,7 @@ elif analisis == "9":
                 # Renombrar el archivo con fechas resueltas para evitar "none a none"
                 from urllib.parse import urlparse as _urlparse
                 host = _urlparse(site_url).netloc or site_url
-                new_name = f"Análisis de contenido — {host} — {params['window']['start_date']} a {params['window']['end_date']}"
+                new_name = f"Análisis de contenido — {host} — {params['start_date']} a {params['end_date']}"
                 try:
                     drive_service.files().update(fileId=sid, body={"name": new_name}).execute()
                 except Exception:
