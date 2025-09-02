@@ -304,7 +304,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
         opciones.append("8. Análisis en base a Discover Snoop ✅")
     if include_content:
         opciones.append("9. Análisis de contenido (repo externo) ✅")
-    # NUEVO: extractor rápido H1 + metadatos
+    # EXTRACTOR rápido
     opciones.append("10. Extractor rápido GSC → H1 (+ metadatos) ✅")
 
     key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
@@ -712,6 +712,8 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
     Campos soportados:
       h1, title, meta_description, og_title, og_description, canonical, published_time, lang,
       first_paragraph, h2_list, h2_count, h3_list, h3_count, bold_count, link_count, tags_list
+    *IMPORTANTE*: h2/h3/bold/link se buscan SOLO dentro del contenedor del artículo si se provee
+    `xpaths['article']`. Si no se provee, se usa heurística (//article | //main).
     """
     # Defaults
     data = {
@@ -753,19 +755,10 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
             if el: return (el.get("content") or "").strip()
         return ""
 
-    def _get_text(el):
-        if el is None: return ""
-        if hasattr(el, "text_content"):  # lxml element
-            return el.text_content().strip()
+    def _xpath_text_list(_doc, xp: str) -> list[str]:
+        if not _doc or not xp: return []
         try:
-            return el.get_text(strip=True)
-        except Exception:
-            return str(el).strip()
-
-    def _xpath_text_list(doc, xp: str) -> list[str]:
-        if not doc or not xp: return []
-        try:
-            nodes = doc.xpath(xp)
+            nodes = _doc.xpath(xp)
             out = []
             for n in nodes:
                 if isinstance(n, str):
@@ -780,7 +773,27 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
         except Exception:
             return []
 
-    # --- Campos básicos ---
+    # Determinar contenedor del artículo (scope) para h2/h3/bold/links (y opcional primer párrafo)
+    lxml_scope_nodes = []
+    soup_scope = None
+    xp_article = (xpaths.get("article") or "").strip()
+    if have_lxml:
+        try:
+            if xp_article:
+                nodes = doc.xpath(xp_article)
+                lxml_scope_nodes = [n for n in nodes if hasattr(n, "xpath")]
+            if not lxml_scope_nodes:
+                # heurística
+                lxml_scope_nodes = [n for n in doc.xpath("//article | //main") if hasattr(n, "xpath")]
+        except Exception:
+            lxml_scope_nodes = []
+    if soup and not lxml_scope_nodes:
+        try:
+            soup_scope = soup.select_one("article") or soup.select_one("main")
+        except Exception:
+            soup_scope = None
+
+    # --- Campos básicos (document-wide) ---
     if wants.get("title"):
         if soup and soup.title and soup.title.string:
             data["title"] = soup.title.string.strip()
@@ -855,103 +868,140 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
             except Exception:
                 pass
 
-    # --- Campos avanzados (XPath + heurísticas) ---
+    # --- Avanzados (dentro del artículo cuando aplique) ---
     # Primer párrafo
     if wants.get("first_paragraph"):
-        xp = (xpaths.get("first_paragraph") or "").strip()
+        xp_first = (xpaths.get("first_paragraph") or "").strip()
         text = ""
-        if xp and have_lxml:
-            lst = _xpath_text_list(doc, xp)
+        if xp_first and have_lxml:
+            lst = _xpath_text_list(doc, xp_first)
             text = next((t for t in lst if t.strip()), "")
         if not text:
-            # heurística
-            if have_lxml:
-                for cand in ["(//article//p[normalize-space()])[1]",
-                             "(//main//p[normalize-space()])[1]",
-                             "(//p[normalize-space()])[1]"]:
+            # si hay scope, usar scope
+            if have_lxml and lxml_scope_nodes:
+                for node in lxml_scope_nodes:
                     try:
-                        t = doc.xpath(f"string({cand})")
+                        t = node.xpath("string(.//p[normalize-space()][1])")
                         if t and t.strip():
                             text = t.strip(); break
                     except Exception:
                         pass
+            if not text and soup_scope:
+                p = soup_scope.find("p")
+                if p: text = p.get_text(strip=True)
             if not text and soup:
-                # buscar <article> o <main>
-                container = soup.find(["article","main"])
-                if container:
-                    p = container.find("p")
-                else:
-                    p = soup.find("p")
-                if p:
-                    text = p.get_text(strip=True)
+                p = soup.find("p")
+                if p: text = p.get_text(strip=True)
         data["first_paragraph"] = text
 
-    # H2
+    # Helper para juntar textos dentro del scope lxml
+    def _collect_scope_texts(xpath_rel: str) -> list[str]:
+        vals: list[str] = []
+        if have_lxml and lxml_scope_nodes:
+            for node in lxml_scope_nodes:
+                try:
+                    parts = node.xpath(xpath_rel)
+                except Exception:
+                    parts = []
+                for p in parts:
+                    if isinstance(p, str):
+                        txt = p.strip()
+                    elif hasattr(p, "text_content"):
+                        txt = p.text_content().strip()
+                    else:
+                        txt = str(p).strip()
+                    if txt:
+                        vals.append(txt)
+        elif soup_scope:
+            try:
+                # convertir búsqueda simple de etiquetas (h2/h3) con soup
+                tag = None
+                if "h2" in xpath_rel.lower(): tag = "h2"
+                if "h3" in xpath_rel.lower(): tag = "h3"
+                if tag:
+                    vals = [el.get_text(strip=True) for el in soup_scope.find_all(tag)]
+            except Exception:
+                pass
+        return vals
+
+    # H2 (lista y/o cantidad) — SOLO dentro del artículo
     if wants.get("h2_list") or wants.get("h2_count"):
-        xp = (xpaths.get("h2") or "").strip()
+        xp_h2 = (xpaths.get("h2") or "").strip()
         h2s: list[str] = []
-        if xp and have_lxml:
-            h2s = _xpath_text_list(doc, xp)
+        if xp_h2 and have_lxml:
+            # xp_h2 puede ser absoluto: lo aplicamos sobre doc pero filtramos a los que estén dentro del scope si es posible
+            # Para simplificar, si hay scope usamos relativo
+            if lxml_scope_nodes:
+                for node in lxml_scope_nodes:
+                    h2s += _xpath_text_list(node, xp_h2 if xp_h2.startswith(".") else ".//h2")
+            else:
+                h2s = _xpath_text_list(doc, xp_h2)
         else:
-            if have_lxml:
-                h2s = [t for t in _xpath_text_list(doc, "//article//h2|//main//h2|//h2") if t]
-            elif soup:
-                h2s = [el.get_text(strip=True) for el in soup.find_all("h2")]
+            # usar scope directo
+            h2s = _collect_scope_texts(".//h2")
         h2s = [t for t in (h2s or []) if t]
         if wants.get("h2_list"):  data["h2_list"]  = (joiner.join(h2s)) if h2s else ""
         if wants.get("h2_count"): data["h2_count"] = len(h2s)
 
-    # H3
+    # H3 — SOLO dentro del artículo
     if wants.get("h3_list") or wants.get("h3_count"):
-        xp = (xpaths.get("h3") or "").strip()
+        xp_h3 = (xpaths.get("h3") or "").strip()
         h3s: list[str] = []
-        if xp and have_lxml:
-            h3s = _xpath_text_list(doc, xp)
+        if xp_h3 and have_lxml:
+            if lxml_scope_nodes:
+                for node in lxml_scope_nodes:
+                    h3s += _xpath_text_list(node, xp_h3 if xp_h3.startswith(".") else ".//h3")
+            else:
+                h3s = _xpath_text_list(doc, xp_h3)
         else:
-            if have_lxml:
-                h3s = [t for t in _xpath_text_list(doc, "//article//h3|//main//h3|//h3") if t]
-            elif soup:
-                h3s = [el.get_text(strip=True) for el in soup.find_all("h3")]
+            h3s = _collect_scope_texts(".//h3")
         h3s = [t for t in (h3s or []) if t]
         if wants.get("h3_list"):  data["h3_list"]  = (joiner.join(h3s)) if h3s else ""
         if wants.get("h3_count"): data["h3_count"] = len(h3s)
 
-    # Negritas
+    # Negritas — SOLO dentro del artículo
     if wants.get("bold_count"):
         cnt = 0
-        if have_lxml:
+        if have_lxml and lxml_scope_nodes:
+            for node in lxml_scope_nodes:
+                try:
+                    cnt += len(node.xpath(".//*[self::b or self::strong]"))
+                except Exception:
+                    pass
+        elif soup_scope:
             try:
-                cnt = len(doc.xpath("//article//*[self::b or self::strong] | //main//*[self::b or self::strong] | //*[self::b or self::strong]"))
-            except Exception:
-                cnt = 0
-        elif soup:
-            try:
-                cnt = len(soup.select("article b, article strong, main b, main strong, b, strong"))
+                cnt = len(soup_scope.select("b, strong"))
             except Exception:
                 cnt = 0
         data["bold_count"] = int(cnt or 0)
 
-    # Links
+    # Links — SOLO dentro del artículo
     if wants.get("link_count"):
         cnt = 0
-        if have_lxml:
+        if have_lxml and lxml_scope_nodes:
+            for node in lxml_scope_nodes:
+                try:
+                    cnt += len(node.xpath(".//a[@href]"))
+                except Exception:
+                    pass
+        elif soup_scope:
             try:
-                cnt = len(doc.xpath("//article//a[@href] | //main//a[@href] | //a[@href]"))
-            except Exception:
-                cnt = 0
-        elif soup:
-            try:
-                cnt = len(soup.find_all("a", href=True))
+                cnt = len(soup_scope.find_all("a", href=True))
             except Exception:
                 cnt = 0
         data["link_count"] = int(cnt or 0)
 
-    # Tags (lista)
+    # Tags (lista) — fuera o dentro, según XPath; fallback a metas article:tag
     if wants.get("tags_list"):
-        xp = (xpaths.get("tags") or "").strip()
+        xp_tags = (xpaths.get("tags") or "").strip()
         tags = []
-        if xp and have_lxml:
-            tags = _xpath_text_list(doc, xp)
+        if xp_tags and have_lxml:
+            # si hay scope y XPath es relativo, aplicarlo al scope; si es absoluto, al doc
+            if lxml_scope_nodes and (xp_tags.startswith(".") or not xp_tags.startswith("/")):
+                for node in lxml_scope_nodes:
+                    tags += _xpath_text_list(node, xp_tags if xp_tags.startswith(".") else ".//" + xp_tags.strip("./"))
+            else:
+                tags = _xpath_text_list(doc, xp_tags)
         else:
             # fallback: metas article:tag
             mt = []
@@ -1176,7 +1226,7 @@ elif analisis == "9":
 elif analisis == "10":
     # ===== EXTRACTOR RÁPIDO: GSC → URLs → H1 (+ metadatos) → Sheets =====
     st.subheader("Extractor rápido desde Search Console")
-    st.caption("Trae URLs por Search / Discover (o ambos), filtra por país / dispositivo, scrapea rápido **solo los campos que elijas** y los publica en Sheets.")
+    st.caption("Trae URLs por Search / Discover (o ambos), filtra por país / dispositivo, scrapea rápido **solo los campos que elijas** (limitados al cuerpo del artículo si indicas su XPath) y publica en Sheets.")
 
     # Config de fechas
     colA, colB, colC = st.columns([1,1,2])
@@ -1225,22 +1275,31 @@ elif analisis == "10":
         w_lang = st.checkbox("Lang (html@lang)", value=False, key="w_lang")
         w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=False, key="w_firstp")
         xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value="", key="xp_firstp",
-                                  help="Ej: //article//p[normalize-space()][1]")
+                                  help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
+
+        # NUEVO: XPath del contenedor del artículo
+        xp_article = st.text_input(
+            "XPath del contenedor del artículo (recomendado)",
+            value="",
+            key="xp_article",
+            help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
+        )
+        st.caption("Si no lo indicás, usaré heurística (//article | //main).")
 
     with colY:
-        w_h2_list = st.checkbox("H2 (lista)", value=False, key="w_h2_list")
-        w_h2_count = st.checkbox("H2 (cantidad)", value=False, key="w_h2_count")
+        w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=False, key="w_h2_list")
+        w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=False, key="w_h2_count")
         xp_h2 = st.text_input("XPath H2 (opcional)", value="", key="xp_h2",
-                              help="Ej: //article//h2")
-        w_h3_list = st.checkbox("H3 (lista)", value=False, key="w_h3_list")
-        w_h3_count = st.checkbox("H3 (cantidad)", value=False, key="w_h3_count")
+                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
+        w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=False, key="w_h3_list")
+        w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=False, key="w_h3_count")
         xp_h3 = st.text_input("XPath H3 (opcional)", value="", key="xp_h3",
-                              help="Ej: //article//h3")
-        w_bold = st.checkbox("Cantidad de negritas (b/strong)", value=False, key="w_bold")
-        w_links = st.checkbox("Cantidad de links", value=False, key="w_links")
+                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
+        w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=False, key="w_bold")
+        w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=False, key="w_links")
         w_tags = st.checkbox("Tags (lista)", value=False, key="w_tags")
         xp_tags = st.text_input("XPath Tags (opcional)", value="", key="xp_tags",
-                                help="Ej: //ul[@class='tags']//a | //meta[@property='article:tag']/@content")
+                                help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
 
     col8, col9, col10 = st.columns([1,1,2])
     with col8:
@@ -1330,6 +1389,7 @@ elif analisis == "10":
                 "tags_list": w_tags
             }
             xpaths = {
+                "article": xp_article,
                 "first_paragraph": xp_firstp,
                 "h2": xp_h2,
                 "h3": xp_h3,
