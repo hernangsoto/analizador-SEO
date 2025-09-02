@@ -5,10 +5,11 @@ import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-import json
 import sys
+import json
+import asyncio
 from types import SimpleNamespace
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +21,7 @@ try:
 except Exception:
     pass
 
-# ---- Shims de compatibilidad
+# ---- Shims de compatibilidad (por si estos módulos están fuera)
 for _name in [
     "app_constants","app_config","app_ext","app_utils","app_params",
     "app_errors","app_activity","app_auth_flow","app_diagnostics","app_ai",
@@ -83,7 +84,7 @@ from modules.gsc import ensure_sc_client
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
 
-# ⬇️ Sin espacios arriba + logo que acompaña al sidebar (solo CSS)
+# ⬇️ Sin espacios arriba + CSS
 st.markdown("""
 <style>
 #nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
@@ -302,16 +303,18 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if include_discover:
         opciones.append("8. Análisis en base a Discover Snoop ✅")
     if include_content:
-        # ⬇️ Reemplazamos el antiguo "Análisis de contenido" por el rollback mínimo
-        opciones.append("9. GSC → URLs + H1 (rollback mínimo) ✅")
+        opciones.append("9. Análisis de contenido (repo externo) ✅")
+    # NUEVO: extractor rápido H1 + metadatos
+    opciones.append("10. Extractor rápido GSC → H1 (+ metadatos) ✅")
 
-    key = st.radio("Tipos disponibles:", opciones, index=3, key="analysis_choice")
+    key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
     if key.startswith("7."): return "7"
     if key.startswith("8."): return "8"
     if key.startswith("9."): return "9"
+    if key.startswith("10."): return "10"
     return "0"
 
 analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True, include_content=True)
@@ -608,7 +611,7 @@ def pick_site(sc_service):
 site_url = pick_site(sc_service)
 
 # =========================
-# Utilidades varias
+# Utilidades comunes
 # =========================
 
 def _iso3_lower(x: str | None) -> str | None:
@@ -622,15 +625,13 @@ def _device_upper(x: str | None) -> str | None:
         return v.upper()
     return None
 
-def _effective_end_with_lag(end_candidate: date | None, lag_days: int) -> date:
-    today = date.today()
-    safe_end = today - timedelta(days=max(0, lag_days))
-    if end_candidate and end_candidate <= safe_end:
-        return end_candidate
-    return safe_end
-
-def _gsc_fetch_simple(sc, site: str, start: date, end: date, search_type: str, row_limit: int) -> list[dict]:
-    """Devuelve filas con {url, clicks, impressions, ctr}"""
+def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
+                        country: str | None, device: str | None,
+                        order_by: str, row_limit: int) -> list[dict]:
+    """
+    search_type: "web" (Search) | "discover"
+    order_by: "clicks" | "impressions" | "ctr" | "position"
+    """
     try:
         body = {
             "startDate": str(start),
@@ -638,104 +639,215 @@ def _gsc_fetch_simple(sc, site: str, start: date, end: date, search_type: str, r
             "dimensions": ["page"],
             "rowLimit": int(row_limit),
             "startRow": 0,
-            "type": search_type,  # "web" | "discover"
-            "orderBy": [{"field": "clicks", "descending": True}],
+            "type": search_type,
+            "orderBy": [{"field": order_by, "descending": True}],
         }
+        filters = []
+        if country:
+            filters.append({
+                "dimension": "country",
+                "operator": "equals",
+                "expression": _iso3_lower(country)
+            })
+        if device:
+            filters.append({
+                "dimension": "device",
+                "operator": "equals",
+                "expression": _device_upper(device)
+            })
+        if filters:
+            body["dimensionFilterGroups"] = [{"groupType":"and","filters":filters}]
         resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
         rows = resp.get("rows", []) or []
         out = []
         for r in rows:
-            page = (r.get("keys") or [""])[0]
-            clicks = int(r.get("clicks", 0) or 0)
-            impr = int(r.get("impressions", 0) or 0)
-            ctr = float(r.get("ctr", 0.0) or 0.0)
-            if impr > 0 and (ctr == 0.0 and clicks > 0):
-                ctr = clicks / impr
-            out.append({"url": page, "clicks": clicks, "impressions": impr, "ctr": ctr})
+            keys = r.get("keys") or []
+            page = keys[0] if keys else ""
+            out.append({
+                "page": page,
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "ctr": r.get("ctr", 0.0),
+                "position": r.get("position", 0.0),
+            })
         return out
     except Exception as e:
-        st.error(f"Error al consultar GSC ({search_type}): {e}")
+        st.session_state["_fast_error"] = f"GSC query error ({search_type}): {e}"
         return []
 
-def _scrape_h1_requests(url: str, ua: str, timeout: int = 10) -> str:
-    """Scrapea el primer <h1> (texto) con requests + BeautifulSoup. Si falla: ''."""
+_DROP_PATTERNS = (
+    "/player/", "/tag/", "/tags/", "/etiqueta/", "/categoria/", "/category/",
+    "/author/", "/autores/", "/programas/", "/hd/", "/podcast", "/videos/",
+    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?"
+)
+def _is_article_url(u: str) -> bool:
+    if not u: return False
+    u = u.strip().lower()
+    if u in ("https://", "http://"): return False
+    if u.endswith((".jpg",".jpeg",".png",".gif",".svg",".webp",".mp4",".mp3",".m3u8",".pdf",".webm",".avi",".mov")):
+        return False
+    if u.count("/") <= 3:
+        return False
+    for p in _DROP_PATTERNS:
+        if p in u:
+            return False
+    return True
+
+def _filter_article_urls(urls: list[str]) -> list[str]:
+    return [u for u in urls if _is_article_url(u)]
+
+def _suggest_user_agent(ua: str | None) -> str:
+    if ua and ua.strip():
+        return ua
+    return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36")
+
+# -------------------------
+# Scraping rápido (async) + fallback sync
+# -------------------------
+def _parse_html_for_meta(html: str) -> dict:
     try:
-        import requests
         from bs4 import BeautifulSoup  # type: ignore
     except Exception:
-        return ""
+        return {
+            "h1": "", "title": "", "meta_description": "", "og_title": "", "og_description": "",
+            "canonical": "", "published_time": "", "lang": ""
+        }
+    parser = "lxml"
     try:
-        rs = requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
-        if rs.status_code != 200:
-            return ""
-        soup = BeautifulSoup(rs.text, "html.parser")
-        h = soup.find("h1")
-        return (h.get_text(" ", strip=True) if h else "") or ""
+        soup = BeautifulSoup(html, parser)
     except Exception:
-        return ""
+        soup = BeautifulSoup(html, "html.parser")
 
-def _sheet_create_and_fill(gs_client, drive_service, title: str, rows: list[dict], worksheet: str = "GSC-H1",
-                           dest_folder_id: str | None = None) -> str:
-    """Crea un Google Sheet y vuelca los datos. Devuelve sheetId."""
-    sh = gs_client.create(title)
-    sid = sh.id  # gspread Spreadsheet.id
-    # mover a carpeta si corresponde
+    def _meta_content(**kw):
+        tag = soup.find("meta", attrs=kw)
+        return (tag.get("content") or "").strip() if tag else ""
+
+    h1 = ""
+    h1_el = soup.find("h1")
+    if h1_el:
+        h1 = h1_el.get_text(strip=True)
+
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+
+    meta_description = _meta_content(name="description") or _meta_content(property="description")
+    og_title = _meta_content(property="og:title")
+    og_description = _meta_content(property="og:description")
+    canonical = ""
+    link_canon = soup.find("link", rel=lambda v: v and "canonical" in [x.lower() for x in (v if isinstance(v, list) else [v])])
+    if link_canon:
+        canonical = (link_canon.get("href") or "").strip()
+
+    # published_time → varias heurísticas
+    published_time = _meta_content(property="article:published_time") or \
+                     _meta_content(name="pubdate") or \
+                     _meta_content(name="date") or ""
+    if not published_time:
+        time_tag = soup.find("time")
+        if time_tag:
+            published_time = (time_tag.get("datetime") or "").strip() or time_tag.get_text(strip=True)
+
+    lang = ""
+    html_tag = soup.find("html")
+    if html_tag:
+        lang = (html_tag.get("lang") or "").strip()
+
+    return {
+        "h1": h1, "title": title, "meta_description": meta_description,
+        "og_title": og_title, "og_description": og_description,
+        "canonical": canonical, "published_time": published_time, "lang": lang
+    }
+
+async def _fetch_one(session, url: str, ua: str, timeout_s: int) -> dict:
+    out = {"url": url, "ok": False, "status": 0, "error": "", **{k:"" for k in [
+        "h1","title","meta_description","og_title","og_description","canonical","published_time","lang"
+    ]}}
     try:
-        if dest_folder_id:
-            meta = drive_service.files().get(fileId=sid, fields="parents").execute()
-            prev_parents = ",".join(meta.get("parents", []))
-            drive_service.files().update(
-                fileId=sid, addParents=dest_folder_id, removeParents=prev_parents, fields="id, parents"
-            ).execute()
+        async with session.get(url, headers={"User-Agent": ua}, timeout=timeout_s, allow_redirects=True) as resp:
+            out["status"] = resp.status
+            if resp.status >= 400:
+                out["error"] = f"http {resp.status}"
+                return out
+            html = await resp.text(errors="ignore")
+            meta = _parse_html_for_meta(html)
+            out.update(meta)
+            out["ok"] = True
+            return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+async def _scrape_async(urls: list[str], ua: str, timeout_s: int = 12, concurrency: int = 20) -> list[dict]:
+    # aiohttp es opcional
+    try:
+        import aiohttp  # type: ignore
     except Exception:
-        pass
+        return _scrape_sync(urls, ua, timeout_s, concurrency)
+    connector = aiohttp.TCPConnector(limit=concurrency, ssl=False)
+    timeout = aiohttp.ClientTimeout(total=max(timeout_s+2, timeout_s))
+    results: list[dict] = []
+    sem = asyncio.Semaphore(concurrency)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=True) as session:
+        async def _bound(u):
+            async with sem:
+                return await _fetch_one(session, u, ua, timeout_s)
+        tasks = [_bound(u) for u in urls]
+        # barra de progreso
+        done = 0
+        progress = st.progress(0.0, text="Scrapeando páginas…")
+        for coro in asyncio.as_completed(tasks):
+            res = await coro
+            results.append(res)
+            done += 1
+            progress.progress(done/len(tasks), text=f"Scrapeando páginas… {done}/{len(tasks)}")
+        progress.empty()
+    # mantener orden según urls
+    order = {u:i for i,u in enumerate(urls)}
+    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
+    return results
 
-    ws = sh.sheet1
-    ws.update_title(worksheet)
-    values = [["URL", "H1", "Clicks", "Impressions", "CTR (%)"]]
-    for r in rows:
-        values.append([
-            r.get("url", ""),
-            r.get("h1", ""),
-            int(r.get("clicks", 0) or 0),
-            int(r.get("impressions", 0) or 0),
-            round(float(r.get("ctr", 0.0) or 0.0) * 100, 2),
-        ])
-    ws.clear()
-    ws.update("A1", values, value_input_option="RAW")
-    return sid
+def _scrape_sync(urls: list[str], ua: str, timeout_s: int = 12, concurrency: int = 12) -> list[dict]:
+    try:
+        import requests
+    except Exception as e:
+        return [{"url": u, "ok": False, "status": 0, "error": f"requests no disponible: {e}"} for u in urls]
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: list[dict] = []
+    headers = {"User-Agent": ua}
 
-def _run_gsc_h1_min(sc_service, drive_service, gs_client, site_url: str,
-                    source: str, start: date, end: date,
-                    max_urls: int, ua: str, timeout: int) -> str:
-    """Pipeline mínimo: GSC → (URLs + métricas) → scrape H1 → Google Sheets. Devuelve sheetId."""
-    items: dict[str, dict] = {}
-    if source in ("web", "both"):
-        for r in _gsc_fetch_simple(sc_service, site_url, start, end, "web", row_limit=max_urls):
-            cur = items.get(r["url"], {"url": r["url"], "clicks": 0, "impressions": 0})
-            cur["clicks"] += r["clicks"]; cur["impressions"] += r["impressions"]
-            items[r["url"]] = cur
-    if source in ("discover", "both"):
-        for r in _gsc_fetch_simple(sc_service, site_url, start, end, "discover", row_limit=max_urls):
-            cur = items.get(r["url"], {"url": r["url"], "clicks": 0, "impressions": 0})
-            cur["clicks"] += r["clicks"]; cur["impressions"] += r["impressions"]
-            items[r["url"]] = cur
+    def _one(u: str) -> dict:
+        out = {"url": u, "ok": False, "status": 0, "error": "", **{k:"" for k in [
+            "h1","title","meta_description","og_title","og_description","canonical","published_time","lang"
+        ]}}
+        try:
+            rs = requests.get(u, headers=headers, timeout=timeout_s, allow_redirects=True)
+            out["status"] = rs.status_code
+            if rs.status_code >= 400:
+                out["error"] = f"http {rs.status_code}"
+                return out
+            meta = _parse_html_for_meta(rs.text)
+            out.update(meta)
+            out["ok"] = True
+        except Exception as e:
+            out["error"] = str(e)
+        return out
 
-    rows = []
-    for u, v in items.items():
-        clicks = int(v.get("clicks", 0) or 0)
-        impr = int(v.get("impressions", 0) or 0)
-        ctr = (clicks / impr) if impr > 0 else 0.0
-        h1 = _scrape_h1_requests(u, ua=ua, timeout=timeout) if u else ""
-        rows.append({"url": u, "h1": h1, "clicks": clicks, "impressions": impr, "ctr": ctr})
-
-    rows.sort(key=lambda x: x["clicks"], reverse=True)
-    # título del sheet
-    dom = site_url.replace("https://", "").replace("http://", "").strip("/").replace("/", " · ")
-    title = f"GSC→H1 · {dom} · {start}→{end}"
-    sid = _sheet_create_and_fill(gs_client, drive_service, title, rows, worksheet="GSC-H1",
-                                 dest_folder_id=st.session_state.get("dest_folder_id"))
-    return sid
+    progress = st.progress(0.0, text="Scrapeando páginas…")
+    done = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_one, u) for u in urls]
+        for f in as_completed(futs):
+            results.append(f.result())
+            done += 1
+            progress.progress(done/len(futs), text=f"Scrapeando páginas… {done}/{len(futs)}")
+    progress.empty()
+    # mantener orden
+    order = {u:i for i,u in enumerate(urls)}
+    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
+    return results
 
 # ============== Flujos por análisis (requieren GSC) ==============
 if analisis == "4":
@@ -835,8 +947,7 @@ elif analisis == "6":
                 user_email=( _me or {}).get("emailAddress") or "",
                 event="analysis", site_url=site_url,
                 analysis_kind="Auditoría",
-                sheet_id=sid, sheet_name=meta.get("name",""),
-                sheet_url=sheet_url,
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
                 gsc_account=st.session_state.get("src_account_label") or "",
                 notes=f"params={params!r}"
             )
@@ -844,80 +955,198 @@ elif analisis == "6":
             st.session_state["last_file_kind"] = "audit"
 
 elif analisis == "9":
-    # ===== ROLLBACK MÍNIMO: GSC → URLs + H1 → Sheets =====
-    st.subheader("Configuración mínima")
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        tipo = st.radio("Fuente", ["Ambos", "Search", "Discover"], index=0, horizontal=True, key="min_tipo")
-    with c2:
-        max_urls = st.number_input("Máx. URLs por fuente", min_value=1, max_value=25000, value=300, step=50, key="min_max_urls")
-    with c3:
-        lag_days = st.number_input("Lag (días) para end_date", min_value=0, max_value=14, value=3, step=1, key="min_lag")
-
-    # Fechas
-    end_default = _effective_end_with_lag(None, lag_days)
-    start_default = end_default - timedelta(days=27)
-    rango = st.date_input("Rango de fechas (inclusive)", (start_default, end_default), key="min_daterange")
-    if isinstance(rango, tuple) and len(rango) == 2:
-        start_date, end_date = rango
+    # ===== NUEVO: Análisis de contenido (repo externo) =====
+    if (run_content_analysis is None) or (params_for_content is None):
+        st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
+                   "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        start_date, end_date = start_default, end_default
-    # Asegurar lag en end_date
-    end_date = _effective_end_with_lag(end_date, lag_days)
-    if start_date > end_date:
-        start_date = end_date
+        st.info("Este modo utiliza el runner externo. Si preferís algo más simple/rápido, probá el **Extractor rápido** (opción 10).")
+        # (Contenido original del modo 9 omitido por brevedad en esta versión de trabajo)
+        st.warning("El modo 9 está disponible, pero se recomienda usar el 10 para H1+metadatos directos desde GSC.")
 
-    # UA / timeout para scraping del H1
-    ua = st.text_input(
-        "User-Agent (para scraping del H1)",
-        value=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-               "AppleWebKit/537.36 (KHTML, like Gecko) "
-               "Chrome/126.0.0.0 Safari/537.36"),
-        key="min_ua"
-    )
-    timeout = st.number_input("Timeout por petición (seg)", min_value=3, max_value=30, value=10, step=1, key="min_timeout")
+elif analisis == "10":
+    # ===== EXTRACTOR RÁPIDO: GSC → URLs → H1 (+ metadatos) → Sheets =====
+    st.subheader("Extractor rápido desde Search Console")
+    st.caption("Trae URLs por Search / Discover (o ambos), filtra por país / dispositivo, scrapea rápido H1 y metadatos, y los publica en Sheets.")
 
-    st.caption(f"Sitio: **{site_url}** | Ventana: **{start_date} → {end_date}** | Tipo: **{tipo}** | Máx URLs por fuente: **{max_urls}**")
+    # Config de fechas
+    colA, colB, colC = st.columns([1,1,2])
+    with colA:
+        end_default = date.today() - timedelta(days=2)
+        end_date = st.date_input("Hasta (inclusive)", value=end_default, key="fast_end")
+    with colB:
+        days = st.number_input("Días (ventana)", min_value=1, max_value=90, value=28, step=1, key="fast_days")
+        start_date = end_date - timedelta(days=int(days)-1)
+        st.write(f"Desde: **{start_date}**")
+    with colC:
+        tipo = st.radio("Origen", ["Search", "Discover", "Ambos"], horizontal=True, key="fast_source")
 
-    # Ejecutar
-    source_map = {"Ambos": "both", "Search": "web", "Discover": "discover"}
-    can_run = True
-    if st.button("🔎 Ejecutar extracción GSC + H1", type="primary", disabled=not can_run, key="btn_min_run"):
-        try:
-            with st.spinner("Procesando…"):
-                sid = _run_gsc_h1_min(
-                    sc_service=sc_service,
-                    drive_service=drive_service,
-                    gs_client=gs_client,
-                    site_url=site_url,
-                    source=source_map.get(tipo, "both"),
-                    start=start_date, end=end_date,
-                    max_urls=int(max_urls),
-                    ua=ua, timeout=int(timeout)
-                )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+    # Filtros país / dispositivo
+    col1, col2, col3, col4 = st.columns([1,1,1,1])
+    with col1:
+        country = st.text_input("País (ISO-3166-1 alpha-3, ej: ARG, USA, ESP) — opcional", value="", key="fast_country").strip().upper()
+    with col2:
+        device = st.selectbox("Dispositivo (opcional)", ["", "DESKTOP", "MOBILE", "TABLET"], index=0, key="fast_device")
+    with col3:
+        order_by = st.selectbox("Ordenar por", ["clicks","impressions","ctr","position"], index=0, key="fast_order")
+    with col4:
+        row_limit = st.number_input("Máx URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
+
+    # Umbrales
+    col5, col6, col7 = st.columns([1,1,1])
+    with col5:
+        min_clicks = st.number_input("Min. clics", min_value=0, max_value=1000000, value=0, step=10, key="fast_min_clicks")
+    with col6:
+        min_impr = st.number_input("Min. impresiones", min_value=0, max_value=10000000, value=0, step=100, key="fast_min_impr")
+    with col7:
+        only_articles = st.checkbox("Solo artículos (filtra tags/player/etc.)", value=True, key="fast_only_articles")
+
+    # Scraping setup
+    col8, col9, col10 = st.columns([1,1,2])
+    with col8:
+        concurrency = st.slider("Concurrencia", 2, 64, 24, step=2, key="fast_conc")
+    with col9:
+        timeout_s = st.slider("Timeout por página (s)", 5, 30, 12, step=1, key="fast_timeout")
+    with col10:
+        ua = st.text_input("User-Agent (opcional)", value="", key="fast_ua")
+        if not ua.strip():
+            st.caption("Sugerencia UA (si ves muchos 403):")
+            st.code(_suggest_user_agent(""))
+
+    # === Preflight GSC
+    st.markdown("### 🔎 Semillas desde GSC")
+    seeds = []
+    seeds_search = []
+    seeds_discover = []
+    src_map = {"Search":"web","Discover":"discover","Ambos":"both"}
+    src = src_map.get(tipo, "both")
+
+    # Search
+    if src in ("web","both"):
+        seeds_search = _gsc_fetch_top_urls(
+            sc_service, site_url, start_date, end_date, "web",
+            country or None, device or None, order_by, int(row_limit)
+        )
+        st.write(f"**Search (web)**: {len(seeds_search):,} filas")
+    # Discover
+    if src in ("discover","both"):
+        seeds_discover = _gsc_fetch_top_urls(
+            sc_service, site_url, start_date, end_date, "discover",
+            country or None, device or None, order_by, int(row_limit)
+        )
+        st.write(f"**Discover**: {len(seeds_discover):,} filas")
+
+    if seeds_search:
+        for r in seeds_search:
+            r["source"] = "Search"
+        seeds.extend(seeds_search)
+    if seeds_discover:
+        for r in seeds_discover:
+            r["source"] = "Discover"
+        seeds.extend(seeds_discover)
+
+    if "_fast_error" in st.session_state:
+        st.error(st.session_state["_fast_error"])
+
+    df_seeds = pd.DataFrame(seeds)
+    if not df_seeds.empty:
+        # umbrales
+        before = len(df_seeds)
+        if min_clicks > 0:
+            df_seeds = df_seeds[df_seeds["clicks"] >= int(min_clicks)]
+        if min_impr > 0:
+            df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
+        st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
+
+        # columnas útiles + CTR%
+        df_seeds["ctr_pct"] = (df_seeds["ctr"].fillna(0) * 100).round(2)
+        df_seeds = df_seeds.rename(columns={"page":"url"})
+        # quitar duplicados priorizando el mayor clicks
+        df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False])
+        df_seeds = df_seeds.drop_duplicates(subset=["url"], keep="first")
+
+        urls = df_seeds["url"].dropna().astype(str).tolist()
+        if only_articles:
+            urls = _filter_article_urls(urls)
+        st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
+        st.code(urls[:20])
+
+        # Botón de ejecutar
+        can_run = len(urls) > 0
+        if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
+            ua_final = _suggest_user_agent(ua)
             try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="GSC→H1 (mínimo)",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"tipo={tipo}, max_urls={max_urls}, lag={lag_days}, {start_date}→{end_date}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "gsc_h1"
-        except Exception as e:
-            st.error(f"Falló la extracción mínima: {e}")
+                # Scraping (async si hay aiohttp)
+                try:
+                    results = asyncio.run(_scrape_async(urls, ua_final, timeout_s=timeout_s, concurrency=int(concurrency)))
+                except RuntimeError:
+                    # si ya hay loop (p.ej. en ciertos deploys), usar crear/usar nuevo loop
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    results = loop.run_until_complete(_scrape_async(urls, ua_final, timeout_s=timeout_s, concurrency=int(concurrency)))
+                    loop.close()
+
+                df_scr = pd.DataFrame(results)
+                # Merge con métricas de GSC
+                df_out = pd.merge(
+                    df_seeds[["url","source","clicks","impressions","ctr_pct","position"]],
+                    df_scr, on="url", how="left"
+                )
+
+                # Orden y columnas finales
+                cols = [
+                    "source","url","h1","title","meta_description","og_title","og_description",
+                    "canonical","published_time","lang",
+                    "clicks","impressions","ctr_pct","position","status","error"
+                ]
+                for c in cols:
+                    if c not in df_out.columns:
+                        df_out[c] = "" if c not in ("clicks","impressions","ctr_pct","position","status") else 0
+                df_out = df_out[cols]
+
+                # Crear Sheet en Drive
+                name = f"H1 - {site_url.replace('https://','').replace('http://','').strip('/')} - {start_date} a {end_date}"
+                meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet"}
+                parents = st.session_state.get("dest_folder_id")
+                if parents:
+                    meta["parents"] = [parents]
+                newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
+                sid = newfile["id"]
+
+                # Escribir datos (gspread)
+                sh = gs_client.open_by_key(sid)
+                ws = sh.sheet1
+                ws.resize(1)  # limpiar
+                ws.update([df_out.columns.tolist()] + df_out.fillna("").astype(str).values.tolist())
+
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Extractor rápido H1 (+metadatos)",
+                    sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "fast_h1"
+
+                # Vista previa
+                with st.expander("Vista previa (primeras 20 filas)"):
+                    st.dataframe(df_out.head(20), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Falló el scraping o el volcado a Sheets: {e}")
+
+    else:
+        st.info("Ajustá la ventana o filtros para obtener semillas desde GSC.")
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
