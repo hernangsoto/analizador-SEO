@@ -86,36 +86,13 @@ apply_base_style_and_logo()
 # ⬇️ Sin espacios arriba + logo que acompaña al sidebar (solo CSS)
 st.markdown("""
 <style>
-/* 0) Remover cualquier “banda” o espaciador que pueda dejar la capa de estilo base */
-#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
-  display: none !important; height:0 !important; margin:0 !important; padding:0 !important;
-}
-
-/* 1) Quitar padding/margen superior que Streamlit agrega por el header */
+#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] { display: none !important; height:0 !important; margin:0 !important; padding:0 !important; }
 div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
 main .block-container { margin-top: 0 !important; padding-top: .75rem !important; }
-
-/* 2) Asegurar el header por encima */
 header[data-testid="stHeader"] { z-index: 1500 !important; }
-
-/* 3) Mover el logo del header para que siga al sidebar (el logo lo inyecta app_config.py con ::before) */
-
-/* Sidebar ABIERTO (ajusta 288–304px si tu sidebar es distinto) */
-:root:has([data-testid="stSidebar"][aria-expanded="true"])
-  header[data-testid="stHeader"]::before {
-  left: 350px !important;
-}
-
-/* Sidebar CERRADO */
-:root:has([data-testid="stSidebar"][aria-expanded="false"])
-  header[data-testid="stHeader"]::before {
-  left: 100px !important;
-}
-
-/* Fallback por si no existe el atributo en alguna versión */
-:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before {
-  left: 16px !important;
-}
+:root:has([data-testid="stSidebar"][aria-expanded="true"]) header[data-testid="stHeader"]::before { left: 350px !important; }
+:root:has([data-testid="stSidebar"][aria-expanded="false"]) header[data-testid="stHeader"]::before { left: 100px !important; }
+:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before { left: 16px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -148,30 +125,19 @@ def _iso(o) -> str | None:
         return None
 
 def _compute_window(win: dict, lag_days: int) -> tuple[str, str]:
-    """
-    Devuelve (start_date_str, end_date_str) garantizados.
-    Si win['mode']=='last' usa 'days' con lag_days. Si es custom, respeta start/end.
-    """
     mode = (win or {}).get("mode") or "last"
     if mode == "custom":
         sd = win.get("start_date")
         ed = win.get("end_date")
         if sd and ed:
             return (_iso(sd), _iso(ed))
-        # si falta uno, caemos a 'last 28'
         mode = "last"
-
     days = int((win or {}).get("days") or 28)
-    # end = hoy - lag_days, start = end - (days-1)
     end_d = date.today() - timedelta(days=int(lag_days))
     start_d = end_d - timedelta(days=days-1)
     return (start_d.isoformat(), end_d.isoformat())
 
 def _gsc_top_pages(sc_service, site_url: str, start_date: str, end_date: str, search_type: str = "web", limit: int = 200) -> list[str]:
-    """
-    Pide top páginas por 'clicks' en GSC para un rango y tipo (web|discover).
-    Devuelve lista de URLs (máx. limit).
-    """
     try:
         body = {
             "startDate": start_date,
@@ -195,6 +161,35 @@ def _gsc_top_pages(sc_service, site_url: str, start_date: str, end_date: str, se
     except Exception as e:
         st.warning(f"No pude obtener páginas para '{search_type}': {e}")
         return []
+
+def _normalize_selectors(sel: dict | None) -> dict:
+    """
+    Acepta valores tipo:
+      - string CSS -> se deja igual
+      - {'css': '...', 'attr': 'content'} -> 'css::attr(content)'
+      - {'css': '...'} -> 'css'
+    Devuelve siempre dict[str, str]
+    """
+    if not isinstance(sel, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in sel.items():
+        if isinstance(v, str):
+            out[k] = v
+        elif isinstance(v, dict):
+            css = (v.get("css") or "").strip()
+            attr = (v.get("attr") or "").strip()
+            if css and attr:
+                out[k] = f"{css}::attr({attr})"
+            elif css:
+                out[k] = css
+        elif isinstance(v, list):
+            # si viniera lista de selectores, los unimos por coma
+            try:
+                out[k] = ", ".join(map(str, v))
+            except Exception:
+                pass
+    return {kk: vv for kk, vv in out.items() if vv}
 
 # ============== App ==============
 
@@ -220,8 +215,8 @@ if prefer_oidc and st.session_state.get("_auth_bypass"):
     user = None
 
 # --- PASO 0: Login botón Google (web) ---
-if prefer_oidc and not ident:
-    ident = step0_google_identity()  # guarda st.session_state["creds_dest"] y token_store["creds_dest"]
+if prefer_oidc && not ident:
+    ident = step0_google_identity()
     if not ident:
         st.stop()
 
@@ -255,7 +250,6 @@ if isinstance(_action, list):
     _action = _action[0] if _action else None
 
 if _action == "change_personal":
-    # Reiniciar el login personal del Paso 0
     for k in ("oauth_oidc","_google_identity","creds_dest"):
         st.session_state.pop(k, None)
     try:
@@ -289,12 +283,11 @@ if st.session_state.get("creds_dest"):
     except Exception:
         creds_dest = None
 
-# 2) Fallback cross-pestaña: token_store (si el login se hizo en otra pestaña)
+# 2) Fallback cross-pestaña: token_store
 if not creds_dest:
     try:
         creds_dest = token_store.as_credentials("creds_dest")
         if creds_dest:
-            # hidratar también el session_state para el resto del flujo
             st.session_state["creds_dest"] = {
                 "token": creds_dest.token,
                 "refresh_token": getattr(creds_dest, "refresh_token", None),
@@ -307,27 +300,22 @@ if not creds_dest:
         creds_dest = None
 
 if not creds_dest:
-    st.error(
-        "No recibí credenciales personales tras el Paso 0. "
-        "Volvé a pulsar **Iniciar sesión con Google** (un solo click)."
-    )
+    st.error("No recibí credenciales personales tras el Paso 0. Volvé a pulsar **Iniciar sesión con Google**.")
     st.stop()
 
 # Clientes Google Drive/Sheets y resumen de identidad
 try:
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
-    # Refrescar identidad por si llega con foto/nombre
     st.session_state["_google_identity"] = _me or st.session_state.get("_google_identity", {})
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
     st.markdown(
         f'''
         <div class="success-inline">
             Sesión personal: <strong>{email_txt}</strong>
-            <a href="{APP_HOME}?action=change_personal" target="_self" rel="nofollow">(Cambiar cuenta personal)</a>
+            <a href="{get_app_home()}?action=change_personal" target="_self" rel="nofollow">(Cambiar cuenta personal)</a>
         </div>
-        ''',
-        unsafe_allow_html=True
+        ''', unsafe_allow_html=True
     )
     activity_log_append(
         drive_service, gs_client,
@@ -345,8 +333,7 @@ if "step2_done" not in st.session_state:
 
 if not st.session_state["step2_done"]:
     with st.expander("2) Destino de la copia (opcional)", expanded=False):
-        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
-                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**.")
         dest_folder_id = pick_destination(drive_service, _me, show_header=False)
         c1, c2 = st.columns([1, 3])
         with c1:
@@ -362,10 +349,9 @@ else:
         f'''
         <div class="success-inline">
             Destino de la copia: <strong>{pretty}</strong>
-            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
+            <a href="{get_app_home()}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
         </div>
-        ''',
-        unsafe_allow_html=True
+        ''', unsafe_allow_html=True
     )
 
 # ---------- Elegir análisis ----------
@@ -471,9 +457,9 @@ if analisis == "8":
             if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
-                    run_discover_snoop,  # función del paquete externo
-                    drive_service, gs_client,  # servicios Google
-                    df, params_ds,            # datos + parámetros
+                    run_discover_snoop,
+                    drive_service, gs_client,
+                    df, params_ds,
                     st.session_state.get("dest_folder_id")
                 )
                 st.success("¡Listo! Tu documento está creado.")
@@ -529,9 +515,6 @@ def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
 GSC_SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 def pick_source_oauth_forced(account_key: str) -> Credentials | None:
-    """
-    Igual a un pick_source_oauth pero fijando la cuenta (sin radios).
-    """
     st.subheader("Cuenta de Search Console (fuente de datos)")
     key = f"oauth_src_{account_key}"
     if key not in st.session_state:
@@ -629,7 +612,7 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 else:
-    wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
+    wanted_key = _choice_to_key(sc_choice)
     need_new_auth = (
         not st.session_state.get("step3_done") or
         norm(st.session_state.get("src_account_label")) != norm(sc_choice) or
@@ -647,14 +630,12 @@ else:
             "client_secret": creds_src_obj.client_secret,
             "scopes": list(getattr(creds_src_obj, "scopes", [])),
         }
-        # Guardá también la fuente por si cambiás de pestaña
         token_store.save("creds_src", st.session_state["creds_src"])
         st.session_state["src_account_label"] = sc_choice
         st.session_state["step3_done"] = True
         clear_qp(); st.rerun()
     else:
         try:
-            # Rehidratar si fuese necesario
             if not st.session_state.get("creds_src"):
                 cdict = token_store.load("creds_src")
                 if cdict:
@@ -666,10 +647,9 @@ else:
                 f'''
                 <div class="success-inline">
                     Cuenta de acceso (Search Console): <strong>{src_label}</strong>
-                    <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                    <a href="{get_app_home()}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
                 </div>
-                ''',
-                unsafe_allow_html=True
+                ''', unsafe_allow_html=True
             )
         except Exception as e:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
@@ -806,12 +786,12 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        # 🔧 UI de parámetros (desde app_params) — ¡llamar UNA sola vez!
+        # UI de parámetros (desde app_params) — llamar UNA sola vez
         params = params_for_content()
 
         st.subheader("🔎 Preflight de datos GSC (previo a ejecutar)")
 
-        # Asegurar ventana calculada (evita 'None a None' en el nombre)
+        # Ventana calculada garantizada
         start_s, end_s = _compute_window(params.get("window", {}), int(params.get("lag_days", 3)))
 
         # Determinar fuentes a testear para preflight
@@ -842,8 +822,8 @@ elif analisis == "9":
         EXCLUDE_PATTERNS = (
             "/player", "/player-", "/player-mitre-clarin/",
             "/tag/", "/hd/", "/wp-admin", "/wp-json", "/amp/",
-            "/loterias-y-quinielas/", "/quiniela", "/quini-6",
-            "/resultados-de-hoy", "/loterias/", "/quiniela-"
+            "/loterias-y-quinielas/", "/quiniela", "/quiniela-",
+            "/resultados-de-hoy", "/loterias/", "/quini-6"
         )
         INCLUDE_HINTS = (
             "/sociedad/", "/deportes/", "/espectaculos/", "/clima/",
@@ -856,14 +836,12 @@ elif analisis == "9":
                 return False  # home
             if any(x in u for x in EXCLUDE_PATTERNS):
                 return False
-            # “profundidad” + pistas de secciones típicas de artículos
             deep_enough = u.count("/") >= 5
             return any(x in u for x in INCLUDE_HINTS) or deep_enough
 
         seeds_all = []
         if do_search: seeds_all.extend(search_urls)
         if do_disc:   seeds_all.extend(disc_urls)
-        # dedup conservando orden
         seen = set()
         seeds_all = [u for u in seeds_all if not (u in seen or seen.add(u))]
 
@@ -875,23 +853,36 @@ elif analisis == "9":
         st.markdown("**Sugerencia de User-Agent**")
         st.code(DEFAULT_UA)
 
-        # Preferencias para la ejecución (usar keys únicas 'cpa_*' para no chocar con app_params)
+        # Preferencias para la ejecución (keys únicas 'cpa_*')
         use_forced = st.checkbox("Forzar a usar solo las seeds filtradas del preflight", value=True, key="cpa_force_use_preflight")
         loosen = st.checkbox("Bajar umbrales (min_impresiones=1, min_clicks=0) al forzar seeds", value=True, key="cpa_loosen_th")
 
         # --- Ejecutar ---
         if st.button("📰 Ejecutar Análisis de contenido", type="primary", key="btn_run_content"):
             # Ensamblar params finales
-            params_final = dict(params)  # copy superficial
-            # Ventana saneada garantizada
+            params_final = dict(params)
+
+            # Ventana saneada
             win = dict(params_final.get("window", {}) or {})
             win["start_date"], win["end_date"] = start_s, end_s
             params_final["window"] = win
+
+            # Asegurar 'source' que espera el runner
+            params_final["source"] = {"Search": "search", "Discover": "discover", "Ambos": "both"}.get(
+                params.get("tipo", "Ambos"), "both"
+            )
 
             # UA por defecto si viene vacío
             try:
                 if not params_final.get("scrape", {}).get("request", {}).get("user_agent"):
                     params_final.setdefault("scrape", {}).setdefault("request", {})["user_agent"] = DEFAULT_UA
+            except Exception:
+                pass
+
+            # Normalizar selectores a strings (por si el usuario pegó objetos css/attr)
+            try:
+                params_final["selectors"] = _normalize_selectors(params_final.get("selectors") or {})
+                params_final.setdefault("scrape", {}).setdefault("selectors", params_final["selectors"])
             except Exception:
                 pass
 
