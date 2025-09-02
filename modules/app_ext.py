@@ -6,8 +6,9 @@ Capa de compatibilidad para cargar los analizadores desde el paquete externo
 - Exporta: run_core_update, run_evergreen, run_traffic_audit, run_names_analysis,
           run_discover_snoop, run_content_analysis
 - Define USING_EXT (bool) y EXT_PACKAGE (módulo externo o None)
-- Aplica un parche defensivo a funciones _write_ws de los módulos externos para
-  evitar errores de serialización JSON al escribir DataFrames en Google Sheets.
+- Aplica parches defensivos:
+  (a) Normalización de parámetros para run_content_analysis (fechas y tipo)
+  (b) Serialización segura al escribir DataFrames en Google Sheets
 """
 
 from modules.utils import ensure_external_package
@@ -97,12 +98,87 @@ USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext  # útil para localizar archivos (ej.: ai_summaries.py), si existe
 
 # =============================================================================
-# Parche de compatibilidad: evitar "TypeError: Object of type Timestamp
+# (a) SHIM DE NORMALIZACIÓN PARA run_content_analysis
+# - Asegura window.start/window.end (ISO) y alias en period.*
+# - Normaliza tipo a: search | discover | both
+# - Rellena fechas a partir de window.days + lag_days si faltaran
+# =============================================================================
+def _rca_normalize_params(p: dict) -> dict:
+    from datetime import date, timedelta
+
+    if not isinstance(p, dict):
+        return p
+
+    # --- Normalizar tipo ---
+    raw_tipo = (p.get("tipo") or "").strip().lower()
+    if raw_tipo in ("ambos", "search + discover", "search y discover", "search+discover", "both"):
+        tipo = "both"
+    elif raw_tipo in ("search",):
+        tipo = "search"
+    elif raw_tipo in ("discover",):
+        tipo = "discover"
+    else:
+        # fallback sensato
+        tipo = "both"
+    p["tipo"] = tipo
+
+    # --- Normalizar ventana de fechas ---
+    lag = int(p.get("lag_days", 3))
+    win = dict(p.get("window") or {})
+    start = win.get("start") or win.get("start_date") or p.get("start_date")
+    end   = win.get("end")   or win.get("end_date")   or p.get("end_date")
+    days  = win.get("days")
+
+    # Si start/end vienen como date/datetime, casteo a string ISO (YYYY-MM-DD)
+    def _iso(d):
+        try:
+            return d.isoformat()
+        except Exception:
+            return d
+
+    # Si faltan fechas, las calculo desde hoy-lag y days
+    if not (start and end):
+        if days:
+            end_dt = date.today() - timedelta(days=lag)
+            start_dt = end_dt - timedelta(days=int(days) - 1)
+            start = start or _iso(start_dt)
+            end   = end or _iso(end_dt)
+    start = _iso(start) if start else None
+    end   = _iso(end)   if end   else None
+
+    # Escribo en window y creo alias en period
+    win["start"] = start
+    win["end"] = end
+    win["start_date"] = start
+    win["end_date"] = end
+    p["window"] = win
+
+    # Alias para runners que miran "period"
+    per = dict(p.get("period") or {})
+    per["start"] = start
+    per["end"] = end
+    per["days"] = per.get("days") or days
+    p["period"] = per
+
+    return p
+
+# Si tenemos un runner real de contenido, lo envolvemos con el shim
+if run_content_analysis is not None:
+    _ext_rca_fn = run_content_analysis
+
+    def _rca_wrapper(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
+        try:
+            norm_params = _rca_normalize_params(dict(params or {}))
+        except Exception:
+            norm_params = params
+        return _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
+
+    run_content_analysis = _rca_wrapper
+
+# =============================================================================
+# (b) Parche de compatibilidad: evitar "TypeError: Object of type Timestamp
 # is not JSON serializable" cuando se escriben DataFrames a Sheets desde
 # runners externos (Discover Snoop / Análisis de contenido / etc).
-#
-# Convertimos Timestamps/fechas/np types a tipos JSON-serializables
-# *antes* de que gspread haga el update.
 # =============================================================================
 try:
     import importlib
