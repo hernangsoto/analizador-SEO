@@ -7,7 +7,6 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 import sys
 import json
-import math
 from types import SimpleNamespace
 from datetime import date, timedelta, datetime
 from urllib.parse import urlsplit
@@ -18,7 +17,6 @@ from google.oauth2.credentials import Credentials
 
 # Concurrencia / red
 import concurrent.futures
-import traceback
 
 # ====== Config base ======
 try:
@@ -72,7 +70,6 @@ except Exception:
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
-from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # 🔑 para leer tokens guardados por el Paso 0 en otra pestaña
 from modules.utils import token_store
@@ -300,9 +297,8 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
         opciones.append("7. Análisis de Nombres (KG + Wikipedia) ✅")
     if include_discover:
         opciones.append("8. Análisis en base a Discover Snoop ✅")
-    # Reemplazamos el 9 por el extractor simple GSC + scrape (sin JSON externo)
     opciones.append("9. Extractor rápido (GSC + Scrape) ✅")
-    key = st.radio("Tipos disponibles:", opciones, index=8 if len(opciones)>8 else 3, key="analysis_choice")
+    key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
@@ -333,19 +329,6 @@ if analisis == "7":
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=(_me or {}).get("emailAddress") or "",
-                    event="analysis", site_url="",
-                    analysis_kind="Nombres (KG+Wikipedia)",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account="", notes=f"lang={params_names.get('lang')}, n={total}"
-                )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "names"
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
@@ -382,28 +365,15 @@ if analisis == "8":
             if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_ds_run"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
-                    run_discover_snoop,  # función del paquete externo
-                    drive_service, gs_client,  # servicios Google
-                    df, params_ds,            # datos + parámetros
+                    run_discover_snoop,
+                    drive_service, gs_client,
+                    df, params_ds,
                     st.session_state.get("dest_folder_id")
                 )
                 st.success("¡Listo! Tu documento está creado.")
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=(_me or {}).get("emailAddress") or "",
-                    event="analysis", site_url="",
-                    analysis_kind="Discover Snoop",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account="", notes=f"params={params_ds!r}"
-                )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "discover"
     if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
@@ -432,6 +402,7 @@ def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
             "redirect_uris": ["http://localhost"],
         }
     }
+    from google_auth_oauthlib.flow import Flow
     flow = Flow.from_client_config(client_secrets, scopes=scopes)
     flow.redirect_uri = "http://localhost"
     return flow
@@ -689,7 +660,7 @@ if analisis == "9":
     st.subheader("Extractor rápido (GSC + Scrape)")
 
     # ---- Bloque superior: fechas, origen y límite por origen
-    c1, c2, c3 = st.columns([1,1,1.2])
+    c1, c2, c3 = st.columns([1,1,1.6])
     with c1:
         start_date = st.date_input("📅 Desde", value=(date.today() - timedelta(days=28)))
     with c2:
@@ -697,7 +668,7 @@ if analisis == "9":
     with c3:
         origen = st.radio(
             "Origen",
-            options=["SEARCH", "DISCOVER", "DISCOVER + SEARCH"],
+            options=["Search", "Discover", "Search + Discover"],
             horizontal=True,
             index=2
         )
@@ -737,57 +708,68 @@ if analisis == "9":
             st.caption("Sugerencia de User-Agent:")
             st.code(_suggest_user_agent(None))
 
-    # ---- Campos a extraer (agrupados)
+    # =========================
+    # Campos a extraer (agrupados por subtítulos)
+    # =========================
     st.subheader("🧲 Campos a extraer")
 
     # Titulación
-    with st.expander("📑 Titulación", expanded=True):
-        colT1, colT2, colT3 = st.columns([1,1,1.2])
-        with colT1:
-            want_title = st.checkbox("TITLE", value=True)
-        with colT2:
-            want_h1 = st.checkbox("H1", value=True)
-        with colT3:
-            want_og = st.checkbox("OG Title (og:title)", value=True)
-        h1_selector = st.text_input("Selector para H1 (CSS o XPath, opcional)", value="").strip()
+    st.markdown("#### 📑 Titulación")
+    colT1, colT2, colT3 = st.columns([1,1,1.5])
+    with colT1:
+        want_title = st.checkbox("TITLE", value=True)
+    with colT2:
+        want_h1 = st.checkbox("H1", value=True)
+    with colT3:
+        want_og = st.checkbox("OG Title (og:title)", value=True)
+    h1_selector = st.text_input("Selector para H1 (CSS o XPath, opcional)", value="").strip()
 
-    # Artículo base (contenedor + primer párrafo)
-    with st.expander("📰 Artículo (contenedor y primer párrafo)", expanded=True):
-        article_xpath = st.text_input("XPath del contenedor del artículo (recomendado)", value="//article").strip()
-        colA1, colA2 = st.columns([1,1])
-        with colA1:
-            want_first_p = st.checkbox("Primer párrafo (dentro del artículo)", value=True)
-        with colA2:
-            first_p_xpath = st.text_input("XPath para primer párrafo (opcional)", value=".//p[1]").strip()
-
-    # H2
-    with st.expander("🔠 H2", expanded=False):
+    # Artículo, H2 y H3
+    st.markdown("#### 📰 Artículo, H2 y H3")
+    article_xpath = st.text_input("XPath del contenedor del artículo (recomendado)", value="//article").strip()
+    colA1, colA2 = st.columns([1,1])
+    with colA1:
+        want_first_p = st.checkbox("Primer párrafo (dentro del artículo)", value=True)
+    with colA2:
+        first_p_xpath = st.text_input("XPath para primer párrafo (opcional)", value=".//p[1]").strip()
+    colH = st.columns([1,1])
+    with colH[0]:
         want_h2 = st.checkbox("Extraer lista de H2 (dentro del artículo)", value=True)
-    # H3
-    with st.expander("🔡 H3", expanded=False):
+    with colH[1]:
         want_h3 = st.checkbox("Extraer lista de H3 (dentro del artículo)", value=False)
 
-    # Negritas
-    with st.expander("🅱️ Negritas", expanded=False):
+    # Negritas y links
+    st.markdown("#### 🅱️ Negritas y links")
+    colB1, colB2, colB3, colB4 = st.columns([1,1,1,1])
+    with colB1:
         want_bold_count = st.checkbox("Cantidad de negritas (b/strong) en el artículo", value=True)
+    with colB2:
         want_bold_list  = st.checkbox("Lista de negritas del artículo", value=False)
-
-    # Links en el artículo
-    with st.expander("🔗 Links del artículo", expanded=False):
+    with colB3:
         want_links_count = st.checkbox("Cantidad de links en el artículo", value=True)
+    with colB4:
         want_links_anchors = st.checkbox("Anchor text de links en el artículo", value=False)
 
-    # Tags (fuera o dentro de artículo, via XPath específico)
-    with st.expander("🏷️ Tags", expanded=False):
-        tags_xpath = st.text_input("XPath de ítems de tag (ej: //a[contains(@class,'tag')])", value="").strip()
+    # Tags
+    st.markdown("#### 🏷️ Tags")
+    tags_xpath = st.text_input("XPath de ítems de tag (ej: //a[contains(@class,'tag')])", value="").strip()
+    colTG1, colTG2 = st.columns([1,1])
+    with colTG1:
         want_tags_list = st.checkbox("Lista de tags", value=False)
+    with colTG2:
         want_tags_count = st.checkbox("Cantidad de tags", value=False)
 
     # Caja de noticias relacionadas
-    with st.expander("🗂️ Caja de noticias relacionadas", expanded=False):
+    st.markdown("#### 🗂️ Caja de noticias relacionadas")
+    colR0, colR1 = st.columns([1,2])
+    with colR0:
         want_related = st.checkbox("Extraer caja de relacionadas (por XPath)", value=False)
+    with colR1:
         related_xpath = st.text_input("XPath del contenedor de relacionadas", value="").strip()
+    colR2, colR3 = st.columns([1,1])
+    with colR2:
         want_related_count = st.checkbox("Cantidad de links en relacionadas", value=True, disabled=not want_related)
+    with colR3:
         want_related_anchors = st.checkbox("Anchors de relacionadas", value=True, disabled=not want_related)
 
     # =========================
@@ -874,7 +856,6 @@ if analisis == "9":
         if s.startswith("/") or s.startswith(".//") or s.startswith("//"):
             return "xpath"
         if "[" in s and "]" in s and "@" in s:
-            # probablemente xpath
             return "xpath"
         return "css"
 
@@ -897,9 +878,7 @@ if analisis == "9":
             nodes = tree.xpath(article_xpath)
             if not nodes:
                 return None
-            node = nodes[0]
-            # construir árbol a partir del nodo (lxml permite usar el nodo directamente)
-            return node
+            return nodes[0]
         except Exception:
             return None
 
@@ -971,7 +950,6 @@ if analisis == "9":
             nodes = tree.xpath(related_xpath)
             if not nodes:
                 return []
-            # usar primer contenedor
             node = nodes[0]
             return _anchors_inside(node, ".//a")
         except Exception:
@@ -1031,7 +1009,6 @@ if analisis == "9":
                     fp = _collect_inside(article_node, ".//p[1]")
                     data["first_paragraph"] = fp[0] if fp else ""
                 else:
-                    # fallback: primer <p> global con bs4
                     data["first_paragraph"] = _one_text_css(soup, "p")
 
             # H2 / H3 (solo dentro de artículo)
@@ -1084,9 +1061,9 @@ if analisis == "9":
         return df
 
     dfs = []
-    if origen in ("SEARCH","DISCOVER + SEARCH"):
+    if origen in ("Search","Search + Discover"):
         dfs.append(_fetch_for_source("Search", "web"))
-    if origen in ("DISCOVER","DISCOVER + SEARCH"):
+    if origen in ("Discover","Search + Discover"):
         dfs.append(_fetch_for_source("Discover", "discover"))
     df_seeds = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=["page","clicks","impressions","ctr","position","source"])
 
@@ -1094,11 +1071,11 @@ if analisis == "9":
     if before == 0:
         st.warning("No hay datos para esa ventana / configuración.")
     else:
-        if min_clicks > 0:
+        if 'min_clicks' in locals() and min_clicks > 0:
             df_seeds = df_seeds[df_seeds["clicks"] >= min_clicks]
-        if min_impr > 0:
+        if 'min_impr' in locals() and min_impr > 0:
             df_seeds = df_seeds[df_seeds["impressions"] >= min_impr]
-        if only_articles:
+        if 'only_articles' in locals() and only_articles:
             df_seeds = df_seeds[df_seeds["page"].astype(str).apply(_looks_like_article)]
         st.write(f"**Semillas elegibles**: {len(df_seeds):,} (antes {before:,})")
         st.code(df_seeds["page"].head(10).tolist())
@@ -1339,20 +1316,6 @@ if analisis == "4":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Core Update",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
 
@@ -1372,20 +1335,6 @@ elif analisis == "5":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Evergreen",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "evergreen"
 
@@ -1405,20 +1354,6 @@ elif analisis == "6":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Auditoría",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
 
