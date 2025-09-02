@@ -8,6 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 import json
 import sys
 from types import SimpleNamespace
+from datetime import date, timedelta, datetime
 
 import pandas as pd
 import streamlit as st
@@ -629,6 +630,92 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
+# ---------- Helpers de normalización para "Análisis de contenido" ----------
+def _to_ymd(x) -> str | None:
+    if x is None:
+        return None
+    if isinstance(x, (date, datetime, pd.Timestamp)):
+        try:
+            # quitar tz si viene con ella
+            if isinstance(x, pd.Timestamp) and x.tz is not None:
+                x = x.tz_convert("UTC").tz_localize(None)
+        except Exception:
+            pass
+        return (x.date().isoformat() if isinstance(x, datetime) else x.isoformat())
+    # si ya es string, devolver trim
+    try:
+        s = str(x).strip()
+        return s or None
+    except Exception:
+        return None
+
+def _normalize_content_params(p_raw: dict) -> dict:
+    """Devuelve un dict listo para el runner externo (fechas y campos estandarizados)."""
+    p = json.loads(json.dumps(p_raw, default=str))  # copia profunda segura
+
+    # 1) source
+    tipo = (p.get("tipo") or "").lower()
+    source = "both"
+    if "search" in tipo and "discover" in tipo:
+        source = "both"
+    elif "discover" in tipo:
+        source = "discover"
+    elif "search" in tipo:
+        source = "search"
+    p["source"] = source
+
+    # 2) window → start_date / end_date
+    lag = int(p.get("lag_days", 0) or 0)
+    w = p.get("window") or {}
+    mode = (w.get("mode") or "last").lower()
+    days = w.get("days")
+    sd = w.get("start_date")
+    ed = w.get("end_date")
+
+    if mode == "last":
+        # calcular por días relativos al lag
+        effective_end = date.today() - timedelta(days=lag)
+        if not isinstance(days, int):
+            # fallback por si vino como str o None
+            try:
+                days = int(days)
+            except Exception:
+                days = 28
+        start_dt = effective_end - timedelta(days=max(days, 1) - 1)
+        end_dt = effective_end
+    else:
+        start_dt = sd if isinstance(sd, (date, datetime, pd.Timestamp)) else None
+        end_dt = ed if isinstance(ed, (date, datetime, pd.Timestamp)) else None
+
+    start_s = _to_ymd(start_dt)
+    end_s = _to_ymd(end_dt)
+
+    # Guardar en varias claves por compatibilidad
+    p.setdefault("window", {})
+    p["window"]["start_date"] = start_s
+    p["window"]["end_date"] = end_s
+    p["period"] = {"start_date": start_s, "end_date": end_s, "mode": mode}
+    p["date_from"] = start_s
+    p["date_to"] = end_s
+
+    # 3) device a formato esperado
+    dev = (p.get("filters", {}).get("device") or "").lower()
+    if dev not in ("desktop", "mobile"):
+        dev = None
+    p["filters"]["device"] = dev
+
+    # 4) country en ISO-3 o None
+    country = p.get("filters", {}).get("country")
+    if isinstance(country, str):
+        country = country.strip().upper() or None
+    p["filters"]["country"] = country
+
+    # 5) asegurar selectors
+    sels = p.get("selectors") or p.get("scrape", {}).get("selectors") or {}
+    p["selectors"] = sels
+
+    return p
+
 # ============== Flujos por análisis (requieren GSC) ==============
 if analisis == "4":
     if run_core_update is None:
@@ -742,22 +829,43 @@ elif analisis == "9":
     else:
         st.subheader("Análisis de contenido")
 
-        # ⚠️ Construir los parámetros UNA sola vez por render (evita claves duplicadas)
+        # Construir parámetros UNA sola vez por render (evita claves duplicadas)
         params_cnt = params_for_content()
 
-        # Habilitar botón sólo si hay selectores definidos
-        ready = bool(params_cnt.get("selectors"))
+        # Validaciones previas de ventana y selectores
+        w = (params_cnt.get("window") or {})
+        mode = (w.get("mode") or "last").lower()
+        sd = w.get("start_date")
+        ed = w.get("end_date")
+        selectors_ok = bool(params_cnt.get("selectors"))
+
+        window_ok = True if mode == "last" else (sd is not None and ed is not None)
+
+        if not selectors_ok:
+            st.warning("Definí selectores de scraping válidos para poder ejecutar el análisis.")
+        if mode == "custom" and not window_ok:
+            st.warning("Elegiste *Rango personalizado* pero falta **Desde** y/o **Hasta**.")
+
+        ready = selectors_ok and window_ok
+
         run_btn = st.button("📰 Ejecutar Análisis de contenido", type="primary",
                             key="btn_run_content", disabled=not ready)
 
         if run_btn:
-            sid = run_with_indicator(
-                "Procesando Análisis de contenido",
-                run_content_analysis,
-                sc_service, drive_service, gs_client, site_url,
-                params_cnt,
-                st.session_state.get("dest_folder_id")
-            )
+            try:
+                params_norm = _normalize_content_params(params_cnt)
+                st.session_state["_rca_norm_params"] = params_norm  # útil para depurar
+
+                sid = run_with_indicator(
+                    "Procesando Análisis de contenido",
+                    run_content_analysis,
+                    sc_service, drive_service, gs_client, site_url,
+                    params_norm,
+                    st.session_state.get("dest_folder_id")
+                )
+            except Exception as e:
+                st.session_state["_rca_error"] = str(e)
+                sid = None
 
             if not sid:
                 st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
@@ -765,8 +873,7 @@ elif analisis == "9":
                     err = st.session_state.get("_rca_error", "(sin mensaje)")
                     st.write(err)
                     norm_params = st.session_state.get("_rca_norm_params", {})
-                    import json as _json
-                    st.code(_json.dumps(norm_params, ensure_ascii=False, indent=2))
+                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2))
                 st.stop()
 
             # flujo OK
