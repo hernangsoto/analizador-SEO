@@ -8,7 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 import json
 import sys
 from types import SimpleNamespace
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -130,6 +130,71 @@ if not st.session_state.get("DEBUG"):
             st.caption("💡 Podés cargar una API key de Gemini en Secrets (GEMINI_API_KEY o [gemini].api_key).")
     except Exception:
         pass
+
+# ============== Helpers locales ==============
+
+DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+def _iso(o) -> str | None:
+    if o is None: return None
+    if isinstance(o, (pd.Timestamp, )):
+        return o.date().isoformat()
+    if isinstance(o, date):
+        return o.isoformat()
+    try:
+        return str(o)
+    except Exception:
+        return None
+
+def _compute_window(win: dict, lag_days: int) -> tuple[str, str]:
+    """
+    Devuelve (start_date_str, end_date_str) garantizados.
+    Si win['mode']=='last' usa 'days' con lag_days. Si es custom, respeta start/end.
+    """
+    mode = (win or {}).get("mode") or "last"
+    if mode == "custom":
+        sd = win.get("start_date")
+        ed = win.get("end_date")
+        if sd and ed:
+            return (_iso(sd), _iso(ed))
+        # si falta uno, caemos a 'last 28'
+        mode = "last"
+
+    days = int((win or {}).get("days") or 28)
+    # end = hoy - lag_days, start = end - (days-1)
+    end_d = date.today() - timedelta(days=int(lag_days))
+    start_d = end_d - timedelta(days=days-1)
+    return (start_d.isoformat(), end_d.isoformat())
+
+def _gsc_top_pages(sc_service, site_url: str, start_date: str, end_date: str, search_type: str = "web", limit: int = 200) -> list[str]:
+    """
+    Pide top páginas por 'clicks' en GSC para un rango y tipo (web|discover).
+    Devuelve lista de URLs (máx. limit).
+    """
+    try:
+        body = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "dimensions": ["page"],
+            "rowLimit": int(limit),
+            "type": search_type,  # 'web' o 'discover'
+            "orderBy": [{"field": "clicks", "descending": True}],
+        }
+        resp = sc_service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+        rows = resp.get("rows", []) or []
+        urls = []
+        for r in rows:
+            dims = r.get("keys", [])
+            if not dims:
+                continue
+            pg = (dims[0] or "").strip()
+            if pg:
+                urls.append(pg)
+        return urls
+    except Exception as e:
+        st.warning(f"No pude obtener páginas para '{search_type}': {e}")
+        return []
 
 # ============== App ==============
 
@@ -382,7 +447,7 @@ if analisis == "8":
         st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
     else:
         st.subheader("Subí el CSV exportado de Discover Snoop")
-        up = st.file_uploader("Archivo CSV", type=["csv"], key="ds_csv_upl")
+        up = st.file_uploader("Archivo CSV", type=["csv"])
         params_ds = params_for_discover_snoop()
 
         with st.expander("Formato esperado (campos mínimos)"):
@@ -403,7 +468,7 @@ if analisis == "8":
         if df is None:
             st.info("Cargá el CSV para habilitar la ejecución.")
         else:
-            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_run_ds"):
+            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
                     run_discover_snoop,  # función del paquete externo
@@ -636,7 +701,7 @@ if analisis == "4":
         st.warning("Este despliegue no incluye run_core_update.")
     else:
         params = params_for_core_update()
-        if st.button("🚀 Ejecutar análisis de Core Update", type="primary", key="btn_run_core"):
+        if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
@@ -674,7 +739,7 @@ elif analisis == "5":
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
-        if st.button("🌲 Ejecutar análisis Evergreen", type="primary", key="btn_run_ev"):
+        if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
             sid = run_with_indicator(
                 "Procesando Evergreen",
                 run_evergreen, sc_service, drive_service, gs_client, site_url, params,
@@ -707,7 +772,7 @@ elif analisis == "6":
         st.warning("Este despliegue no incluye run_traffic_audit.")
     else:
         params = params_for_auditoria()
-        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary", key="btn_run_aud"):
+        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary"):
             sid = run_with_indicator(
                 "Procesando Auditoría de tráfico",
                 run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
@@ -741,239 +806,118 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        params = params_for_content()  # defaults + UI del repo externo
+        # 🔧 UI de parámetros (desde app_params) — ¡llamar UNA sola vez!
+        params = params_for_content()
 
-        st.subheader("Configuración adicional (Análisis de contenido)")
+        st.subheader("🔎 Preflight de datos GSC (previo a ejecutar)")
 
-        # --- Normalizador de selectores: acepta string/list/dict({"css","attr"})
-        def _normalize_selectors(sel_any) -> dict[str, str]:
-            out: dict[str, str] = {}
-            if not isinstance(sel_any, dict):
-                return out
-            for k, v in sel_any.items():
-                if v is None:
-                    continue
-                if isinstance(v, str):
-                    out[k] = v
-                elif isinstance(v, list):
-                    out[k] = ", ".join([str(x) for x in v if x])
-                elif isinstance(v, dict):
-                    css = v.get("css") or v.get("selector") or ""
-                    attr = v.get("attr") or v.get("attribute")
-                    if css and attr:
-                        out[k] = f"{css}::attr({attr})"
-                    elif css:
-                        out[k] = css
-                # ignora otros tipos
-            return out
+        # Asegurar ventana calculada (evita 'None a None' en el nombre)
+        start_s, end_s = _compute_window(params.get("window", {}), int(params.get("lag_days", 3)))
 
-        # Aceptar override manual de selectores en JSON (para medios)
-        default_selectors = params.get("selectors") or {}
-        try:
-            default_selectors_str = json.dumps(default_selectors, ensure_ascii=False, indent=2)
-        except Exception:
-            default_selectors_str = "{}"
+        # Determinar fuentes a testear para preflight
+        tipo = params.get("tipo", "Ambos")  # "Search" | "Discover" | "Ambos"
+        do_search = (tipo in ("Search", "Ambos"))
+        do_disc   = (tipo in ("Discover", "Ambos"))
 
-        st.caption("Pegá/edita el JSON de selectores CSS/XPath (como cadenas). También acepto objetos {css, attr} y los convierto.")
-        selectors_str = st.text_area("Selectores (JSON)", value=default_selectors_str, height=220, key="cnt_sel_json")
+        search_urls = []
+        disc_urls = []
 
-        selectors_ok = False
-        selectors = {}
-        try:
-            parsed = json.loads(selectors_str) if selectors_str.strip() else {}
-            if isinstance(parsed, dict) and parsed:
-                selectors = _normalize_selectors(parsed)
-                selectors_ok = len(selectors) > 0
-        except Exception:
-            selectors_ok = False
+        if do_search:
+            st.markdown("**Search (web)**")
+            search_urls = _gsc_top_pages(sc_service, site_url, start_s, end_s, search_type="web", limit=250)
+            st.caption(f"Filas: {len(search_urls)}")
+            if search_urls:
+                st.code(search_urls[:10], language="json")
 
-        if not selectors_ok:
-            st.warning("Definí un JSON de selectores válido para poder ejecutar el análisis.", icon="⚠️")
+        if do_disc:
+            st.markdown("**Discover**")
+            disc_urls = _gsc_top_pages(sc_service, site_url, start_s, end_s, search_type="discover", limit=250)
+            st.caption(f"Filas: {len(disc_urls)}")
+            if disc_urls:
+                st.code(disc_urls[:10], language="json")
 
-        # Mapas de fuente
-        src_map = {"Search": "search", "Discover": "discover", "Search + Discover": "both"}
-        tipo_display = {"Search": "Search", "Discover": "Discover", "Ambos": "Search + Discover"} \
-            .get(params.get("tipo", "Ambos"), "Search + Discover")
-        fuente = st.radio("Fuente de tráfico", list(src_map.keys()),
-                          index=list(src_map.keys()).index(tipo_display),
-                          key="cnt_src_choice")
+        # --- Filtrado de seeds a artículos ---
+        st.markdown("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
 
-        # --- Pre-cálculo de fechas (evita 'none a none')
-        win = params.get("window") or {}
-        _mode = win.get("mode") or "last"
-        _days = win.get("days")
-        _start, _end = win.get("start_date"), win.get("end_date")
-        if _mode == "last" and _days:
-            end_default = date.today()
+        EXCLUDE_PATTERNS = (
+            "/player", "/player-", "/player-mitre-clarin/",
+            "/tag/", "/hd/", "/wp-admin", "/wp-json", "/amp/",
+            "/loterias-y-quinielas/", "/quiniela", "/quini-6",
+            "/resultados-de-hoy", "/loterias/", "/quiniela-"
+        )
+        INCLUDE_HINTS = (
+            "/sociedad/", "/deportes/", "/espectaculos/", "/clima/",
+            "/economia/", "/policiales/", "/videos/", "/actualidad/"
+        )
+
+        def _seems_article(u: str) -> bool:
+            u = (u or "").lower()
+            if (u == site_url.rstrip("/").lower()) or (u == site_url.rstrip("/").lower()+"/"):
+                return False  # home
+            if any(x in u for x in EXCLUDE_PATTERNS):
+                return False
+            # “profundidad” + pistas de secciones típicas de artículos
+            deep_enough = u.count("/") >= 5
+            return any(x in u for x in INCLUDE_HINTS) or deep_enough
+
+        seeds_all = []
+        if do_search: seeds_all.extend(search_urls)
+        if do_disc:   seeds_all.extend(disc_urls)
+        # dedup conservando orden
+        seen = set()
+        seeds_all = [u for u in seeds_all if not (u in seen or seen.add(u))]
+
+        filtered_urls = [u for u in seeds_all if _seems_article(u)]
+        st.caption(f"URLs candidatas (antes): {len(seeds_all)} | después del filtro: {len(filtered_urls)}")
+        if filtered_urls:
+            st.code(filtered_urls[:10], language="json")
+
+        st.markdown("**Sugerencia de User-Agent**")
+        st.code(DEFAULT_UA)
+
+        # Preferencias para la ejecución (usar keys únicas 'cpa_*' para no chocar con app_params)
+        use_forced = st.checkbox("Forzar a usar solo las seeds filtradas del preflight", value=True, key="cpa_force_use_preflight")
+        loosen = st.checkbox("Bajar umbrales (min_impresiones=1, min_clicks=0) al forzar seeds", value=True, key="cpa_loosen_th")
+
+        # --- Ejecutar ---
+        if st.button("📰 Ejecutar Análisis de contenido", type="primary", key="btn_run_content"):
+            # Ensamblar params finales
+            params_final = dict(params)  # copy superficial
+            # Ventana saneada garantizada
+            win = dict(params_final.get("window", {}) or {})
+            win["start_date"], win["end_date"] = start_s, end_s
+            params_final["window"] = win
+
+            # UA por defecto si viene vacío
             try:
-                end_default = date.fromisoformat(str(win.get("end_date"))) if win.get("end_date") else end_default
+                if not params_final.get("scrape", {}).get("request", {}).get("user_agent"):
+                    params_final.setdefault("scrape", {}).setdefault("request", {})["user_agent"] = DEFAULT_UA
             except Exception:
                 pass
-            start_date = end_default
-            try:
-                start_date = date.fromisoformat(str(win.get("start_date"))) if win.get("start_date") else (end_default)
-            except Exception:
-                start_date = end_default
-        else:
-            start_date = win.get("start_date") or date.today()
-            end_default = win.get("end_date") or date.today()
 
-        # Normalize a ISO strings (por si vienen como datetime.date)
-        def _date_to_iso(d):
-            try:
-                return pd.Timestamp(d).date().isoformat()
-            except Exception:
-                return str(d)
+            # Forzar seeds si el usuario lo eligió
+            if use_forced and filtered_urls:
+                params_final["forced_urls"] = filtered_urls
+                if loosen:
+                    params_final.setdefault("filters", {}).update({"min_impressions": 1, "min_clicks": 0})
 
-        # --- Preflight GSC: muestra top páginas Search/Discover y seeds filtradas ---
-        with st.expander("🔎 Preflight de datos GSC (previo a ejecutar)", expanded=False):
-            def _gsc_query_pages(service, site, start_iso, end_iso, search_type="web",
-                                 country=None, device=None, row_limit=50):
-                body = {
-                    "startDate": start_iso,
-                    "endDate": end_iso,
-                    "dimensions": ["page"],
-                    "rowLimit": int(row_limit),
-                    "type": search_type,
-                    "startRow": 0,
-                    "orderBy": [{"dimension": "clicks", "descending": True}],
-                }
-                # Filtros país/dispositivo como dimension filters (no agregamos dimensiones nuevas para no romper filas)
-                filters = []
-                if country:
-                    filters.append({"dimension": "country", "operator": "equals", "expression": country})
-                if device:
-                    dev_map = {"desktop": "DESKTOP", "mobile": "MOBILE", "tablet": "TABLET"}
-                    dev = dev_map.get(str(device).lower())
-                    if dev:
-                        filters.append({"dimension": "device", "operator": "equals", "expression": dev})
-                if filters:
-                    body["dimensionFilterGroups"] = [{"filters": filters}]
-                try:
-                    resp = service.searchanalytics().query(siteUrl=site, body=body).execute()
-                    rows = resp.get("rows", []) or []
-                    out = []
-                    for r in rows:
-                        keys = r.get("keys", []) or []
-                        page = keys[0] if keys else ""
-                        out.append({"page": page, "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)})
-                    return out
-                except Exception as e:
-                    return [{"error": str(e)}]
+            # Log técnico previo por si falla
+            st.session_state["_rca_norm_params"] = params_final
 
-            # Fechas robustas desde params (ya normalizadas en params_for_content)
-            pwin = params.get("window") or {}
-            if (pwin.get("mode") == "last") and pwin.get("days"):
-                end_iso = _date_to_iso(pwin.get("end_date") or date.today())
-                # calcular start si falta
-                if pwin.get("start_date"):
-                    start_iso = _date_to_iso(pwin.get("start_date"))
-                else:
-                    # usar days para estimar (inclusive)
-                    end_dt = pd.Timestamp(end_iso).date()
-                    start_iso = (end_dt - pd.Timedelta(days=int(pwin["days"])-1)).isoformat()
-            else:
-                start_iso = _date_to_iso(pwin.get("start_date") or date.today())
-                end_iso = _date_to_iso(pwin.get("end_date") or date.today())
-
-            country = (params.get("filters") or {}).get("country")
-            device = (params.get("filters") or {}).get("device")
-
-            fuente_val = src_map[fuente]
-            want_search = fuente_val in ("search", "both")
-            want_discover = fuente_val in ("discover", "both")
-
-            if want_search:
-                st.markdown("**Search (web)**")
-                r_web = _gsc_query_pages(sc_service, site_url, start_iso, end_iso, "web", country, device, row_limit=50)
-                if r_web and "error" in r_web[0]:
-                    st.error(f"Error Search preflight: {r_web[0]['error']}")
-                else:
-                    st.caption(f"Filas: {len(r_web)}")
-                    st.json([row["page"] for row in r_web[:10]])
-
-            if want_discover:
-                st.markdown("**Discover**")
-                r_disc = _gsc_query_pages(sc_service, site_url, start_iso, end_iso, "discover", country, device, row_limit=50)
-                if r_disc and "error" in r_disc[0]:
-                    st.error(f"Error Discover preflight: {r_disc[0]['error']}")
-                else:
-                    st.caption(f"Filas: {len(r_disc)}")
-                    st.json([row["page"] for row in r_disc[:10]])
-
-            # --- Filtrado de seeds a artículos
-            st.markdown("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
-            EXCLUDE_PATTERNS = ("/player", "/player-", "/tag/", "/hd/", "/wp-admin", "/wp-json", "/amp/")
-            INCLUDE_HINTS     = ("/sociedad/", "/deportes/", "/espectaculos/", "/clima/", "/economia/", "/videos/")
-
-            def _seems_article(u: str) -> bool:
-                u = (u or "").lower()
-                if any(x in u for x in EXCLUDE_PATTERNS):
-                    return False
-                deep_enough = u.count("/") >= 5  # home/índices suelen ser menos profundos
-                return any(x in u for x in INCLUDE_HINTS) or deep_enough
-
-            seeds = []
-            if want_search and isinstance(r_web, list):
-                seeds += [r["page"] for r in r_web if "page" in r]
-            if want_discover and isinstance(r_disc, list):
-                seeds += [r["page"] for r in r_disc if "page" in r]
-            # dedup conservando orden
-            seen = set(); seeds = [u for u in seeds if (u not in seen and not seen.add(u))]
-            seeds_filtered = [u for u in seeds if _seems_article(u)]
-
-            st.write(f"URLs candidatas (antes): {len(seeds)} | **después del filtro**: {len(seeds_filtered)}")
-            st.json(seeds_filtered[:10])
-
-            # Guardamos por si hace falta en la ejecución
-            st.session_state["cnt_preflight_seeds"] = seeds
-            st.session_state["cnt_preflight_seeds_filtered"] = seeds_filtered
-
-        # Actualizar params finales coherentes con el runner
-        params["tipo"] = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}[fuente]
-        params["source"] = src_map[fuente]
-        if selectors_ok:
-            params["selectors"] = selectors
-            if "scrape" in params and isinstance(params["scrape"], dict):
-                params["scrape"]["selectors"] = selectors
-
-        # Si hay seeds filtradas del preflight, las usamos como override (respetando el límite)
-        limit_n = int(params.get("max_urls") or params.get("limit") or 300)
-        seeds_override = (st.session_state.get("cnt_preflight_seeds_filtered") or [])[:limit_n]
-        use_override = st.checkbox("Forzar a usar sólo las seeds filtradas del preflight", value=True, key="cnt_use_preflight_seeds")
-        if use_override and seeds_override:
-            params["seed_urls"] = seeds_override
-
-        # Recomendación de UA
-        st.markdown("**Sugerencia de User-Agent**")
-        st.code("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
-        # Forzar UA si está vacío
-        try:
-            req = (params.get("scrape") or {}).get("request") or {}
-            if req.get("user_agent") in (None, "", " "):
-                req["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-                params.setdefault("scrape", {})["request"] = req
-        except Exception:
-            pass
-
-        # Botón de ejecución dentro del branch de contenido
-        if st.button("📰 Ejecutar Análisis de contenido", type="primary", key="btn_run_content"):
-            # Guardar params normalizados para debug
-            st.session_state["_rca_norm_params"] = params
             try:
                 with st.spinner("Procesando Análisis de contenido..."):
                     sid = run_content_analysis(
                         sc_service, drive_service, gs_client, site_url,
-                        params,  # dict de params ya armado/normalizado
+                        params_final,
                         st.session_state.get("dest_folder_id")
                     )
             except Exception as e:
-                sid = None
                 st.session_state["_rca_error"] = f"{type(e).__name__}: {e}"
+                sid = None
 
             if not sid:
                 st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
-                with st.expander("Ver detalle técnico"):
+                with st.expander("Ver detalle técnico", expanded=False):
                     err = st.session_state.get("_rca_error", "(sin mensaje)")
                     st.write(err)
                     norm_params = st.session_state.get("_rca_norm_params", {})
@@ -981,6 +925,7 @@ elif analisis == "9":
                 st.stop()
 
             # flujo OK
+            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
             st.success("¡Listo! Tu documento está creado.")
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
@@ -997,7 +942,7 @@ elif analisis == "9":
                 analysis_kind="Análisis de contenido",
                 sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
                 gsc_account=st.session_state.get("src_account_label") or "",
-                notes="ok"
+                notes=f"window={start_s}→{end_s}, forced_urls={len(filtered_urls) if use_forced else 0}"
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "content"
