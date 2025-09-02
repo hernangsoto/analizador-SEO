@@ -86,13 +86,36 @@ apply_base_style_and_logo()
 # ⬇️ Sin espacios arriba + logo que acompaña al sidebar (solo CSS)
 st.markdown("""
 <style>
-#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] { display: none !important; height:0 !important; margin:0 !important; padding:0 !important; }
+/* 0) Remover cualquier “banda” o espaciador que pueda dejar la capa de estilo base */
+#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
+  display: none !important; height:0 !important; margin:0 !important; padding:0 !important;
+}
+
+/* 1) Quitar padding/margen superior que Streamlit agrega por el header */
 div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
 main .block-container { margin-top: 0 !important; padding-top: .75rem !important; }
+
+/* 2) Asegurar el header por encima */
 header[data-testid="stHeader"] { z-index: 1500 !important; }
-:root:has([data-testid="stSidebar"][aria-expanded="true"]) header[data-testid="stHeader"]::before { left: 350px !important; }
-:root:has([data-testid="stSidebar"][aria-expanded="false"]) header[data-testid="stHeader"]::before { left: 100px !important; }
-:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before { left: 16px !important; }
+
+/* 3) Mover el logo del header para que siga al sidebar (el logo lo inyecta app_config.py con ::before) */
+
+/* Sidebar ABIERTO (ajusta 288–304px si tu sidebar es distinto) */
+:root:has([data-testid="stSidebar"][aria-expanded="true"])
+  header[data-testid="stHeader"]::before {
+  left: 350px !important;
+}
+
+/* Sidebar CERRADO */
+:root:has([data-testid="stSidebar"][aria-expanded="false"])
+  header[data-testid="stHeader"]::before {
+  left: 100px !important;
+}
+
+/* Fallback por si no existe el atributo en alguna versión */
+:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before {
+  left: 16px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -107,88 +130,6 @@ if not st.session_state.get("DEBUG"):
             st.caption("💡 Podés cargar una API key de Gemini en Secrets (GEMINI_API_KEY o [gemini].api_key).")
     except Exception:
         pass
-
-# ============== Helpers locales ==============
-
-DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-
-def _iso(o) -> str | None:
-    if o is None: return None
-    if isinstance(o, (pd.Timestamp, )):
-        return o.date().isoformat()
-    if isinstance(o, date):
-        return o.isoformat()
-    try:
-        return str(o)
-    except Exception:
-        return None
-
-def _compute_window(win: dict, lag_days: int) -> tuple[str, str]:
-    mode = (win or {}).get("mode") or "last"
-    if mode == "custom":
-        sd = win.get("start_date")
-        ed = win.get("end_date")
-        if sd and ed:
-            return (_iso(sd), _iso(ed))
-        mode = "last"
-    days = int((win or {}).get("days") or 28)
-    end_d = date.today() - timedelta(days=int(lag_days))
-    start_d = end_d - timedelta(days=days-1)
-    return (start_d.isoformat(), end_d.isoformat())
-
-def _gsc_top_pages(sc_service, site_url: str, start_date: str, end_date: str, search_type: str = "web", limit: int = 200) -> list[str]:
-    try:
-        body = {
-            "startDate": start_date,
-            "endDate": end_date,
-            "dimensions": ["page"],
-            "rowLimit": int(limit),
-            "type": search_type,  # 'web' o 'discover'
-            "orderBy": [{"field": "clicks", "descending": True}],
-        }
-        resp = sc_service.searchanalytics().query(siteUrl=site_url, body=body).execute()
-        rows = resp.get("rows", []) or []
-        urls = []
-        for r in rows:
-            dims = r.get("keys", [])
-            if not dims:
-                continue
-            pg = (dims[0] or "").strip()
-            if pg:
-                urls.append(pg)
-        return urls
-    except Exception as e:
-        st.warning(f"No pude obtener páginas para '{search_type}': {e}")
-        return []
-
-def _normalize_selectors(sel: dict | None) -> dict:
-    """
-    Acepta valores tipo:
-      - string CSS -> se deja igual
-      - {'css': '...', 'attr': 'content'} -> 'css::attr(content)'
-      - {'css': '...'} -> 'css'
-    Devuelve siempre dict[str, str]
-    """
-    if not isinstance(sel, dict):
-        return {}
-    out: dict[str, str] = {}
-    for k, v in sel.items():
-        if isinstance(v, str):
-            out[k] = v
-        elif isinstance(v, dict):
-            css = (v.get("css") or "").strip()
-            attr = (v.get("attr") or "").strip()
-            if css and attr:
-                out[k] = f"{css}::attr({attr})"
-            elif css:
-                out[k] = css
-        elif isinstance(v, list):
-            try:
-                out[k] = ", ".join(map(str, v))
-            except Exception:
-                pass
-    return {kk: vv for kk, vv in out.items() if vv}
 
 # ============== App ==============
 
@@ -403,7 +344,7 @@ if analisis == "7":
         if total == 0:
             st.info("Cargá un CSV o pegá al menos un nombre para habilitar la ejecución.")
         else:
-            if st.button("🔎 Ejecutar Análisis de Nombres (KG + Wikipedia)", type="primary"):
+            if st.button("🔎 Ejecutar Análisis de Nombres (KG + Wikipedia)", type="primary", key="btn_names_run"):
                 sid = run_with_indicator(
                     "Procesando Análisis de Nombres (KG + Wikipedia)",
                     run_names_analysis, drive_service, gs_client,
@@ -441,7 +382,7 @@ if analisis == "8":
         st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
     else:
         st.subheader("Subí el CSV exportado de Discover Snoop")
-        up = st.file_uploader("Archivo CSV", type=["csv"])
+        up = st.file_uploader("Archivo CSV", type=["csv"], key="ds_file")
         params_ds = params_for_discover_snoop()
 
         with st.expander("Formato esperado (campos mínimos)"):
@@ -462,7 +403,7 @@ if analisis == "8":
         if df is None:
             st.info("Cargá el CSV para habilitar la ejecución.")
         else:
-            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
+            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_ds_run"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
                     run_discover_snoop,  # función del paquete externo
@@ -611,10 +552,10 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
         st.session_state["step3_done"] = True
         st.markdown(
-            f'''
+            '''
             <div class="success-inline">
                 Cuenta de acceso (Search Console): <strong>Acceso en cuenta personal de Nomadic</strong>
-                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                <a href="?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
             </div>
             ''',
             unsafe_allow_html=True
@@ -689,13 +630,169 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
+# =========================
+# AYUDAS para Análisis de contenido (preflight + scraping quick test)
+# =========================
+
+def _iso3_lower(x: str | None) -> str | None:
+    if not x: return None
+    return str(x).strip().lower()
+
+def _device_upper(x: str | None) -> str | None:
+    if not x: return None
+    v = str(x).strip().lower()
+    if v in ("desktop","mobile","tablet"):
+        return v.upper()
+    return None
+
+def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
+                        country: str | None, device: str | None,
+                        order_by: str, row_limit: int) -> list[dict]:
+    """
+    Devuelve rows con keys: page, clicks, impressions, ctr, position
+    """
+    try:
+        body = {
+            "startDate": str(start),
+            "endDate": str(end),
+            "dimensions": ["page"],
+            "rowLimit": int(row_limit),
+            "startRow": 0,
+            "type": search_type,  # API moderna: "web", "discover"
+            "orderBy": [{"field": order_by, "descending": True}],
+        }
+        filters = []
+        if country:
+            filters.append({
+                "dimension": "country",
+                "operator": "equals",
+                "expression": _iso3_lower(country)
+            })
+        if device:
+            filters.append({
+                "dimension": "device",
+                "operator": "equals",
+                "expression": _device_upper(device)
+            })
+        if filters:
+            body["dimensionFilterGroups"] = [{"groupType":"and","filters":filters}]
+        resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
+        rows = resp.get("rows", []) or []
+        out = []
+        for r in rows:
+            keys = r.get("keys") or []
+            page = keys[0] if keys else ""
+            out.append({
+                "page": page,
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "ctr": r.get("ctr", 0.0),
+                "position": r.get("position", 0.0),
+            })
+        return out
+    except Exception as e:
+        st.session_state["_rca_error"] = f"GSC query error ({search_type}): {e}"
+        return []
+
+# heurística para descartar páginas no-artículo
+_DROP_PATTERNS = (
+    "/player/", "/tag/", "/tags/", "/etiqueta/", "/categoria/", "/category/",
+    "/author/", "/autores/", "/programas/", "/hd/", "/podcast", "/videos/",
+    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?",
+)
+def _is_article_url(u: str) -> bool:
+    if not u: return False
+    u = u.strip().lower()
+    if u in ("https://", "http://"): return False
+    if u.endswith((".jpg",".jpeg",".png",".gif",".svg",".webp",".mp4",".mp3",".m3u8",".pdf")):
+        return False
+    if u.count("/") <= 3:  # home o sección raíz
+        return False
+    for p in _DROP_PATTERNS:
+        if p in u:
+            return False
+    return True
+
+def _filter_article_urls(urls: list[str]) -> list[str]:
+    return [u for u in urls if _is_article_url(u)]
+
+def _suggest_user_agent(ua: str | None) -> str:
+    if ua and ua.strip():
+        return ua
+    return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36")
+
+def _quick_scrape_probe(urls: list[str], selectors: dict, ua: str, timeout: int = 10, max_n: int = 10) -> pd.DataFrame:
+    """
+    Intenta extraer algunos campos básicos para ver si los selectores 'pegan'.
+    Usa requests+bs4 si existen; si no, devuelve df vacío con mensajes.
+    """
+    results = []
+    try:
+        import requests
+        from bs4 import BeautifulSoup  # type: ignore
+    except Exception as e:
+        return pd.DataFrame([{
+            "url": "(sin test local)",
+            "title": "(bs4/requests no disponibles)",
+            "headline": "",
+            "author": "",
+            "published": "",
+            "ok": False,
+            "error": str(e),
+        }])
+
+    sel = selectors or {}
+    s_title = sel.get("title", {})
+    s_head  = sel.get("headline", {})
+    s_auth  = sel.get("author", {})
+    s_pub   = sel.get("published", {})
+
+    def _first_text(soup, spec):
+        if isinstance(spec, dict):
+            css = spec.get("css") or ""
+            attr = spec.get("attr") or ""
+        else:
+            css = str(spec or "")
+            attr = ""
+        if not css:
+            return ""
+        try:
+            el = soup.select_one(css)
+            if not el:
+                return ""
+            if attr:
+                return (el.get(attr) or "").strip()
+            return el.get_text(strip=True)
+        except Exception:
+            return ""
+
+    headers = {"User-Agent": ua}
+    for u in urls[:max_n]:
+        row = {"url": u, "title": "", "headline": "", "author": "", "published": "", "ok": False, "error": ""}
+        try:
+            rs = requests.get(u, headers=headers, timeout=timeout)
+            rs.raise_for_status()
+            soup = BeautifulSoup(rs.text, "html.parser")
+            row["title"] = _first_text(soup, s_title)
+            row["headline"] = _first_text(soup, s_head)
+            row["author"] = _first_text(soup, s_auth)
+            row["published"] = _first_text(soup, s_pub)
+            ok_fields = sum(bool(row[k]) for k in ("title","headline","author","published"))
+            row["ok"] = ok_fields >= 1
+        except Exception as e:
+            row["error"] = str(e)
+        results.append(row)
+    return pd.DataFrame(results)
+
 # ============== Flujos por análisis (requieren GSC) ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
     else:
         params = params_for_core_update()
-        if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+        if st.button("🚀 Ejecutar análisis de Core Update", type="primary", key="btn_core_run"):
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
@@ -733,7 +830,7 @@ elif analisis == "5":
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
-        if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
+        if st.button("🌲 Ejecutar análisis Evergreen", type="primary", key="btn_ev_run"):
             sid = run_with_indicator(
                 "Procesando Evergreen",
                 run_evergreen, sc_service, drive_service, gs_client, site_url, params,
@@ -766,7 +863,7 @@ elif analisis == "6":
         st.warning("Este despliegue no incluye run_traffic_audit.")
     else:
         params = params_for_auditoria()
-        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary"):
+        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary", key="btn_aud_run"):
             sid = run_with_indicator(
                 "Procesando Auditoría de tráfico",
                 run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
@@ -800,157 +897,173 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        # UI de parámetros (desde app_params) — llamar UNA sola vez
-        params = params_for_content()
+        # 1) Parámetros de UI
+        params_ui = params_for_content()  # dict
+        st.subheader("Configuración del Análisis de contenido")
 
-        st.subheader("🔎 Preflight de datos GSC (previo a ejecutar)")
+        # Normalizar/derivar ventana temporal segura
+        win = params_ui.get("window") or {}
+        lag_days = int(params_ui.get("lag_days", 3))
+        end_default = date.today() - timedelta(days=lag_days)
+        if (win.get("mode") == "custom") and win.get("start_date") and win.get("end_date"):
+            start_date = win["start_date"]
+            end_date = win["end_date"]
+        else:
+            days = int(win.get("days") or 28)
+            end_date = end_default
+            start_date = end_date - timedelta(days=days - 1)
 
-        # Ventana calculada garantizada
-        start_s, end_s = _compute_window(params.get("window", {}), int(params.get("lag_days", 3)))
+        # Origen
+        tipo = params_ui.get("tipo") or "Ambos"  # "Search" | "Discover" | "Ambos"
+        source_map = {"Search":"web","Discover":"discover","Ambos":"both"}
+        src = source_map.get(tipo, "both")
 
-        # Determinar fuentes a testear para preflight
-        tipo = params.get("tipo", "Ambos")  # "Search" | "Discover" | "Ambos"
-        do_search = (tipo in ("Search", "Ambos"))
-        do_disc   = (tipo in ("Discover", "Ambos"))
+        # Filtros básicos
+        filtros = params_ui.get("filters") or {}
+        country = filtros.get("country")  # ISO3 o None
+        device = filtros.get("device")    # "desktop"/"mobile"/None
+        min_clicks = int(filtros.get("min_clicks", 0))
+        min_impr   = int(filtros.get("min_impressions", 0))
 
-        search_urls = []
-        disc_urls = []
+        order_by = params_ui.get("order_by", "clicks")
+        max_urls = int(params_ui.get("max_urls", 300))
 
-        if do_search:
-            st.markdown("**Search (web)**")
-            search_urls = _gsc_top_pages(sc_service, site_url, start_s, end_s, search_type="web", limit=250)
-            st.caption(f"Filas: {len(search_urls)}")
-            if search_urls:
-                st.code(search_urls[:10], language="json")
+        # Selectores / Request
+        scrape = params_ui.get("scrape") or {}
+        req = scrape.get("request") or {}
+        ua = _suggest_user_agent(req.get("user_agent") or "")
+        timeout = int(req.get("timeout", 12))
 
-        if do_disc:
-            st.markdown("**Discover**")
-            disc_urls = _gsc_top_pages(sc_service, site_url, start_s, end_s, search_type="discover", limit=250)
-            st.caption(f"Filas: {len(disc_urls)}")
-            if disc_urls:
-                st.code(disc_urls[:10], language="json")
+        # 2) PREFLIGHT: Traer semillas desde GSC
+        st.markdown("### 🔎 Preflight de datos GSC (previo a ejecutar)")
+        st.caption(f"Ventana: **{start_date} → {end_date}** | Origen: **{tipo}** | Orden: **{order_by}** | Máx URLs: **{max_urls}**")
 
-        # --- Filtrado de seeds a artículos ---
-        st.markdown("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
+        seeds_search = []
+        seeds_discover = []
 
-        EXCLUDE_PATTERNS = (
-            "/player", "/player-", "/player-mitre-clarin/",
-            "/tag/", "/hd/", "/wp-admin", "/wp-json", "/amp/",
-            "/loterias-y-quinielas/", "/quiniela", "/quiniela-",
-            "/resultados-de-hoy", "/loterias/", "/quini-6"
-        )
-        INCLUDE_HINTS = (
-            "/sociedad/", "/deportes/", "/espectaculos/", "/clima/",
-            "/economia/", "/policiales/", "/videos/", "/actualidad/"
-        )
-
-        def _seems_article(u: str) -> bool:
-            u = (u or "").lower()
-            if (u == site_url.rstrip("/").lower()) or (u == site_url.rstrip("/").lower()+"/"):
-                return False  # home
-            if any(x in u for x in EXCLUDE_PATTERNS):
-                return False
-            deep_enough = u.count("/") >= 5
-            return any(x in u for x in INCLUDE_HINTS) or deep_enough
-
-        seeds_all = []
-        if do_search: seeds_all.extend(search_urls)
-        if do_disc:   seeds_all.extend(disc_urls)
-        seen = set()
-        seeds_all = [u for u in seeds_all if not (u in seen or seen.add(u))]
-
-        filtered_urls = [u for u in seeds_all if _seems_article(u)]
-        st.caption(f"URLs candidatas (antes): {len(seeds_all)} | después del filtro: {len(filtered_urls)}")
-        if filtered_urls:
-            st.code(filtered_urls[:10], language="json")
-
-        st.markdown("**Sugerencia de User-Agent**")
-        st.code(DEFAULT_UA)
-
-        # Preferencias para la ejecución (keys únicas 'cpa_*')
-        use_forced = st.checkbox("Forzar a usar solo las seeds filtradas del preflight", value=True, key="cpa_force_use_preflight")
-        loosen = st.checkbox("Bajar umbrales (min_impresiones=1, min_clicks=0) al forzar seeds", value=True, key="cpa_loosen_th")
-
-        # --- Ejecutar ---
-        if st.button("📰 Ejecutar Análisis de contenido", type="primary", key="btn_run_content"):
-            # Ensamblar params finales
-            params_final = dict(params)
-
-            # Ventana saneada
-            win = dict(params_final.get("window", {}) or {})
-            win["start_date"], win["end_date"] = start_s, end_s
-            params_final["window"] = win
-
-            # Asegurar 'source' que espera el runner
-            params_final["source"] = {"Search": "search", "Discover": "discover", "Ambos": "both"}.get(
-                params.get("tipo", "Ambos"), "both"
+        if src in ("web","both"):
+            seeds_search = _gsc_fetch_top_urls(
+                sc_service, site_url, start_date, end_date, "web",
+                country, device, order_by, row_limit=max_urls
             )
+            st.write("**Search (web)**")
+            st.write(f"Filas: {len(seeds_search):,}")
+            st.code([r["page"] for r in seeds_search[:10]])
 
-            # UA por defecto si viene vacío
-            try:
-                if not params_final.get("scrape", {}).get("request", {}).get("user_agent"):
-                    params_final.setdefault("scrape", {}).setdefault("request", {})["user_agent"] = DEFAULT_UA
-            except Exception:
-                pass
+        if src in ("discover","both"):
+            seeds_discover = _gsc_fetch_top_urls(
+                sc_service, site_url, start_date, end_date, "discover",
+                country, device, order_by, row_limit=max_urls
+            )
+            st.write("**Discover**")
+            st.write(f"Filas: {len(seeds_discover):,}")
+            st.code([r["page"] for r in seeds_discover[:10]])
 
-            # Normalizar selectores a strings (por si el usuario pegó objetos css/attr)
-            try:
-                params_final["selectors"] = _normalize_selectors(params_final.get("selectors") or {})
-                params_final.setdefault("scrape", {}).setdefault("selectors", params_final["selectors"])
-            except Exception:
-                pass
+        # Merge + filtros mínimos
+        df_seeds = pd.DataFrame(seeds_search + seeds_discover)
+        before_count = len(df_seeds)
+        if before_count == 0:
+            st.error("No hay semillas desde GSC para la ventana/configuración elegida.")
+        else:
+            if min_clicks > 0:
+                df_seeds = df_seeds[df_seeds["clicks"] >= min_clicks]
+            if min_impr > 0:
+                df_seeds = df_seeds[df_seeds["impressions"] >= min_impr]
+            st.write(f"**Semillas tras umbrales** (min_clicks={min_clicks}, min_impr={min_impr}): {len(df_seeds):,} (antes {before_count:,})")
 
-            # Forzar seeds si el usuario lo eligió
-            if use_forced and filtered_urls:
-                params_final["forced_urls"] = filtered_urls
-                if loosen:
-                    params_final.setdefault("filters", {}).update({"min_impressions": 1, "min_clicks": 0})
+        # 3) Filtro a URLs de artículo
+        urls_all = df_seeds["page"].dropna().astype(str).tolist() if not df_seeds.empty else []
+        urls_filtered = _filter_article_urls(urls_all)
+        st.write("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
+        st.write(f"URLs candidatas (antes): {len(urls_all):,} | después del filtro: {len(urls_filtered):,}")
+        st.code(urls_filtered[:10])
 
-            # Log técnico previo por si falla
-            st.session_state["_rca_norm_params"] = params_final
+        # Guardar para depuración
+        st.session_state["_rca_preflight_urls"] = urls_filtered[:]
 
+        # 4) Sugerencia de UA si está vacío
+        if not (req.get("user_agent") or "").strip():
+            st.info("**Sugerencia de User-Agent**")
+            st.code(ua)
+
+        # 5) Test rápido de scraping (opcional)
+        st.markdown("#### 🧪 Test rápido de scraping (opcional)")
+        do_probe = st.checkbox("Probar selectores en una muestra (no afecta el resultado final)", value=False, key="cnt_probe_chk")
+        if do_probe:
+            selectors = (scrape.get("selectors") or params_ui.get("selectors") or {})
+            df_probe = _quick_scrape_probe(urls_filtered, selectors, ua, timeout=timeout, max_n=10)
+            st.dataframe(df_probe, use_container_width=True)
+            ok_rate = float((df_probe["ok"] == True).sum()) / max(1, len(df_probe))
+            if ok_rate < 0.2:
+                st.warning("Los selectores parecen no estar extrayendo datos en la mayoría de las URLs. Revisá los CSS/attr.")
+
+        # 6) Ensamblar payload final a enviar
+        final_params = dict(params_ui)  # copia superficial
+        # normalizar ventana:
+        final_params["window"] = {
+            "mode": "custom",
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "days": None,
+        }
+        # asegurar UA
+        final_params.setdefault("scrape", {})
+        final_params["scrape"].setdefault("request", {})
+        final_params["scrape"]["request"]["user_agent"] = ua
+
+        # persistir para el panel de detalle técnico
+        st.session_state["_rca_norm_params"] = final_params
+
+        # 7) Ejecutar
+        can_run = len(urls_filtered) > 0
+        if not can_run:
+            st.error("No hay URLs de artículo elegibles para enviar al runner. Ajustá la ventana/filtros.")
+        if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not can_run, key="btn_content_run"):
             try:
                 with st.spinner("Procesando Análisis de contenido..."):
                     sid = run_content_analysis(
                         sc_service, drive_service, gs_client, site_url,
-                        params_final,
+                        final_params,
                         st.session_state.get("dest_folder_id")
                     )
+                if not sid:
+                    st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
+                    st.stop()
+                # flujo OK
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Análisis de contenido",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"preflight_urls={len(urls_filtered)}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "content"
             except Exception as e:
-                st.session_state["_rca_error"] = f"{type(e).__name__}: {e}"
-                sid = None
+                st.session_state["_rca_error"] = f"Runner error: {e}"
+                st.error("Falló la ejecución del runner. Revisá el detalle técnico más abajo.")
 
-            if not sid:
-                st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
-                with st.expander("Ver detalle técnico", expanded=False):
-                    err = st.session_state.get("_rca_error", "(sin mensaje)")
-                    st.write(err)
-                    norm_params = st.session_state.get("_rca_norm_params", {})
-                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2))
-                st.stop()
-
-            # flujo OK
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Análisis de contenido",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"window={start_s}→{end_s}, forced_urls={len(filtered_urls) if use_forced else 0}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "content"
+        # 8) Panel de detalle técnico
+        with st.expander("🧩 Ver detalle técnico"):
+            st.write("**Ventana**")
+            st.code({"start_date": str(start_date), "end_date": str(end_date)}, language="json")
+            st.write("**Seeds (preflight) - primeras 50:**")
+            st.code(st.session_state.get("_rca_preflight_urls", [])[:50])
+            st.write("**Payload final enviado**")
+            st.code(st.session_state.get("_rca_norm_params", {}), language="json")
+            if "_rca_error" in st.session_state:
+                st.error(st.session_state["_rca_error"])
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
