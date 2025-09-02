@@ -1274,19 +1274,21 @@ elif analisis == "10":
     st.subheader("Extractor rápido desde Search Console")
     st.caption("Trae URLs por Search / Discover (o ambos), filtra por país / dispositivo, scrapea rápido **solo los campos que elijas** (limitados al cuerpo del artículo si indicas su XPath) y publica en Sheets.")
 
-    # Config de fechas y origen (máx URLs por origen fuera del avanzado)
-    colA, colB, colC, colD = st.columns([1,1,1,1.2])
+    # Config de fechas y origen (fechas directas + máx URLs por origen)
+    colA, colB, colC, colD = st.columns([1,1,1.2,1.2])
+    end_default = date.today() - timedelta(days=2)
     with colA:
-        end_default = date.today() - timedelta(days=2)
-        end_date = st.date_input("Hasta (inclusive)", value=end_default, key="fast_end")
+        start_date = st.date_input("Desde (inclusive)", value=end_default - timedelta(days=27), key="fast_start")
     with colB:
-        days = st.number_input("Días (ventana)", min_value=1, max_value=90, value=28, step=1, key="fast_days")
-        start_date = end_date - timedelta(days=int(days)-1)
-        st.write(f"Desde: **{start_date}**")
+        end_date = st.date_input("Hasta (inclusive)", value=end_default, key="fast_end")
     with colC:
         tipo = st.radio("Origen", ["Search", "Discover", "Search + Discover"], horizontal=False, key="fast_source")
     with colD:
         row_limit = st.number_input("Máx URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
+
+    if start_date > end_date:
+        st.error("La fecha **Desde** no puede ser posterior a **Hasta**.")
+        st.stop()
 
     # Opciones avanzadas (todo junto)
     with st.expander("⚙️ Opciones avanzadas de configuración y filtrado", expanded=False):
@@ -1408,10 +1410,12 @@ elif analisis == "10":
     if not df_seeds.empty:
         # umbrales
         before = len(df_seeds)
+        min_clicks = int(st.session_state.get("fast_min_clicks", 0))
+        min_impr = int(st.session_state.get("fast_min_impr", 0))
         if min_clicks > 0:
-            df_seeds = df_seeds[df_seeds["clicks"] >= int(min_clicks)]
+            df_seeds = df_seeds[df_seeds["clicks"] >= min_clicks]
         if min_impr > 0:
-            df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
+            df_seeds = df_seeds[df_seeds["impressions"] >= min_impr]
         st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
 
         # columnas útiles + CTR%
@@ -1420,7 +1424,7 @@ elif analisis == "10":
         df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
 
         urls = df_seeds["url"].dropna().astype(str).tolist()
-        if only_articles:
+        if st.session_state.get("fast_only_articles", True):
             urls = _filter_article_urls(urls)
         st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
         st.code(urls[:20])
@@ -1428,29 +1432,42 @@ elif analisis == "10":
         # Botón de ejecutar
         can_run = len(urls) > 0
         if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
-            ua_final = _suggest_user_agent(ua)
+            ua_final = _suggest_user_agent(st.session_state.get("fast_ua",""))
 
             # Armar wants/xpaths según checkboxes
             wants = {
-                "title": w_title, "h1": w_h1, "meta_description": w_md,
-                "og_title": w_ogt, "og_description": w_ogd, "canonical": w_canon,
-                "published_time": w_pub, "lang": w_lang,
-                "first_paragraph": w_firstp,
-                "h2_list": w_h2_list, "h2_count": w_h2_count,
-                "h3_list": w_h3_list, "h3_count": w_h3_count,
-                "bold_count": w_bold, "bold_list": w_bold_list,
-                "link_count": w_links, "link_anchor_texts": w_link_anchors,
-                "related_links_count": w_rel_count, "related_link_anchors": w_rel_anchors,
-                "tags_list": w_tags
+                "title": st.session_state.get("w_title", True),
+                "h1": st.session_state.get("w_h1", True),
+                "meta_description": st.session_state.get("w_md", True),
+                "og_title": st.session_state.get("w_ogt", False),
+                "og_description": st.session_state.get("w_ogd", False),
+                "canonical": st.session_state.get("w_canon", True),
+                "published_time": st.session_state.get("w_pub", False),
+                "lang": st.session_state.get("w_lang", False),
+                "first_paragraph": st.session_state.get("w_firstp", True),
+                "h2_list": st.session_state.get("w_h2_list", False),
+                "h2_count": st.session_state.get("w_h2_count", False),
+                "h3_list": st.session_state.get("w_h3_list", False),
+                "h3_count": st.session_state.get("w_h3_count", False),
+                "bold_count": st.session_state.get("w_bold", False),
+                "bold_list": st.session_state.get("w_bold_list", False),
+                "link_count": st.session_state.get("w_links", False),
+                "link_anchor_texts": st.session_state.get("w_link_anchors", False),
+                "related_links_count": st.session_state.get("w_rel_count", False),
+                "related_link_anchors": st.session_state.get("w_rel_anchors", False),
+                "tags_list": st.session_state.get("w_tags", False),
             }
             xpaths = {
-                "article": xp_article,
-                "first_paragraph": xp_firstp,
-                "h2": xp_h2,
-                "h3": xp_h3,
-                "tags": xp_tags,
-                "related_box": xp_related
+                "article": st.session_state.get("xp_article",""),
+                "first_paragraph": st.session_state.get("xp_firstp",""),
+                "h2": st.session_state.get("xp_h2",""),
+                "h3": st.session_state.get("xp_h3",""),
+                "tags": st.session_state.get("xp_tags",""),
+                "related_box": st.session_state.get("xp_related",""),
             }
+            joiner = st.session_state.get("joiner", " | ")
+            timeout_s = int(st.session_state.get("fast_timeout", 12))
+            concurrency = int(st.session_state.get("fast_conc", 24))
 
             if not any(wants.values()):
                 st.error("Seleccioná al menos un campo para extraer."); st.stop()
@@ -1460,13 +1477,13 @@ elif analisis == "10":
                 try:
                     results = asyncio.run(_scrape_async(
                         urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=int(timeout_s), concurrency=int(concurrency)))
+                        timeout_s=timeout_s, concurrency=concurrency))
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     results = loop.run_until_complete(_scrape_async(
                         urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=int(timeout_s), concurrency=int(concurrency)))
+                        timeout_s=timeout_s, concurrency=concurrency))
                     loop.close()
 
                 df_scr = pd.DataFrame(results)
@@ -1480,27 +1497,27 @@ elif analisis == "10":
                 # Columnas dinámicas según wants
                 cols = ["source","url"]
                 # básicos
-                if w_h1: cols.append("h1")
-                if w_title: cols.append("title")
-                if w_md: cols.append("meta_description")
-                if w_ogt: cols.append("og_title")
-                if w_ogd: cols.append("og_description")
-                if w_canon: cols.append("canonical")
-                if w_pub: cols.append("published_time")
-                if w_lang: cols.append("lang")
+                if wants["h1"]: cols.append("h1")
+                if wants["title"]: cols.append("title")
+                if wants["meta_description"]: cols.append("meta_description")
+                if wants["og_title"]: cols.append("og_title")
+                if wants["og_description"]: cols.append("og_description")
+                if wants["canonical"]: cols.append("canonical")
+                if wants["published_time"]: cols.append("published_time")
+                if wants["lang"]: cols.append("lang")
                 # avanzados
-                if w_firstp: cols.append("first_paragraph")
-                if w_h2_list: cols.append("h2_list")
-                if w_h2_count: cols.append("h2_count")
-                if w_h3_list: cols.append("h3_list")
-                if w_h3_count: cols.append("h3_count")
-                if w_bold: cols.append("bold_count")
-                if w_bold_list: cols.append("bold_list")
-                if w_links: cols.append("link_count")
-                if w_link_anchors: cols.append("link_anchor_texts")
-                if w_rel_count: cols.append("related_links_count")
-                if w_rel_anchors: cols.append("related_link_anchors")
-                if w_tags: cols.append("tags_list")
+                if wants["first_paragraph"]: cols.append("first_paragraph")
+                if wants["h2_list"]: cols.append("h2_list")
+                if wants["h2_count"]: cols.append("h2_count")
+                if wants["h3_list"]: cols.append("h3_list")
+                if wants["h3_count"]: cols.append("h3_count")
+                if wants["bold_count"]: cols.append("bold_count")
+                if wants["bold_list"]: cols.append("bold_list")
+                if wants["link_count"]: cols.append("link_count")
+                if wants["link_anchor_texts"]: cols.append("link_anchor_texts")
+                if wants["related_links_count"]: cols.append("related_links_count")
+                if wants["related_link_anchors"]: cols.append("related_link_anchors")
+                if wants["tags_list"]: cols.append("tags_list")
                 # métricas
                 cols += ["clicks","impressions","ctr_pct","position","status","error"]
 
@@ -1512,18 +1529,19 @@ elif analisis == "10":
                 # ——— Renombrar columnas para el Google Sheet ———
                 rename_map = {
                     "source": "Search / Discover",
-                    "url": "Url",
+                    "url": "URL",
+                    "title": "Title",
                     "h1": "H1",
-                    "meta_description": "META DESCRIPTION",
-                    "canonical": "CANONICAL",
-                    "first_paragraph": "PRIMER PÁRRAFO",
+                    "meta_description": "Meta Description",
+                    "canonical": "Canonical",
+                    "first_paragraph": "Primer Párrafo",
                     "clicks": "Clics",
                     "impressions": "Impresiones",
                     "ctr_pct": "CTR",
                     "position": "Posición",
                     "status": "Status",
                     "error": "Error",
-                    # Las que ya están “ok” se dejan tal cual (title, og_title, og_description, etc.)
+                    # og_title / og_description mantienen sus nombres originales salvo que quieras otra cosa
                 }
                 df_out = df_out.rename(columns=rename_map)
 
@@ -1556,7 +1574,7 @@ elif analisis == "10":
                     analysis_kind="Extractor rápido H1 (+metadatos)",
                     sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
                     gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}, wants={ {k:v for k,v in wants.items() if v} }"
+                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}"
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "fast_h1"
