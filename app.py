@@ -797,10 +797,8 @@ elif analisis == "6":
 elif analisis == "9":
     # ===== NUEVO: Análisis de contenido =====
     if (run_content_analysis is None) or (params_for_content is None):
-        st.warning(
-            "Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
-            "Actualizá el paquete `seo_analisis_ext` para habilitarlo."
-        )
+        st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
+                   "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
         # UI de parámetros (desde app_params) — llamar UNA sola vez
         params = params_for_content()
@@ -878,42 +876,35 @@ elif analisis == "9":
             # Ensamblar params finales
             params_final = dict(params)
 
-            # Ventana saneada (como strings ISO)
+            # Ventana saneada
             win = dict(params_final.get("window", {}) or {})
             win["start_date"], win["end_date"] = start_s, end_s
             params_final["window"] = win
 
-            # Asegurar 'source' en múltiples alias que suelen usar los runners
-            src_val = {"Search": "search", "Discover": "discover", "Ambos": "both"}.get(tipo, "both")
-            params_final["source"] = src_val
-            params_final["source_type"] = src_val
-            params_final["tipo"] = tipo  # algunos runners leen este alias textual
+            # Asegurar 'source' que espera el runner
+            params_final["source"] = {"Search": "search", "Discover": "discover", "Ambos": "both"}.get(
+                params.get("tipo", "Ambos"), "both"
+            )
 
             # UA por defecto si viene vacío
-            params_final.setdefault("scrape", {}).setdefault("request", {})
-            if not params_final["scrape"]["request"].get("user_agent"):
-                params_final["scrape"]["request"]["user_agent"] = DEFAULT_UA
-
-            # Normalizar selectores a strings (por si el usuario pegó objetos css/attr)
             try:
-                norm_sel = _normalize_selectors(params_final.get("selectors") or {})
-                params_final["selectors"] = norm_sel
-                params_final["scrape"]["selectors"] = norm_sel
+                if not params_final.get("scrape", {}).get("request", {}).get("user_agent"):
+                    params_final.setdefault("scrape", {}).setdefault("request", {})["user_agent"] = DEFAULT_UA
             except Exception:
                 pass
 
-            # Forzar seeds si el usuario lo eligió (inyectamos en varios nombres)
+            # Normalizar selectores a strings (por si el usuario pegó objetos css/attr)
+            try:
+                params_final["selectors"] = _normalize_selectors(params_final.get("selectors") or {})
+                params_final.setdefault("scrape", {}).setdefault("selectors", params_final["selectors"])
+            except Exception:
+                pass
+
+            # Forzar seeds si el usuario lo eligió
             if use_forced and filtered_urls:
-                max_n = int(params_final.get("max_urls", 300))
-                urlsN = filtered_urls[:max_n]
-                for key in ("forced_urls", "seed_urls", "urls", "pages", "include_pages"):
-                    params_final[key] = urlsN
+                params_final["forced_urls"] = filtered_urls
                 if loosen:
                     params_final.setdefault("filters", {}).update({"min_impressions": 1, "min_clicks": 0})
-
-            # Pista para el nombre del documento y activar debug del runner
-            params_final["doc_name_hint"] = f"{start_s} a {end_s}"
-            params_final["debug"] = True
 
             # Log técnico previo por si falla
             st.session_state["_rca_norm_params"] = params_final
