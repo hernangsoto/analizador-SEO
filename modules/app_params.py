@@ -441,6 +441,9 @@ def params_for_content() -> dict:
     tipo_display = st.radio("Origen a analizar", ["Search", "Discover", "Search + Discover"], index=2, horizontal=True, key="cnt_tipo")
     tipo_map = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}
     tipo = tipo_map.get(tipo_display, "Ambos")
+    # Normalización extra por compatibilidad con runners externos
+    source_map = {"Search": "search", "Discover": "discover", "Ambos": "both"}
+    source = source_map.get(tipo, "both")
 
     # --- Ventana temporal ---
     end_default = date.today() - timedelta(days=lag_days)
@@ -503,21 +506,21 @@ def params_for_content() -> dict:
     # --- Selectores de scraping (modo simple + modo JSON avanzado) ---
     st.markdown("##### Selectores para scrappear (editables por medio)")
     DEFAULT_SELECTORS = {
-        "title": "h1, meta[property='og:title']::attr(content), meta[name='twitter:title']::attr(content)",
-        "subtitle": "h2, .subhead, .standfirst",
-        "author": "[itemprop='author'], .byline a, .byline",
-        "published": "time[datetime]::attr(datetime), meta[property='article:published_time']::attr(content)",
-        "updated": "meta[property='article:modified_time']::attr(content)",
-        "section": "meta[property='article:section']::attr(content), nav.breadcrumb a[aria-current='page']",
-        "tags": "meta[name='news_keywords']::attr(content), a[rel='tag'], .tags a",
-        "wordcount": "meta[name='wordcount']::attr(content)",
-        "img_count": "article img",
-        "video_count": "video, iframe[src*='youtube'], iframe[src*='vimeo']",
-        "paywall": "meta[name='metered_paywall']::attr(content)"
+        # Usá formato dict {'css': '<selector>', 'attr': 'content'|...} o sólo {'css': '<selector>'}
+        "title":       {"css": "meta[property='og:title']", "attr": "content"},
+        "headline":    {"css": "h1"},
+        "subtitle":    {"css": "h2, .subhead, .standfirst"},
+        "author":      {"css": "meta[name='author']", "attr": "content"},
+        "section":     {"css": "meta[property='article:section']", "attr": "content"},
+        "tags":        {"css": "meta[name='news_keywords']", "attr": "content"},
+        "published":   {"css": "meta[property='article:published_time']", "attr": "content"},
+        "updated":     {"css": "meta[property='article:modified_time']", "attr": "content"},
+        "image":       {"css": "meta[property='og:image']", "attr": "content"},
+        "content":     {"css": "article"},  # para conteo de palabras básico
     }
     USE_JSON = st.checkbox("Editar selectores en JSON avanzado", value=False, key="cnt_use_json")
 
-    selectors: dict[str, str] = dict(DEFAULT_SELECTORS)
+    selectors: dict[str, dict] = dict(DEFAULT_SELECTORS)
 
     if USE_JSON:
         default_json = json.dumps(DEFAULT_SELECTORS, ensure_ascii=False, indent=2)
@@ -525,8 +528,18 @@ def params_for_content() -> dict:
         try:
             parsed = json.loads(json_txt) if json_txt.strip() else {}
             if isinstance(parsed, dict) and parsed:
-                selectors = {str(k): (v if isinstance(v, str) else ", ".join(v) if isinstance(v, list) else "")
-                             for k, v in parsed.items()}
+                # normalizamos a {'css':..., 'attr':?}
+                normd: dict[str, dict] = {}
+                for k, v in parsed.items():
+                    if isinstance(v, dict):
+                        css = v.get("css") or ""
+                        attr = v.get("attr")
+                        normd[str(k)] = {"css": css} if not attr else {"css": css, "attr": str(attr)}
+                    elif isinstance(v, str):
+                        normd[str(k)] = {"css": v}
+                    else:
+                        normd[str(k)] = {}
+                selectors = normd
             else:
                 st.warning("El JSON no es un objeto válido. Uso los selectores por defecto.")
         except Exception:
@@ -535,18 +548,17 @@ def params_for_content() -> dict:
         # Campos rápidos por cada selector frecuente
         c1, c2 = st.columns(2)
         with c1:
-            selectors["title"] = st.text_input("Selector de Título", value=selectors["title"], key="sel_title")
-            selectors["author"] = st.text_input("Selector de Autor", value=selectors["author"], key="sel_author")
-            selectors["published"] = st.text_input("Selector de Fecha Publicación", value=selectors["published"], key="sel_published")
-            selectors["section"] = st.text_input("Selector de Sección", value=selectors["section"], key="sel_section")
-            selectors["tags"] = st.text_input("Selector de Tags", value=selectors["tags"], key="sel_tags")
+            selectors["title"]["css"] = st.text_input("Selector de Título (og:title)", value=selectors["title"]["css"], key="sel_title")
+            selectors["author"]["css"] = st.text_input("Selector de Autor", value=selectors["author"]["css"], key="sel_author")
+            selectors["published"]["css"] = st.text_input("Selector de Fecha Publicación", value=selectors["published"]["css"], key="sel_published")
+            selectors["section"]["css"] = st.text_input("Selector de Sección", value=selectors["section"]["css"], key="sel_section")
+            selectors["tags"]["css"] = st.text_input("Selector de Tags", value=selectors["tags"]["css"], key="sel_tags")
         with c2:
-            selectors["subtitle"] = st.text_input("Selector de Subtítulo", value=selectors["subtitle"], key="sel_subtitle")
-            selectors["updated"] = st.text_input("Selector de Fecha Actualización", value=selectors["updated"], key="sel_updated")
-            selectors["wordcount"] = st.text_input("Selector de Wordcount (opcional)", value=selectors["wordcount"], key="sel_wordcount")
-            selectors["img_count"] = st.text_input("Selector de Imágenes (conteo)", value=selectors["img_count"], key="sel_img_count")
-            selectors["video_count"] = st.text_input("Selector de Videos (conteo)", value=selectors["video_count"], key="sel_video_count")
-            selectors["paywall"] = st.text_input("Selector de Paywall (opcional)", value=selectors["paywall"], key="sel_paywall")
+            selectors["headline"]["css"] = st.text_input("Selector de H1/Headline", value=selectors["headline"]["css"], key="sel_headline")
+            selectors["subtitle"]["css"] = st.text_input("Selector de Subtítulo", value=selectors["subtitle"]["css"], key="sel_subtitle")
+            selectors["updated"]["css"] = st.text_input("Selector de Fecha Actualización", value=selectors["updated"]["css"], key="sel_updated")
+            selectors["image"]["css"] = st.text_input("Selector de Imagen (og:image)", value=selectors["image"]["css"], key="sel_image")
+            selectors["content"]["css"] = st.text_input("Selector de Contenido (para wordcount)", value=selectors["content"]["css"], key="sel_content")
 
     st.markdown("##### Opciones de request y parseo")
     c1, c2, c3 = st.columns(3)
@@ -575,7 +587,8 @@ def params_for_content() -> dict:
     # Ensamblar
     params = {
         "lag_days": int(lag_days),
-        "tipo": tipo,  # "Search" | "Discover" | "Ambos"
+        "tipo": tipo,              # "Search" | "Discover" | "Ambos" (compat UI)
+        "source": source,          # "search" | "discover" | "both" (compat runner)
         "window": {
             "mode": "custom" if modo_periodo == "Rango personalizado" else "last",
             "start_date": start_date,
