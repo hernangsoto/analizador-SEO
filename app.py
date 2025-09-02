@@ -86,36 +86,20 @@ apply_base_style_and_logo()
 # ⬇️ Sin espacios arriba + logo que acompaña al sidebar (solo CSS)
 st.markdown("""
 <style>
-/* 0) Remover cualquier “banda” o espaciador que pueda dejar la capa de estilo base */
 #nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
   display: none !important; height:0 !important; margin:0 !important; padding:0 !important;
 }
-
-/* 1) Quitar padding/margen superior que Streamlit agrega por el header */
 div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
 main .block-container { margin-top: 0 !important; padding-top: .75rem !important; }
-
-/* 2) Asegurar el header por encima */
 header[data-testid="stHeader"] { z-index: 1500 !important; }
-
-/* 3) Mover el logo del header para que siga al sidebar (el logo lo inyecta app_config.py con ::before) */
-
-/* Sidebar ABIERTO (ajusta 288–304px si tu sidebar es distinto) */
+/* Sidebar abierto */
 :root:has([data-testid="stSidebar"][aria-expanded="true"])
-  header[data-testid="stHeader"]::before {
-  left: 350px !important;
-}
-
-/* Sidebar CERRADO */
+  header[data-testid="stHeader"]::before { left: 350px !important; }
+/* Sidebar cerrado */
 :root:has([data-testid="stSidebar"][aria-expanded="false"])
-  header[data-testid="stHeader"]::before {
-  left: 100px !important;
-}
-
-/* Fallback por si no existe el atributo en alguna versión */
-:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before {
-  left: 16px !important;
-}
+  header[data-testid="stHeader"]::before { left: 100px !important; }
+/* Fallback */
+:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before { left: 16px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -190,7 +174,6 @@ if isinstance(_action, list):
     _action = _action[0] if _action else None
 
 if _action == "change_personal":
-    # Reiniciar el login personal del Paso 0
     for k in ("oauth_oidc","_google_identity","creds_dest"):
         st.session_state.pop(k, None)
     try:
@@ -229,7 +212,6 @@ if not creds_dest:
     try:
         creds_dest = token_store.as_credentials("creds_dest")
         if creds_dest:
-            # hidratar también el session_state para el resto del flujo
             st.session_state["creds_dest"] = {
                 "token": creds_dest.token,
                 "refresh_token": getattr(creds_dest, "refresh_token", None),
@@ -252,7 +234,6 @@ if not creds_dest:
 try:
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
-    # Refrescar identidad por si llega con foto/nombre
     st.session_state["_google_identity"] = _me or st.session_state.get("_google_identity", {})
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
     st.markdown(
@@ -464,9 +445,6 @@ def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
 GSC_SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 def pick_source_oauth_forced(account_key: str) -> Credentials | None:
-    """
-    Igual a un pick_source_oauth pero fijando la cuenta (sin radios).
-    """
     st.subheader("Cuenta de Search Console (fuente de datos)")
     key = f"oauth_src_{account_key}"
     if key not in st.session_state:
@@ -582,14 +560,12 @@ else:
             "client_secret": creds_src_obj.client_secret,
             "scopes": list(getattr(creds_src_obj, "scopes", [])),
         }
-        # Guardá también la fuente por si cambiás de pestaña
         token_store.save("creds_src", st.session_state["creds_src"])
         st.session_state["src_account_label"] = sc_choice
         st.session_state["step3_done"] = True
         clear_qp(); st.rerun()
     else:
         try:
-            # Rehidratar si fuese necesario
             if not st.session_state.get("creds_src"):
                 cdict = token_store.load("creds_src")
                 if cdict:
@@ -648,9 +624,6 @@ def _device_upper(x: str | None) -> str | None:
 def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
                         country: str | None, device: str | None,
                         order_by: str, row_limit: int) -> list[dict]:
-    """
-    Devuelve rows con keys: page, clicks, impressions, ctr, position
-    """
     try:
         body = {
             "startDate": str(start),
@@ -658,7 +631,7 @@ def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
             "dimensions": ["page"],
             "rowLimit": int(row_limit),
             "startRow": 0,
-            "type": search_type,  # API moderna: "web", "discover"
+            "type": search_type,  # "web" | "discover"
             "orderBy": [{"field": order_by, "descending": True}],
         }
         filters = []
@@ -694,11 +667,10 @@ def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
         st.session_state["_rca_error"] = f"GSC query error ({search_type}): {e}"
         return []
 
-# heurística para descartar páginas no-artículo
 _DROP_PATTERNS = (
     "/player/", "/tag/", "/tags/", "/etiqueta/", "/categoria/", "/category/",
     "/author/", "/autores/", "/programas/", "/hd/", "/podcast", "/videos/",
-    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?",
+    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?"
 )
 def _is_article_url(u: str) -> bool:
     if not u: return False
@@ -706,7 +678,7 @@ def _is_article_url(u: str) -> bool:
     if u in ("https://", "http://"): return False
     if u.endswith((".jpg",".jpeg",".png",".gif",".svg",".webp",".mp4",".mp3",".m3u8",".pdf")):
         return False
-    if u.count("/") <= 3:  # home o sección raíz
+    if u.count("/") <= 3:
         return False
     for p in _DROP_PATTERNS:
         if p in u:
@@ -724,10 +696,6 @@ def _suggest_user_agent(ua: str | None) -> str:
             "Chrome/126.0.0.0 Safari/537.36")
 
 def _quick_scrape_probe(urls: list[str], selectors: dict, ua: str, timeout: int = 10, max_n: int = 10) -> pd.DataFrame:
-    """
-    Intenta extraer algunos campos básicos para ver si los selectores 'pegan'.
-    Usa requests+bs4 si existen; si no, devuelve df vacío con mensajes.
-    """
     results = []
     try:
         import requests
@@ -898,10 +866,10 @@ elif analisis == "9":
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
         # 1) Parámetros de UI
-        params_ui = params_for_content()  # dict
+        params_ui = params_for_content()  # dict con filtros/selectores
         st.subheader("Configuración del Análisis de contenido")
 
-        # Normalizar/derivar ventana temporal segura
+        # Normalizar fecha/ventana
         win = params_ui.get("window") or {}
         lag_days = int(params_ui.get("lag_days", 3))
         end_default = date.today() - timedelta(days=lag_days)
@@ -913,15 +881,15 @@ elif analisis == "9":
             end_date = end_default
             start_date = end_date - timedelta(days=days - 1)
 
-        # Origen
-        tipo = params_ui.get("tipo") or "Ambos"  # "Search" | "Discover" | "Ambos"
+        # Origen -> source para el runner
+        tipo = params_ui.get("tipo") or "Ambos"
         source_map = {"Search":"web","Discover":"discover","Ambos":"both"}
         src = source_map.get(tipo, "both")
 
         # Filtros básicos
         filtros = params_ui.get("filters") or {}
-        country = filtros.get("country")  # ISO3 o None
-        device = filtros.get("device")    # "desktop"/"mobile"/None
+        country = filtros.get("country")
+        device = filtros.get("device")
         min_clicks = int(filtros.get("min_clicks", 0))
         min_impr   = int(filtros.get("min_impressions", 0))
 
@@ -940,7 +908,6 @@ elif analisis == "9":
 
         seeds_search = []
         seeds_discover = []
-
         if src in ("web","both"):
             seeds_search = _gsc_fetch_top_urls(
                 sc_service, site_url, start_date, end_date, "web",
@@ -949,7 +916,6 @@ elif analisis == "9":
             st.write("**Search (web)**")
             st.write(f"Filas: {len(seeds_search):,}")
             st.code([r["page"] for r in seeds_search[:10]])
-
         if src in ("discover","both"):
             seeds_discover = _gsc_fetch_top_urls(
                 sc_service, site_url, start_date, end_date, "discover",
@@ -959,7 +925,6 @@ elif analisis == "9":
             st.write(f"Filas: {len(seeds_discover):,}")
             st.code([r["page"] for r in seeds_discover[:10]])
 
-        # Merge + filtros mínimos
         df_seeds = pd.DataFrame(seeds_search + seeds_discover)
         before_count = len(df_seeds)
         if before_count == 0:
@@ -971,51 +936,76 @@ elif analisis == "9":
                 df_seeds = df_seeds[df_seeds["impressions"] >= min_impr]
             st.write(f"**Semillas tras umbrales** (min_clicks={min_clicks}, min_impr={min_impr}): {len(df_seeds):,} (antes {before_count:,})")
 
-        # 3) Filtro a URLs de artículo
         urls_all = df_seeds["page"].dropna().astype(str).tolist() if not df_seeds.empty else []
         urls_filtered = _filter_article_urls(urls_all)
         st.write("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
         st.write(f"URLs candidatas (antes): {len(urls_all):,} | después del filtro: {len(urls_filtered):,}")
         st.code(urls_filtered[:10])
 
-        # Guardar para depuración
-        st.session_state["_rca_preflight_urls"] = urls_filtered[:]
+        # Limitar a max_urls por seguridad
+        if len(urls_filtered) > max_urls:
+            st.warning(f"Se recortan semillas a top {max_urls} URLs.")
+        urls_to_send = urls_filtered[:max_urls]
+        st.session_state["_rca_preflight_urls"] = urls_to_send[:]
 
-        # 4) Sugerencia de UA si está vacío
+        # Sugerir UA
         if not (req.get("user_agent") or "").strip():
             st.info("**Sugerencia de User-Agent**")
             st.code(ua)
 
-        # 5) Test rápido de scraping (opcional)
+        # 3) Test rápido de scraping (opcional)
         st.markdown("#### 🧪 Test rápido de scraping (opcional)")
         do_probe = st.checkbox("Probar selectores en una muestra (no afecta el resultado final)", value=False, key="cnt_probe_chk")
         if do_probe:
             selectors = (scrape.get("selectors") or params_ui.get("selectors") or {})
-            df_probe = _quick_scrape_probe(urls_filtered, selectors, ua, timeout=timeout, max_n=10)
+            df_probe = _quick_scrape_probe(urls_to_send, selectors, ua, timeout=timeout, max_n=10)
             st.dataframe(df_probe, use_container_width=True)
             ok_rate = float((df_probe["ok"] == True).sum()) / max(1, len(df_probe))
             if ok_rate < 0.2:
                 st.warning("Los selectores parecen no estar extrayendo datos en la mayoría de las URLs. Revisá los CSS/attr.")
 
-        # 6) Ensamblar payload final a enviar
+        # 4) Ensamblar payload final a enviar
         final_params = dict(params_ui)  # copia superficial
-        # normalizar ventana:
+        # ventana normalizada (siempre custom para que el runner no recalule)
         final_params["window"] = {
             "mode": "custom",
             "start_date": str(start_date),
             "end_date": str(end_date),
             "days": None,
         }
-        # asegurar UA
+        # source explícito
+        final_params["source"] = src
+        # asegurar bloque scrape.request.user_agent
         final_params.setdefault("scrape", {})
         final_params["scrape"].setdefault("request", {})
         final_params["scrape"]["request"]["user_agent"] = ua
+        # opcional: forzar salida RAW para inspección si venía desactivado
+        final_params.setdefault("output", {})
+        final_params["output"].setdefault("include_raw", True)
 
-        # persistir para el panel de detalle técnico
+        # Inyectar semillas por compatibilidad (distintas llaves posibles)
+        final_params["seeds"] = [{"url": u} for u in urls_to_send]
+        final_params["seed_urls"] = urls_to_send
+        final_params["pages"] = urls_to_send
+        final_params["urls"] = urls_to_send
+        final_params["input_urls"] = urls_to_send
+        final_params["force_only_these_urls"] = True
+
+        # Variables de entorno (por si el runner las usa internamente)
+        os.environ["SEO_CONTENT_SEEDS"] = json.dumps(urls_to_send, ensure_ascii=False)
+        os.environ["SEO_CONTENT_FORCE_ONLY"] = "1"
+        os.environ["SEO_CONTENT_SOURCE"] = src
+
+        # Mostrar qué se enviará
+        st.markdown("**Semillas que se enviarán al runner**")
+        st.write(f"Total: {len(urls_to_send):,}")
+        st.code(urls_to_send[:50])
+
+        # Persistir para panel técnico
         st.session_state["_rca_norm_params"] = final_params
 
-        # 7) Ejecutar
-        can_run = len(urls_filtered) > 0
+        # 5) Ejecutar
+        can_run = len(urls_to_send) > 0
         if not can_run:
             st.error("No hay URLs de artículo elegibles para enviar al runner. Ajustá la ventana/filtros.")
         if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not can_run, key="btn_content_run"):
@@ -1027,9 +1017,9 @@ elif analisis == "9":
                         st.session_state.get("dest_folder_id")
                     )
                 if not sid:
-                    st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
+                    st.error("No se generó el documento. Abrí el 'Ver detalle técnico' para revisar payload/errores.")
                     st.stop()
-                # flujo OK
+                # OK
                 st.success("¡Listo! Tu documento está creado.")
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
                 with st.expander("Compartir acceso al documento (opcional)"):
@@ -1046,15 +1036,22 @@ elif analisis == "9":
                     analysis_kind="Análisis de contenido",
                     sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
                     gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"preflight_urls={len(urls_filtered)}"
+                    notes=f"preflight_urls={len(urls_to_send)}"
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "content"
             except Exception as e:
                 st.session_state["_rca_error"] = f"Runner error: {e}"
                 st.error("Falló la ejecución del runner. Revisá el detalle técnico más abajo.")
+            finally:
+                # limpiar env vars pase lo que pase
+                for k in ("SEO_CONTENT_SEEDS","SEO_CONTENT_FORCE_ONLY","SEO_CONTENT_SOURCE"):
+                    try:
+                        os.environ.pop(k, None)
+                    except Exception:
+                        pass
 
-        # 8) Panel de detalle técnico
+        # 6) Panel de detalle técnico
         with st.expander("🧩 Ver detalle técnico"):
             st.write("**Ventana**")
             st.code({"start_date": str(start_date), "end_date": str(end_date)}, language="json")
