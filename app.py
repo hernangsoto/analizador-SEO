@@ -8,7 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 import json
 import sys
 from types import SimpleNamespace
-from datetime import date as _date, timedelta as _td
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -382,7 +382,7 @@ if analisis == "8":
         st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
     else:
         st.subheader("Subí el CSV exportado de Discover Snoop")
-        up = st.file_uploader("Archivo CSV", type=["csv"])
+        up = st.file_uploader("Archivo CSV", type=["csv"], key="ds_csv_upl")
         params_ds = params_for_discover_snoop()
 
         with st.expander("Formato esperado (campos mínimos)"):
@@ -403,7 +403,7 @@ if analisis == "8":
         if df is None:
             st.info("Cargá el CSV para habilitar la ejecución.")
         else:
-            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
+            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_run_ds"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
                     run_discover_snoop,  # función del paquete externo
@@ -636,7 +636,7 @@ if analisis == "4":
         st.warning("Este despliegue no incluye run_core_update.")
     else:
         params = params_for_core_update()
-        if st.button("🚀 Ejecutar análisis de Core Update", type="primary"):
+        if st.button("🚀 Ejecutar análisis de Core Update", type="primary", key="btn_run_core"):
             adv_payload = st.session_state.get("core_filters_payload")
             if adv_payload:
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
@@ -674,7 +674,7 @@ elif analisis == "5":
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
         params = params_for_evergreen()
-        if st.button("🌲 Ejecutar análisis Evergreen", type="primary"):
+        if st.button("🌲 Ejecutar análisis Evergreen", type="primary", key="btn_run_ev"):
             sid = run_with_indicator(
                 "Procesando Evergreen",
                 run_evergreen, sc_service, drive_service, gs_client, site_url, params,
@@ -707,7 +707,7 @@ elif analisis == "6":
         st.warning("Este despliegue no incluye run_traffic_audit.")
     else:
         params = params_for_auditoria()
-        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary"):
+        if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary", key="btn_run_aud"):
             sid = run_with_indicator(
                 "Procesando Auditoría de tráfico",
                 run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
@@ -741,271 +741,266 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        st.subheader("Configuración del Análisis de contenido")
+        params = params_for_content()  # defaults + UI del repo externo
 
-        # 1) Render del formulario
-        params = params_for_content()
+        st.subheader("Configuración adicional (Análisis de contenido)")
 
-        # 2) Resolver SIEMPRE la ventana y normalizar sinónimos
+        # --- Normalizador de selectores: acepta string/list/dict({"css","attr"})
+        def _normalize_selectors(sel_any) -> dict[str, str]:
+            out: dict[str, str] = {}
+            if not isinstance(sel_any, dict):
+                return out
+            for k, v in sel_any.items():
+                if v is None:
+                    continue
+                if isinstance(v, str):
+                    out[k] = v
+                elif isinstance(v, list):
+                    out[k] = ", ".join([str(x) for x in v if x])
+                elif isinstance(v, dict):
+                    css = v.get("css") or v.get("selector") or ""
+                    attr = v.get("attr") or v.get("attribute")
+                    if css and attr:
+                        out[k] = f"{css}::attr({attr})"
+                    elif css:
+                        out[k] = css
+                # ignora otros tipos
+            return out
+
+        # Aceptar override manual de selectores en JSON (para medios)
+        default_selectors = params.get("selectors") or {}
         try:
-            w = params.get("window") or {}
-            lag_days = int(params.get("lag_days", 0))
-            mode = (w.get("mode") or "last").lower()
-            days = int(w.get("days") or 28)
-
-            start_date = w.get("start_date")
-            end_date = w.get("end_date")
-
-            if isinstance(start_date, str):
-                start_date = pd.to_datetime(start_date).date()
-            if isinstance(end_date, str):
-                end_date = pd.to_datetime(end_date).date()
-
-            if (mode != "custom") or (not start_date or not end_date):
-                today_ok = _date.today() - _td(days=lag_days)
-                end_date = today_ok
-                start_date = end_date - _td(days=days - 1)
-
-            # Grabar resueltos y alias DENTRO de window
-            params.setdefault("window", {})
-            params["window"]["start_date"] = start_date
-            params["window"]["end_date"] = end_date
-            params["window"]["resolved_start"] = start_date
-            params["window"]["resolved_end"] = end_date
-            params["window"]["mode"] = "custom"
-            params["window"]["days"] = int((end_date - start_date).days) + 1
-            params["window"]["start"] = start_date
-            params["window"]["end"] = end_date
-            params["window"]["from"] = start_date
-            params["window"]["to"] = end_date
-
-            # Alias TOP-LEVEL (compatibilidad con runners antiguos)
-            for k, v in [
-                ("start_date", start_date), ("end_date", end_date),
-                ("start", start_date), ("end", end_date),
-                ("from", start_date), ("to", end_date),
-            ]:
-                params[k] = v
-
+            default_selectors_str = json.dumps(default_selectors, ensure_ascii=False, indent=2)
         except Exception:
-            today_ok = _date.today() - _td(days=int(params.get("lag_days", 0)))
-            start_date = today_ok - _td(days=27)
-            end_date = today_ok
-            params.setdefault("window", {})
-            params["window"]["start_date"] = start_date
-            params["window"]["end_date"] = end_date
-            params["window"]["resolved_start"] = start_date
-            params["window"]["resolved_end"] = end_date
-            params["window"]["mode"] = "custom"
-            params["window"]["days"] = 28
-            params["window"]["start"] = start_date
-            params["window"]["end"] = end_date
-            params["window"]["from"] = start_date
-            params["window"]["to"] = end_date
-            # Alias TOP-LEVEL también en fallback:
-            for k, v in [
-                ("start_date", start_date), ("end_date", end_date),
-                ("start", start_date), ("end", end_date),
-                ("from", start_date), ("to", end_date),
-            ]:
-                params[k] = v
+            default_selectors_str = "{}"
 
-        # Sinónimos source/tipo & order
-        src_label = (params.get("tipo") or params.get("source") or "Ambos")
-        src_map = {"Search":"search","Discover":"discover","Ambos":"both","Search + Discover":"both"}
-        params["source"] = src_map.get(src_label, "both")
-        params["tipo"] = {"search":"Search","discover":"Discover","both":"Ambos"}[params["source"]]
-        if "order" not in params and "order_by" in params:
-            params["order"] = params["order_by"]
+        st.caption("Pegá/edita el JSON de selectores CSS/XPath (como cadenas). También acepto objetos {css, attr} y los convierto.")
+        selectors_str = st.text_area("Selectores (JSON)", value=default_selectors_str, height=220, key="cnt_sel_json")
 
-        # Bloque GSC unificado + sinónimos de límites/umbrales
-        f = params.get("filters") or {}
-        country = f.get("country")
-        device = f.get("device")
-        params.setdefault("gsc", {})
-        params["gsc"]["country"] = country
-        params["gsc"]["device"] = device
-        params["gsc"]["min_impressions"] = f.get("min_impressions")
-        params["gsc"]["min_clicks"] = f.get("min_clicks")
-        params["gsc"]["order"] = params.get("order") or params.get("order_by") or "clicks"
-
-        params["limit"] = params.get("max_urls", 300)
-        params["top_n"] = params.get("top_n", params["limit"])
-
-        # 3) Preflight GSC (traer URLs reales y opcionalmente pasarlas como seed)
-        def _gsc_preflight(sc, site_url, start_d, end_d, kind, order="clicks", limit=100, country=None, device=None):
-            # kind: 'search' | 'discover'
-            api_type = "discover" if kind == "discover" else "web"
-            body = {
-                "startDate": str(start_d),
-                "endDate": str(end_d),
-                "dimensions": ["page"],
-                "rowLimit": int(limit),
-                "type": api_type,
-                "startRow": 0,
-            }
-            # Orden simple
-            order_map = {
-                "clicks": {"dimension": "clicks", "descending": True},
-                "impressions": {"dimension": "impressions", "descending": True},
-                "ctr": {"dimension": "ctr", "descending": True},
-                "position": {"dimension": "position", "descending": False},
-            }
-            if order in order_map:
-                body["orderBy"] = [order_map[order]]
-
-            # Filtros opcionales
-            dfg = []
-            if country:
-                dfg.append({"filters": [{"dimension": "country", "operator": "equals", "expression": country}]})
-            if device:
-                dev_map = {"desktop":"DESKTOP","mobile":"MOBILE","tablet":"TABLET"}
-                dfg.append({"filters": [{"dimension": "device", "operator": "equals", "expression": dev_map.get(str(device).lower(), str(device).upper())}]})
-            if dfg:
-                body["dimensionFilterGroups"] = dfg
-
-            try:
-                resp = sc.searchanalytics().query(siteUrl=site_url, body=body).execute()
-                rows = resp.get("rows", [])
-                pages = [r.get("keys", [""])[0] for r in rows if r.get("keys")]
-                return {"ok": True, "count": len(rows), "sample": pages[:10], "urls": pages, "body": body}
-            except Exception as e:
-                return {"ok": False, "error": str(e), "body": body, "urls": []}
-
-        with st.expander("🔎 Preflight de datos GSC (previo a ejecutar)"):
-            col1, col2 = st.columns(2)
-            # Search
-            with col1:
-                pr_search = _gsc_preflight(
-                    sc_service, site_url,
-                    params["start_date"], params["end_date"],
-                    "search", order=params["gsc"]["order"], limit=min(500, params["limit"]),
-                    country=country, device=device
-                )
-                st.markdown("**Search (web)**")
-                if pr_search["ok"]:
-                    st.write(f"Filas: {pr_search['count']}")
-                    if pr_search["count"] == 0:
-                        st.info("Search devolvió 0 filas para este rango/filtros.")
-                    else:
-                        st.caption("Muestra de páginas:")
-                        st.write(pr_search["sample"])
-                else:
-                    st.warning("Error al consultar Search.")
-                    st.code(pr_search["error"])
-            # Discover
-            with col2:
-                pr_disc = _gsc_preflight(
-                    sc_service, site_url,
-                    params["start_date"], params["end_date"],
-                    "discover", order=params["gsc"]["order"], limit=min(500, params["limit"]),
-                    country=country, device=device
-                )
-                st.markdown("**Discover**")
-                if pr_disc["ok"]:
-                    st.write(f"Filas: {pr_disc['count']}")
-                    if pr_disc["count"] == 0:
-                        st.info("Discover devolvió 0 filas para este rango/filtros.")
-                    else:
-                        st.caption("Muestra de páginas:")
-                        st.write(pr_disc["sample"])
-                else:
-                    st.warning("Error al consultar Discover.")
-                    st.code(pr_disc["error"])
-
-            # Armar seed según la fuente elegida
-            urls_seed = []
-            if params["source"] in ("search", "both") and pr_search.get("urls"):
-                urls_seed.extend(pr_search["urls"])
-            if params["source"] in ("discover", "both") and pr_disc.get("urls"):
-                urls_seed.extend(pr_disc["urls"])
-            # Dedup preservando orden
-            seen = set(); urls_seed = [u for u in urls_seed if (u not in seen and not seen.add(u))]
-            st.write(f"URLs candidatas (sin duplicar): {len(urls_seed)}")
-            st.session_state["content_seed_urls"] = urls_seed
-
-            use_seed = st.checkbox("Usar estas URLs como seed para el runner", value=True, key="content_use_seed")
-            if use_seed:
-                params["seed_urls"] = urls_seed[: params["limit"]]
-
-        # 4) Previa: mostrar SIEMPRE el payload que se enviará
-        with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
-            st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
-
-        # 5) Validaciones para habilitar botón
-        selectors = params.get("selectors") or params.get("scrape", {}).get("selectors") or {}
-        selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
-        can_run = selectors_ok  # fechas/seed resueltas arriba
+        selectors_ok = False
+        selectors = {}
+        try:
+            parsed = json.loads(selectors_str) if selectors_str.strip() else {}
+            if isinstance(parsed, dict) and parsed:
+                selectors = _normalize_selectors(parsed)
+                selectors_ok = len(selectors) > 0
+        except Exception:
+            selectors_ok = False
 
         if not selectors_ok:
-            st.warning("Definí **selectores válidos** en la sección de selectores.")
+            st.warning("Definí un JSON de selectores válido para poder ejecutar el análisis.", icon="⚠️")
 
-        if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not can_run, key="btn_run_content"):
-            st.session_state["content_last_params"] = params
+        # Mapas de fuente
+        src_map = {"Search": "search", "Discover": "discover", "Search + Discover": "both"}
+        tipo_display = {"Search": "Search", "Discover": "Discover", "Ambos": "Search + Discover"} \
+            .get(params.get("tipo", "Ambos"), "Search + Discover")
+        fuente = st.radio("Fuente de tráfico", list(src_map.keys()),
+                          index=list(src_map.keys()).index(tipo_display),
+                          key="cnt_src_choice")
+
+        # --- Pre-cálculo de fechas (evita 'none a none')
+        win = params.get("window") or {}
+        _mode = win.get("mode") or "last"
+        _days = win.get("days")
+        _start, _end = win.get("start_date"), win.get("end_date")
+        if _mode == "last" and _days:
+            end_default = date.today()
+            try:
+                end_default = date.fromisoformat(str(win.get("end_date"))) if win.get("end_date") else end_default
+            except Exception:
+                pass
+            start_date = end_default
+            try:
+                start_date = date.fromisoformat(str(win.get("start_date"))) if win.get("start_date") else (end_default)
+            except Exception:
+                start_date = end_default
+        else:
+            start_date = win.get("start_date") or date.today()
+            end_default = win.get("end_date") or date.today()
+
+        # Normalize a ISO strings (por si vienen como datetime.date)
+        def _date_to_iso(d):
+            try:
+                return pd.Timestamp(d).date().isoformat()
+            except Exception:
+                return str(d)
+
+        # --- Preflight GSC: muestra top páginas Search/Discover y seeds filtradas ---
+        with st.expander("🔎 Preflight de datos GSC (previo a ejecutar)", expanded=False):
+            def _gsc_query_pages(service, site, start_iso, end_iso, search_type="web",
+                                 country=None, device=None, row_limit=50):
+                body = {
+                    "startDate": start_iso,
+                    "endDate": end_iso,
+                    "dimensions": ["page"],
+                    "rowLimit": int(row_limit),
+                    "type": search_type,
+                    "startRow": 0,
+                    "orderBy": [{"dimension": "clicks", "descending": True}],
+                }
+                # Filtros país/dispositivo como dimension filters (no agregamos dimensiones nuevas para no romper filas)
+                filters = []
+                if country:
+                    filters.append({"dimension": "country", "operator": "equals", "expression": country})
+                if device:
+                    dev_map = {"desktop": "DESKTOP", "mobile": "MOBILE", "tablet": "TABLET"}
+                    dev = dev_map.get(str(device).lower())
+                    if dev:
+                        filters.append({"dimension": "device", "operator": "equals", "expression": dev})
+                if filters:
+                    body["dimensionFilterGroups"] = [{"filters": filters}]
+                try:
+                    resp = service.searchanalytics().query(siteUrl=site, body=body).execute()
+                    rows = resp.get("rows", []) or []
+                    out = []
+                    for r in rows:
+                        keys = r.get("keys", []) or []
+                        page = keys[0] if keys else ""
+                        out.append({"page": page, "clicks": r.get("clicks", 0), "impressions": r.get("impressions", 0)})
+                    return out
+                except Exception as e:
+                    return [{"error": str(e)}]
+
+            # Fechas robustas desde params (ya normalizadas en params_for_content)
+            pwin = params.get("window") or {}
+            if (pwin.get("mode") == "last") and pwin.get("days"):
+                end_iso = _date_to_iso(pwin.get("end_date") or date.today())
+                # calcular start si falta
+                if pwin.get("start_date"):
+                    start_iso = _date_to_iso(pwin.get("start_date"))
+                else:
+                    # usar days para estimar (inclusive)
+                    end_dt = pd.Timestamp(end_iso).date()
+                    start_iso = (end_dt - pd.Timedelta(days=int(pwin["days"])-1)).isoformat()
+            else:
+                start_iso = _date_to_iso(pwin.get("start_date") or date.today())
+                end_iso = _date_to_iso(pwin.get("end_date") or date.today())
+
+            country = (params.get("filters") or {}).get("country")
+            device = (params.get("filters") or {}).get("device")
+
+            fuente_val = src_map[fuente]
+            want_search = fuente_val in ("search", "both")
+            want_discover = fuente_val in ("discover", "both")
+
+            if want_search:
+                st.markdown("**Search (web)**")
+                r_web = _gsc_query_pages(sc_service, site_url, start_iso, end_iso, "web", country, device, row_limit=50)
+                if r_web and "error" in r_web[0]:
+                    st.error(f"Error Search preflight: {r_web[0]['error']}")
+                else:
+                    st.caption(f"Filas: {len(r_web)}")
+                    st.json([row["page"] for row in r_web[:10]])
+
+            if want_discover:
+                st.markdown("**Discover**")
+                r_disc = _gsc_query_pages(sc_service, site_url, start_iso, end_iso, "discover", country, device, row_limit=50)
+                if r_disc and "error" in r_disc[0]:
+                    st.error(f"Error Discover preflight: {r_disc[0]['error']}")
+                else:
+                    st.caption(f"Filas: {len(r_disc)}")
+                    st.json([row["page"] for row in r_disc[:10]])
+
+            # --- Filtrado de seeds a artículos
+            st.markdown("**Filtro de seeds a artículos (descarta players/tags/home/etc.)**")
+            EXCLUDE_PATTERNS = ("/player", "/player-", "/tag/", "/hd/", "/wp-admin", "/wp-json", "/amp/")
+            INCLUDE_HINTS     = ("/sociedad/", "/deportes/", "/espectaculos/", "/clima/", "/economia/", "/videos/")
+
+            def _seems_article(u: str) -> bool:
+                u = (u or "").lower()
+                if any(x in u for x in EXCLUDE_PATTERNS):
+                    return False
+                deep_enough = u.count("/") >= 5  # home/índices suelen ser menos profundos
+                return any(x in u for x in INCLUDE_HINTS) or deep_enough
+
+            seeds = []
+            if want_search and isinstance(r_web, list):
+                seeds += [r["page"] for r in r_web if "page" in r]
+            if want_discover and isinstance(r_disc, list):
+                seeds += [r["page"] for r in r_disc if "page" in r]
+            # dedup conservando orden
+            seen = set(); seeds = [u for u in seeds if (u not in seen and not seen.add(u))]
+            seeds_filtered = [u for u in seeds if _seems_article(u)]
+
+            st.write(f"URLs candidatas (antes): {len(seeds)} | **después del filtro**: {len(seeds_filtered)}")
+            st.json(seeds_filtered[:10])
+
+            # Guardamos por si hace falta en la ejecución
+            st.session_state["cnt_preflight_seeds"] = seeds
+            st.session_state["cnt_preflight_seeds_filtered"] = seeds_filtered
+
+        # Actualizar params finales coherentes con el runner
+        params["tipo"] = {"Search": "Search", "Discover": "Discover", "Search + Discover": "Ambos"}[fuente]
+        params["source"] = src_map[fuente]
+        if selectors_ok:
+            params["selectors"] = selectors
+            if "scrape" in params and isinstance(params["scrape"], dict):
+                params["scrape"]["selectors"] = selectors
+
+        # Si hay seeds filtradas del preflight, las usamos como override (respetando el límite)
+        limit_n = int(params.get("max_urls") or params.get("limit") or 300)
+        seeds_override = (st.session_state.get("cnt_preflight_seeds_filtered") or [])[:limit_n]
+        use_override = st.checkbox("Forzar a usar sólo las seeds filtradas del preflight", value=True, key="cnt_use_preflight_seeds")
+        if use_override and seeds_override:
+            params["seed_urls"] = seeds_override
+
+        # Recomendación de UA
+        st.markdown("**Sugerencia de User-Agent**")
+        st.code("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
+        # Forzar UA si está vacío
+        try:
+            req = (params.get("scrape") or {}).get("request") or {}
+            if req.get("user_agent") in (None, "", " "):
+                req["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+                params.setdefault("scrape", {})["request"] = req
+        except Exception:
+            pass
+
+        # Botón de ejecución dentro del branch de contenido
+        if st.button("📰 Ejecutar Análisis de contenido", type="primary", key="btn_run_content"):
+            # Guardar params normalizados para debug
+            st.session_state["_rca_norm_params"] = params
             try:
                 with st.spinner("Procesando Análisis de contenido..."):
                     sid = run_content_analysis(
                         sc_service, drive_service, gs_client, site_url,
-                        params,  # usar EXACTAMENTE lo que se acaba de configurar
+                        params,  # dict de params ya armado/normalizado
                         st.session_state.get("dest_folder_id")
                     )
             except Exception as e:
                 sid = None
-                st.session_state["content_last_error"] = str(e)
+                st.session_state["_rca_error"] = f"{type(e).__name__}: {e}"
 
             if not sid:
                 st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
                 with st.expander("Ver detalle técnico"):
-                    err = (
-                        st.session_state.get("_rca_error")
-                        or st.session_state.get("content_last_error")
-                        or "(sin mensaje)"
-                    )
+                    err = st.session_state.get("_rca_error", "(sin mensaje)")
                     st.write(err)
-                    norm_params = st.session_state.get("_rca_norm_params") or st.session_state.get("content_last_params") or params
-                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2, default=str))
-            else:
-                # Renombrar el archivo con fechas resueltas para evitar "none a none"
-                from urllib.parse import urlparse as _urlparse
-                host = _urlparse(site_url).netloc or site_url
-                new_name = f"Análisis de contenido — {host} — {params['start_date']} a {params['end_date']}"
-                try:
-                    drive_service.files().update(fileId=sid, body={"name": new_name}).execute()
-                except Exception:
-                    pass
+                    norm_params = st.session_state.get("_rca_norm_params", {})
+                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2))
+                st.stop()
 
-                # Prefijo con medio si corresponde
-                try:
-                    maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-                except Exception:
-                    pass
-
-                st.success("¡Listo! Tu documento está creado.")
-                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-
-                # Mostrar SIEMPRE el payload utilizado (exitoso)
-                with st.expander("🧾 Ver payload utilizado (siempre)"):
-                    used_params = st.session_state.get("_rca_norm_params") or st.session_state.get("content_last_params") or params
-                    st.code(json.dumps(used_params, ensure_ascii=False, indent=2, default=str))
-
-                with st.expander("Compartir acceso al documento (opcional)"):
-                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=( _me or {}).get("emailAddress") or "",
-                    event="analysis", site_url=site_url,
-                    analysis_kind="Análisis de contenido",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account=st.session_state.get("src_account_label") or "",
-                    notes="ok"
-                )
-                st.session_state["last_file_id"] = sid
-                st.session_state["last_file_kind"] = "content"
+            # flujo OK
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+            activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis", site_url=site_url,
+                analysis_kind="Análisis de contenido",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes="ok"
+            )
+            st.session_state["last_file_id"] = sid
+            st.session_state["last_file_kind"] = "content"
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
