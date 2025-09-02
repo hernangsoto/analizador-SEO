@@ -745,22 +745,67 @@ elif analisis == "9":
         # Render del formulario (SOLO UNA VEZ)
         params = params_for_content()
 
+        # --- Resolver SIEMPRE la ventana (aunque el modo sea 'last') ---
+        from datetime import date as _date, timedelta as _td
+        try:
+            w = params.get("window") or {}
+            lag_days = int(params.get("lag_days", 0))
+            mode = (w.get("mode") or "last").lower()
+            days = int(w.get("days") or 28)
+
+            start_date = w.get("start_date")
+            end_date = w.get("end_date")
+
+            # Normalizar si vienen como string (del cache/previa)
+            if isinstance(start_date, str):
+                start_date = pd.to_datetime(start_date).date()
+            if isinstance(end_date, str):
+                end_date = pd.to_datetime(end_date).date()
+
+            # Si no hay fechas válidas, resolver por 'last'
+            if (mode != "custom") or (not start_date or not end_date):
+                today_ok = _date.today() - _td(days=lag_days)
+                end_date = today_ok
+                start_date = end_date - _td(days=days - 1)
+
+            # Volcar resueltos + sinónimos
+            params.setdefault("window", {})
+            params["window"]["start_date"] = start_date
+            params["window"]["end_date"] = end_date
+            params["window"]["resolved_start"] = start_date
+            params["window"]["resolved_end"] = end_date
+            params["window"]["mode"] = "custom"
+            params["window"]["days"] = int((end_date - start_date).days) + 1
+            params["window"]["start"] = start_date
+            params["window"]["end"] = end_date
+            params["window"]["from"] = start_date
+            params["window"]["to"] = end_date
+        except Exception:
+            # Fallback súper defensivo: 28 días hasta 'hoy - lag'
+            today_ok = _date.today() - _td(days=int(params.get("lag_days", 0)))
+            start_date = today_ok - _td(days=27)
+            end_date = today_ok
+            params.setdefault("window", {})
+            params["window"]["start_date"] = start_date
+            params["window"]["end_date"] = end_date
+            params["window"]["resolved_start"] = start_date
+            params["window"]["resolved_end"] = end_date
+            params["window"]["mode"] = "custom"
+            params["window"]["days"] = 28
+            params["window"]["start"] = start_date
+            params["window"]["end"] = end_date
+            params["window"]["from"] = start_date
+            params["window"]["to"] = end_date
+
         # Validaciones para habilitar botón
-        w = params.get("window") or {}
-        mode = (w.get("mode") or "").lower()
-        start_date = w.get("start_date")
-        end_date = w.get("end_date")
         selectors = params.get("selectors") or params.get("scrape", {}).get("selectors") or {}
         selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
-        missing_dates = (mode == "custom") and (not start_date or not end_date)
-        can_run = selectors_ok and (not missing_dates)
+        can_run = selectors_ok  # fechas ya resueltas arriba
 
         # Previa: mostrar SIEMPRE el payload que se enviará
         with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
             st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
 
-        if missing_dates:
-            st.warning("Elegiste **Rango personalizado** pero falta fecha de inicio y/o fin.")
         if not selectors_ok:
             st.warning("Definí **selectores válidos** en la sección de selectores.")
 
@@ -789,6 +834,21 @@ elif analisis == "9":
                     norm_params = st.session_state.get("_rca_norm_params") or st.session_state.get("content_last_params") or params
                     st.code(json.dumps(norm_params, ensure_ascii=False, indent=2, default=str))
             else:
+                # Renombrar el archivo con fechas resueltas para evitar "none a none"
+                from urllib.parse import urlparse as _urlparse
+                host = _urlparse(site_url).netloc or site_url
+                new_name = f"Análisis de contenido — {host} — {params['window']['start_date']} a {params['window']['end_date']}"
+                try:
+                    drive_service.files().update(fileId=sid, body={"name": new_name}).execute()
+                except Exception:
+                    pass
+
+                # Prefijo con medio si corresponde (consistencia con otros análisis)
+                try:
+                    maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                except Exception:
+                    pass
+
                 st.success("¡Listo! Tu documento está creado.")
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
