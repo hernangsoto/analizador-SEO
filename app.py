@@ -8,6 +8,7 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 import json
 import sys
 from types import SimpleNamespace
+from datetime import date as _date, timedelta as _td
 
 import pandas as pd
 import streamlit as st
@@ -742,11 +743,10 @@ elif analisis == "9":
     else:
         st.subheader("Configuración del Análisis de contenido")
 
-        # Render del formulario (SOLO UNA VEZ)
+        # 1) Render del formulario
         params = params_for_content()
 
-        # --- Resolver SIEMPRE la ventana (aunque el modo sea 'last') ---
-        from datetime import date as _date, timedelta as _td
+        # 2) Resolver SIEMPRE la ventana y normalizar sinónimos
         try:
             w = params.get("window") or {}
             lag_days = int(params.get("lag_days", 0))
@@ -756,19 +756,17 @@ elif analisis == "9":
             start_date = w.get("start_date")
             end_date = w.get("end_date")
 
-            # Normalizar si vienen como string (del cache/previa)
             if isinstance(start_date, str):
                 start_date = pd.to_datetime(start_date).date()
             if isinstance(end_date, str):
                 end_date = pd.to_datetime(end_date).date()
 
-            # Si no hay fechas válidas, resolver por 'last'
             if (mode != "custom") or (not start_date or not end_date):
                 today_ok = _date.today() - _td(days=lag_days)
                 end_date = today_ok
                 start_date = end_date - _td(days=days - 1)
 
-            # Volcar resueltos + sinónimos
+            # Grabar resueltos y alias
             params.setdefault("window", {})
             params["window"]["start_date"] = start_date
             params["window"]["end_date"] = end_date
@@ -781,7 +779,6 @@ elif analisis == "9":
             params["window"]["from"] = start_date
             params["window"]["to"] = end_date
         except Exception:
-            # Fallback súper defensivo: 28 días hasta 'hoy - lag'
             today_ok = _date.today() - _td(days=int(params.get("lag_days", 0)))
             start_date = today_ok - _td(days=27)
             end_date = today_ok
@@ -797,14 +794,93 @@ elif analisis == "9":
             params["window"]["from"] = start_date
             params["window"]["to"] = end_date
 
-        # Validaciones para habilitar botón
+        # Sinónimos source/tipo & order
+        src_label = (params.get("tipo") or params.get("source") or "Ambos")
+        src_map = {"Search":"search","Discover":"discover","Ambos":"both","Search + Discover":"both"}
+        params["source"] = src_map.get(src_label, "both")
+        params["tipo"] = {"search":"Search","discover":"Discover","both":"Ambos"}[params["source"]]
+        if "order" not in params and "order_by" in params:
+            params["order"] = params["order_by"]
+
+        # 3) Preflight GSC (para diagnosticar por qué sale vacío)
+        def _gsc_preflight(sc, site_url, start_d, end_d, kind, limit=20, country=None, device=None):
+            # kind: 'search' | 'discover'
+            api_type = "discover" if kind == "discover" else "web"
+            body = {
+                "startDate": str(start_d),
+                "endDate": str(end_d),
+                "dimensions": ["page"],
+                "rowLimit": int(limit),
+                "type": api_type
+            }
+            # Filtros opcionales simples (defensivos)
+            if country:
+                try:
+                    body.setdefault("dimensionFilterGroups", []).append({
+                        "filters": [{
+                            "dimension": "country", "operator": "equals", "expression": country
+                        }]
+                    })
+                except Exception:
+                    pass
+            if device:
+                try:
+                    dev_map = {"desktop":"DESKTOP","mobile":"MOBILE","tablet":"TABLET"}
+                    body.setdefault("dimensionFilterGroups", []).append({
+                        "filters": [{
+                            "dimension": "device", "operator": "equals", "expression": dev_map.get(device.lower(), device.upper())
+                        }]
+                    })
+                except Exception:
+                    pass
+            try:
+                resp = sc.searchanalytics().query(siteUrl=site_url, body=body).execute()
+                rows = resp.get("rows", [])
+                pages = [r.get("keys", [""])[0] for r in rows if r.get("keys")]
+                return {"ok": True, "count": len(rows), "sample": pages[:10], "body": body}
+            except Exception as e:
+                return {"ok": False, "error": str(e), "body": body}
+
+        country = (params.get("filters") or {}).get("country")
+        device = (params.get("filters") or {}).get("device")
+
+        with st.expander("🔎 Preflight de datos GSC (previo a ejecutar)"):
+            col1, col2 = st.columns(2)
+            with col1:
+                pr_search = _gsc_preflight(sc_service, site_url, params["window"]["start_date"], params["window"]["end_date"], "search", limit=20, country=country, device=device)
+                st.markdown("**Search (web)**")
+                if pr_search["ok"]:
+                    st.write(f"Filas: {pr_search['count']}")
+                    if pr_search["count"] == 0:
+                        st.info("Search devolvió 0 filas para este rango/filtros.")
+                    else:
+                        st.caption("Muestra de páginas:")
+                        st.write(pr_search["sample"])
+                else:
+                    st.warning("Error al consultar Search.")
+                    st.code(pr_search["error"])
+            with col2:
+                pr_disc = _gsc_preflight(sc_service, site_url, params["window"]["start_date"], params["window"]["end_date"], "discover", limit=20, country=country, device=device)
+                st.markdown("**Discover**")
+                if pr_disc["ok"]:
+                    st.write(f"Filas: {pr_disc['count']}")
+                    if pr_disc["count"] == 0:
+                        st.info("Discover devolvió 0 filas para este rango/filtros.")
+                    else:
+                        st.caption("Muestra de páginas:")
+                        st.write(pr_disc["sample"])
+                else:
+                    st.warning("Error al consultar Discover.")
+                    st.code(pr_disc["error"])
+
+        # 4) Previa: mostrar SIEMPRE el payload que se enviará
+        with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
+            st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
+
+        # 5) Validaciones para habilitar botón
         selectors = params.get("selectors") or params.get("scrape", {}).get("selectors") or {}
         selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
         can_run = selectors_ok  # fechas ya resueltas arriba
-
-        # Previa: mostrar SIEMPRE el payload que se enviará
-        with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
-            st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
 
         if not selectors_ok:
             st.warning("Definí **selectores válidos** en la sección de selectores.")
@@ -843,7 +919,7 @@ elif analisis == "9":
                 except Exception:
                     pass
 
-                # Prefijo con medio si corresponde (consistencia con otros análisis)
+                # Prefijo con medio si corresponde
                 try:
                     maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
                 except Exception:
