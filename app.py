@@ -346,7 +346,7 @@ if analisis == "7":
                     sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
                 activity_log_append(
                     drive_service, gs_client,
-                    user_email=(_me or {}).get("emailAddress") or "",
+                    user_email=( _me or {}).get("emailAddress") or "",
                     event="analysis", site_url="",
                     analysis_kind="Nombres (KG+Wikipedia)",
                     sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
@@ -407,7 +407,7 @@ if analisis == "8":
                     sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
                 activity_log_append(
                     drive_service, gs_client,
-                    user_email=(_me or {}).get("emailAddress") or "",
+                    user_email=( _me or {}).get("emailAddress") or "",
                     event="analysis", site_url="",
                     analysis_kind="Discover Snoop",
                     sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
@@ -711,17 +711,24 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
     Extrae campos en función de 'wants' (dict de booleans) y 'xpaths' (opcional).
     Campos soportados:
       h1, title, meta_description, og_title, og_description, canonical, published_time, lang,
-      first_paragraph, h2_list, h2_count, h3_list, h3_count, bold_count, link_count, tags_list
-    *IMPORTANTE*: h2/h3/bold/link se buscan SOLO dentro del contenedor del artículo si se provee
+      first_paragraph,
+      h2_list, h2_count, h3_list, h3_count,
+      bold_count, bold_list,
+      link_count, link_anchor_texts,
+      related_links_count, related_link_anchors,
+      tags_list
+    *IMPORTANTE*: h2/h3/bold/link(s) se buscan SOLO dentro del contenedor del artículo si se provee
     `xpaths['article']`. Si no se provee, se usa heurística (//article | //main).
     """
-    # Defaults
     data = {
         "h1": "", "title": "", "meta_description": "", "og_title": "", "og_description": "",
         "canonical": "", "published_time": "", "lang": "",
         "first_paragraph": "",
         "h2_list": "", "h2_count": 0, "h3_list": "", "h3_count": 0,
-        "bold_count": 0, "link_count": 0, "tags_list": ""
+        "bold_count": 0, "bold_list": "",
+        "link_count": 0, "link_anchor_texts": "",
+        "related_links_count": 0, "related_link_anchors": "",
+        "tags_list": ""
     }
 
     # Intentar lxml para XPath
@@ -755,10 +762,10 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
             if el: return (el.get("content") or "").strip()
         return ""
 
-    def _xpath_text_list(_doc, xp: str) -> list[str]:
-        if not _doc or not xp: return []
+    def _xpath_text_list(_doc_or_node, xp: str) -> list[str]:
+        if not _doc_or_node or not xp: return []
         try:
-            nodes = _doc.xpath(xp)
+            nodes = _doc_or_node.xpath(xp)
             out = []
             for n in nodes:
                 if isinstance(n, str):
@@ -773,7 +780,7 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
         except Exception:
             return []
 
-    # Determinar contenedor del artículo (scope) para h2/h3/bold/links (y opcional primer párrafo)
+    # Determinar contenedor del artículo (scope) para h2/h3/bold/links (y primer párrafo)
     lxml_scope_nodes = []
     soup_scope = None
     xp_article = (xpaths.get("article") or "").strip()
@@ -783,7 +790,6 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
                 nodes = doc.xpath(xp_article)
                 lxml_scope_nodes = [n for n in nodes if hasattr(n, "xpath")]
             if not lxml_scope_nodes:
-                # heurística
                 lxml_scope_nodes = [n for n in doc.xpath("//article | //main") if hasattr(n, "xpath")]
         except Exception:
             lxml_scope_nodes = []
@@ -877,7 +883,6 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
             lst = _xpath_text_list(doc, xp_first)
             text = next((t for t in lst if t.strip()), "")
         if not text:
-            # si hay scope, usar scope
             if have_lxml and lxml_scope_nodes:
                 for node in lxml_scope_nodes:
                     try:
@@ -895,10 +900,10 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
         data["first_paragraph"] = text
 
     # Helper para juntar textos dentro del scope lxml
-    def _collect_scope_texts(xpath_rel: str) -> list[str]:
+    def _collect_scope_texts(nodeset, xpath_rel: str) -> list[str]:
         vals: list[str] = []
-        if have_lxml and lxml_scope_nodes:
-            for node in lxml_scope_nodes:
+        if nodeset:
+            for node in nodeset:
                 try:
                     parts = node.xpath(xpath_rel)
                 except Exception:
@@ -912,98 +917,140 @@ def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " |
                         txt = str(p).strip()
                     if txt:
                         vals.append(txt)
-        elif soup_scope:
-            try:
-                # convertir búsqueda simple de etiquetas (h2/h3) con soup
-                tag = None
-                if "h2" in xpath_rel.lower(): tag = "h2"
-                if "h3" in xpath_rel.lower(): tag = "h3"
-                if tag:
-                    vals = [el.get_text(strip=True) for el in soup_scope.find_all(tag)]
-            except Exception:
-                pass
         return vals
 
-    # H2 (lista y/o cantidad) — SOLO dentro del artículo
+    # H2
     if wants.get("h2_list") or wants.get("h2_count"):
         xp_h2 = (xpaths.get("h2") or "").strip()
         h2s: list[str] = []
         if xp_h2 and have_lxml:
-            # xp_h2 puede ser absoluto: lo aplicamos sobre doc pero filtramos a los que estén dentro del scope si es posible
-            # Para simplificar, si hay scope usamos relativo
-            if lxml_scope_nodes:
-                for node in lxml_scope_nodes:
-                    h2s += _xpath_text_list(node, xp_h2 if xp_h2.startswith(".") else ".//h2")
+            if lxml_scope_nodes and (xp_h2.startswith(".") or not xp_h2.startswith("/")):
+                h2s = _collect_scope_texts(lxml_scope_nodes, xp_h2 if xp_h2.startswith(".") else ".//" + xp_h2.strip("./"))
             else:
                 h2s = _xpath_text_list(doc, xp_h2)
-        else:
-            # usar scope directo
-            h2s = _collect_scope_texts(".//h2")
+        elif have_lxml and lxml_scope_nodes:
+            h2s = _collect_scope_texts(lxml_scope_nodes, ".//h2")
+        elif soup_scope:
+            h2s = [el.get_text(strip=True) for el in soup_scope.find_all("h2")]
         h2s = [t for t in (h2s or []) if t]
         if wants.get("h2_list"):  data["h2_list"]  = (joiner.join(h2s)) if h2s else ""
         if wants.get("h2_count"): data["h2_count"] = len(h2s)
 
-    # H3 — SOLO dentro del artículo
+    # H3
     if wants.get("h3_list") or wants.get("h3_count"):
         xp_h3 = (xpaths.get("h3") or "").strip()
         h3s: list[str] = []
         if xp_h3 and have_lxml:
-            if lxml_scope_nodes:
-                for node in lxml_scope_nodes:
-                    h3s += _xpath_text_list(node, xp_h3 if xp_h3.startswith(".") else ".//h3")
+            if lxml_scope_nodes and (xp_h3.startswith(".") or not xp_h3.startswith("/")):
+                h3s = _collect_scope_texts(lxml_scope_nodes, xp_h3 if xp_h3.startswith(".") else ".//" + xp_h3.strip("./"))
             else:
                 h3s = _xpath_text_list(doc, xp_h3)
-        else:
-            h3s = _collect_scope_texts(".//h3")
+        elif have_lxml and lxml_scope_nodes:
+            h3s = _collect_scope_texts(lxml_scope_nodes, ".//h3")
+        elif soup_scope:
+            h3s = [el.get_text(strip=True) for el in soup_scope.find_all("h3")]
         h3s = [t for t in (h3s or []) if t]
         if wants.get("h3_list"):  data["h3_list"]  = (joiner.join(h3s)) if h3s else ""
         if wants.get("h3_count"): data["h3_count"] = len(h3s)
 
-    # Negritas — SOLO dentro del artículo
-    if wants.get("bold_count"):
+    # Negritas — count + lista (SOLO dentro del artículo)
+    if wants.get("bold_count") or wants.get("bold_list"):
         cnt = 0
+        blist: list[str] = []
         if have_lxml and lxml_scope_nodes:
             for node in lxml_scope_nodes:
                 try:
-                    cnt += len(node.xpath(".//*[self::b or self::strong]"))
+                    bs = node.xpath(".//*[self::b or self::strong]")
+                    cnt += len(bs)
+                    if wants.get("bold_list"):
+                        for b in bs:
+                            try:
+                                t = b.text_content().strip()
+                                if t: blist.append(t)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         elif soup_scope:
             try:
-                cnt = len(soup_scope.select("b, strong"))
+                bs = soup_scope.select("b, strong")
+                cnt = len(bs)
+                if wants.get("bold_list"):
+                    blist = [el.get_text(strip=True) for el in bs if el.get_text(strip=True)]
             except Exception:
                 cnt = 0
         data["bold_count"] = int(cnt or 0)
+        if wants.get("bold_list"):
+            data["bold_list"] = joiner.join([t for t in blist if t])
 
-    # Links — SOLO dentro del artículo
-    if wants.get("link_count"):
+    # Links — count + anchors (SOLO dentro del artículo)
+    if wants.get("link_count") or wants.get("link_anchor_texts"):
         cnt = 0
+        anchors: list[str] = []
         if have_lxml and lxml_scope_nodes:
             for node in lxml_scope_nodes:
                 try:
-                    cnt += len(node.xpath(".//a[@href]"))
+                    alist = node.xpath(".//a[@href]")
+                    cnt += len(alist)
+                    if wants.get("link_anchor_texts"):
+                        for a in alist:
+                            try:
+                                t = a.text_content().strip()
+                                if t: anchors.append(t)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         elif soup_scope:
             try:
-                cnt = len(soup_scope.find_all("a", href=True))
+                alist = soup_scope.find_all("a", href=True)
+                cnt = len(alist)
+                if wants.get("link_anchor_texts"):
+                    anchors = [a.get_text(strip=True) for a in alist if a.get_text(strip=True)]
             except Exception:
                 cnt = 0
         data["link_count"] = int(cnt or 0)
+        if wants.get("link_anchor_texts"):
+            data["link_anchor_texts"] = joiner.join([t for t in anchors if t])
 
-    # Tags (lista) — fuera o dentro, según XPath; fallback a metas article:tag
+    # Caja de noticias relacionadas (xpath al contenedor) → count + anchors
+    if wants.get("related_links_count") or wants.get("related_link_anchors"):
+        xp_rel = (xpaths.get("related_box") or "").strip()
+        rel_cnt = 0
+        rel_anchors: list[str] = []
+        if xp_rel and have_lxml:
+            try:
+                boxes = doc.xpath(xp_rel)
+            except Exception:
+                boxes = []
+            for bx in boxes:
+                try:
+                    alist = bx.xpath(".//a[@href]")
+                except Exception:
+                    alist = []
+                rel_cnt += len(alist)
+                if wants.get("related_link_anchors"):
+                    for a in alist:
+                        try:
+                            t = a.text_content().strip()
+                            if t: rel_anchors.append(t)
+                        except Exception:
+                            pass
+        data["related_links_count"] = int(rel_cnt or 0)
+        if wants.get("related_link_anchors"):
+            data["related_link_anchors"] = joiner.join([t for t in rel_anchors if t])
+
+    # Tags (lista)
     if wants.get("tags_list"):
         xp_tags = (xpaths.get("tags") or "").strip()
         tags = []
         if xp_tags and have_lxml:
-            # si hay scope y XPath es relativo, aplicarlo al scope; si es absoluto, al doc
             if lxml_scope_nodes and (xp_tags.startswith(".") or not xp_tags.startswith("/")):
                 for node in lxml_scope_nodes:
                     tags += _xpath_text_list(node, xp_tags if xp_tags.startswith(".") else ".//" + xp_tags.strip("./"))
             else:
                 tags = _xpath_text_list(doc, xp_tags)
         else:
-            # fallback: metas article:tag
             mt = []
             if have_lxml:
                 try:
@@ -1065,7 +1112,6 @@ async def _scrape_async(urls: list[str], ua: str, wants: dict, xpaths: dict, joi
             done += 1
             progress.progress(done/len(tasks), text=f"Scrapeando páginas… {done}/{len(tasks)}")
         progress.empty()
-    # mantener orden según urls
     order = {u:i for i,u in enumerate(urls)}
     results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
     return results
@@ -1104,7 +1150,6 @@ def _scrape_sync(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: st
             done += 1
             progress.progress(done/len(futs), text=f"Scrapeando páginas… {done}/{len(futs)}")
     progress.empty()
-    # mantener orden
     order = {u:i for i,u in enumerate(urls)}
     results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
     return results
@@ -1273,11 +1318,11 @@ elif analisis == "10":
         w_canon = st.checkbox("Canonical", value=True, key="w_canon")
         w_pub = st.checkbox("Fecha publicación (meta/time)", value=False, key="w_pub")
         w_lang = st.checkbox("Lang (html@lang)", value=False, key="w_lang")
-        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=False, key="w_firstp")
+        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=True, key="w_firstp")
         xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value="", key="xp_firstp",
                                   help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
 
-        # NUEVO: XPath del contenedor del artículo
+        # XPath del contenedor del artículo
         xp_article = st.text_input(
             "XPath del contenedor del artículo (recomendado)",
             value="",
@@ -1285,6 +1330,13 @@ elif analisis == "10":
             help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
         )
         st.caption("Si no lo indicás, usaré heurística (//article | //main).")
+
+        # Caja de noticias relacionadas
+        st.markdown("**Caja de noticias relacionadas**")
+        w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", value=False, key="w_rel_count")
+        w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", value=False, key="w_rel_anchors")
+        xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", value="", key="xp_related",
+                                   help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
 
     with colY:
         w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=False, key="w_h2_list")
@@ -1296,7 +1348,9 @@ elif analisis == "10":
         xp_h3 = st.text_input("XPath H3 (opcional)", value="", key="xp_h3",
                               help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
         w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=False, key="w_bold")
+        w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", value=False, key="w_bold_list")
         w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=False, key="w_links")
+        w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", value=False, key="w_link_anchors")
         w_tags = st.checkbox("Tags (lista)", value=False, key="w_tags")
         xp_tags = st.text_input("XPath Tags (opcional)", value="", key="xp_tags",
                                 help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
@@ -1312,7 +1366,7 @@ elif analisis == "10":
             st.caption("Sugerencia UA (si ves muchos 403):")
             st.code(_suggest_user_agent(""))
 
-    joiner = st.text_input("Separador para listas (H2/H3/Tags)", value=" | ", key="joiner")
+    joiner = st.text_input("Separador para listas (H2/H3/Tags/Anchors/Negritas)", value=" | ", key="joiner")
 
     # === Preflight GSC
     st.markdown("### 🔎 Semillas desde GSC")
@@ -1362,9 +1416,7 @@ elif analisis == "10":
         # columnas útiles + CTR%
         df_seeds["ctr_pct"] = (df_seeds["ctr"].fillna(0) * 100).round(2)
         df_seeds = df_seeds.rename(columns={"page":"url"})
-        # quitar duplicados priorizando el mayor clicks
-        df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False])
-        df_seeds = df_seeds.drop_duplicates(subset=["url"], keep="first")
+        df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
 
         urls = df_seeds["url"].dropna().astype(str).tolist()
         if only_articles:
@@ -1385,7 +1437,9 @@ elif analisis == "10":
                 "first_paragraph": w_firstp,
                 "h2_list": w_h2_list, "h2_count": w_h2_count,
                 "h3_list": w_h3_list, "h3_count": w_h3_count,
-                "bold_count": w_bold, "link_count": w_links,
+                "bold_count": w_bold, "bold_list": w_bold_list,
+                "link_count": w_links, "link_anchor_texts": w_link_anchors,
+                "related_links_count": w_rel_count, "related_link_anchors": w_rel_anchors,
                 "tags_list": w_tags
             }
             xpaths = {
@@ -1393,10 +1447,10 @@ elif analisis == "10":
                 "first_paragraph": xp_firstp,
                 "h2": xp_h2,
                 "h3": xp_h3,
-                "tags": xp_tags
+                "tags": xp_tags,
+                "related_box": xp_related
             }
 
-            # Al menos un campo
             if not any(wants.values()):
                 st.error("Seleccioná al menos un campo para extraer."); st.stop()
 
@@ -1407,7 +1461,6 @@ elif analisis == "10":
                         urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
                         timeout_s=timeout_s, concurrency=int(concurrency)))
                 except RuntimeError:
-                    # si ya hay loop, usar uno nuevo
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     results = loop.run_until_complete(_scrape_async(
@@ -1425,7 +1478,7 @@ elif analisis == "10":
 
                 # Columnas dinámicas según wants
                 cols = ["source","url"]
-                # campos básicos seleccionados
+                # básicos
                 if w_h1: cols.append("h1")
                 if w_title: cols.append("title")
                 if w_md: cols.append("meta_description")
@@ -1441,7 +1494,11 @@ elif analisis == "10":
                 if w_h3_list: cols.append("h3_list")
                 if w_h3_count: cols.append("h3_count")
                 if w_bold: cols.append("bold_count")
+                if w_bold_list: cols.append("bold_list")
                 if w_links: cols.append("link_count")
+                if w_link_anchors: cols.append("link_anchor_texts")
+                if w_rel_count: cols.append("related_links_count")
+                if w_rel_anchors: cols.append("related_link_anchors")
                 if w_tags: cols.append("tags_list")
                 # métricas
                 cols += ["clicks","impressions","ctr_pct","position","status","error"]
