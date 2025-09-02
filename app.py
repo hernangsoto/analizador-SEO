@@ -8,7 +8,6 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 import json
 import sys
 from types import SimpleNamespace
-from datetime import date, timedelta, datetime
 
 import pandas as pd
 import streamlit as st
@@ -630,92 +629,6 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
-# ---------- Helpers de normalización para "Análisis de contenido" ----------
-def _to_ymd(x) -> str | None:
-    if x is None:
-        return None
-    if isinstance(x, (date, datetime, pd.Timestamp)):
-        try:
-            # quitar tz si viene con ella
-            if isinstance(x, pd.Timestamp) and x.tz is not None:
-                x = x.tz_convert("UTC").tz_localize(None)
-        except Exception:
-            pass
-        return (x.date().isoformat() if isinstance(x, datetime) else x.isoformat())
-    # si ya es string, devolver trim
-    try:
-        s = str(x).strip()
-        return s or None
-    except Exception:
-        return None
-
-def _normalize_content_params(p_raw: dict) -> dict:
-    """Devuelve un dict listo para el runner externo (fechas y campos estandarizados)."""
-    p = json.loads(json.dumps(p_raw, default=str))  # copia profunda segura
-
-    # 1) source
-    tipo = (p.get("tipo") or "").lower()
-    source = "both"
-    if "search" in tipo and "discover" in tipo:
-        source = "both"
-    elif "discover" in tipo:
-        source = "discover"
-    elif "search" in tipo:
-        source = "search"
-    p["source"] = source
-
-    # 2) window → start_date / end_date
-    lag = int(p.get("lag_days", 0) or 0)
-    w = p.get("window") or {}
-    mode = (w.get("mode") or "last").lower()
-    days = w.get("days")
-    sd = w.get("start_date")
-    ed = w.get("end_date")
-
-    if mode == "last":
-        # calcular por días relativos al lag
-        effective_end = date.today() - timedelta(days=lag)
-        if not isinstance(days, int):
-            # fallback por si vino como str o None
-            try:
-                days = int(days)
-            except Exception:
-                days = 28
-        start_dt = effective_end - timedelta(days=max(days, 1) - 1)
-        end_dt = effective_end
-    else:
-        start_dt = sd if isinstance(sd, (date, datetime, pd.Timestamp)) else None
-        end_dt = ed if isinstance(ed, (date, datetime, pd.Timestamp)) else None
-
-    start_s = _to_ymd(start_dt)
-    end_s = _to_ymd(end_dt)
-
-    # Guardar en varias claves por compatibilidad
-    p.setdefault("window", {})
-    p["window"]["start_date"] = start_s
-    p["window"]["end_date"] = end_s
-    p["period"] = {"start_date": start_s, "end_date": end_s, "mode": mode}
-    p["date_from"] = start_s
-    p["date_to"] = end_s
-
-    # 3) device a formato esperado
-    dev = (p.get("filters", {}).get("device") or "").lower()
-    if dev not in ("desktop", "mobile"):
-        dev = None
-    p["filters"]["device"] = dev
-
-    # 4) country en ISO-3 o None
-    country = p.get("filters", {}).get("country")
-    if isinstance(country, str):
-        country = country.strip().upper() or None
-    p["filters"]["country"] = country
-
-    # 5) asegurar selectors
-    sels = p.get("selectors") or p.get("scrape", {}).get("selectors") or {}
-    p["selectors"] = sels
-
-    return p
-
 # ============== Flujos por análisis (requieren GSC) ==============
 if analisis == "4":
     if run_core_update is None:
@@ -827,76 +740,81 @@ elif analisis == "9":
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        st.subheader("Análisis de contenido")
+        st.subheader("Configuración del Análisis de contenido")
 
-        # Construir parámetros UNA sola vez por render (evita claves duplicadas)
-        params_cnt = params_for_content()
+        # Render del formulario (SOLO UNA VEZ)
+        params = params_for_content()
 
-        # Validaciones previas de ventana y selectores
-        w = (params_cnt.get("window") or {})
-        mode = (w.get("mode") or "last").lower()
-        sd = w.get("start_date")
-        ed = w.get("end_date")
-        selectors_ok = bool(params_cnt.get("selectors"))
+        # Validaciones para habilitar botón
+        w = params.get("window") or {}
+        mode = (w.get("mode") or "").lower()
+        start_date = w.get("start_date")
+        end_date = w.get("end_date")
+        selectors = params.get("selectors") or params.get("scrape", {}).get("selectors") or {}
+        selectors_ok = isinstance(selectors, dict) and len(selectors) > 0
+        missing_dates = (mode == "custom") and (not start_date or not end_date)
+        can_run = selectors_ok and (not missing_dates)
 
-        window_ok = True if mode == "last" else (sd is not None and ed is not None)
+        # Previa: mostrar SIEMPRE el payload que se enviará
+        with st.expander("🧾 Ver payload que se enviará (previa)", expanded=False):
+            st.code(json.dumps(params, ensure_ascii=False, indent=2, default=str))
 
+        if missing_dates:
+            st.warning("Elegiste **Rango personalizado** pero falta fecha de inicio y/o fin.")
         if not selectors_ok:
-            st.warning("Definí selectores de scraping válidos para poder ejecutar el análisis.")
-        if mode == "custom" and not window_ok:
-            st.warning("Elegiste *Rango personalizado* pero falta **Desde** y/o **Hasta**.")
+            st.warning("Definí **selectores válidos** en la sección de selectores.")
 
-        ready = selectors_ok and window_ok
-
-        run_btn = st.button("📰 Ejecutar Análisis de contenido", type="primary",
-                            key="btn_run_content", disabled=not ready)
-
-        if run_btn:
+        if st.button("📰 Ejecutar Análisis de contenido", type="primary", disabled=not can_run, key="btn_run_content"):
+            st.session_state["content_last_params"] = params
             try:
-                params_norm = _normalize_content_params(params_cnt)
-                st.session_state["_rca_norm_params"] = params_norm  # útil para depurar
-
-                sid = run_with_indicator(
-                    "Procesando Análisis de contenido",
-                    run_content_analysis,
-                    sc_service, drive_service, gs_client, site_url,
-                    params_norm,
-                    st.session_state.get("dest_folder_id")
-                )
+                with st.spinner("Procesando Análisis de contenido..."):
+                    sid = run_content_analysis(
+                        sc_service, drive_service, gs_client, site_url,
+                        params,  # usar EXACTAMENTE lo que se acaba de configurar
+                        st.session_state.get("dest_folder_id")
+                    )
             except Exception as e:
-                st.session_state["_rca_error"] = str(e)
                 sid = None
+                st.session_state["content_last_error"] = str(e)
 
             if not sid:
                 st.error("No se generó el documento. Abajo dejo el detalle del error y el payload enviado.")
                 with st.expander("Ver detalle técnico"):
-                    err = st.session_state.get("_rca_error", "(sin mensaje)")
+                    err = (
+                        st.session_state.get("_rca_error")
+                        or st.session_state.get("content_last_error")
+                        or "(sin mensaje)"
+                    )
                     st.write(err)
-                    norm_params = st.session_state.get("_rca_norm_params", {})
-                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2))
-                st.stop()
+                    norm_params = st.session_state.get("_rca_norm_params") or st.session_state.get("content_last_params") or params
+                    st.code(json.dumps(norm_params, ensure_ascii=False, indent=2, default=str))
+            else:
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
 
-            # flujo OK
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=(_me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Análisis de contenido",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes="ok"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "content"
+                # Mostrar SIEMPRE el payload utilizado (exitoso)
+                with st.expander("🧾 Ver payload utilizado (siempre)"):
+                    used_params = st.session_state.get("_rca_norm_params") or st.session_state.get("content_last_params") or params
+                    st.code(json.dumps(used_params, ensure_ascii=False, indent=2, default=str))
+
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Análisis de contenido",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes="ok"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "content"
 
 else:
     st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
