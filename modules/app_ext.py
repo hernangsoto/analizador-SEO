@@ -1,17 +1,31 @@
 # modules/app_ext.py
-# Carga runners desde el paquete externo si existe, con fallbacks locales
+"""
+Capa de compatibilidad para cargar los analizadores desde el paquete externo
+`seo_analisis_ext` cuando está disponible (repo privado), con fallbacks locales.
+
+- Exporta: run_core_update, run_evergreen, run_traffic_audit, run_names_analysis,
+          run_discover_snoop, run_content_analysis
+- Define USING_EXT (bool) y EXT_PACKAGE (módulo externo o None)
+- Aplica un parche defensivo a funciones _write_ws de los módulos externos para
+  evitar errores de serialización JSON al escribir DataFrames en Google Sheets.
+"""
+
 from modules.utils import ensure_external_package
 
 _ext = ensure_external_package()
 
-run_core_update     = getattr(_ext, "run_core_update", None) if _ext else None
-run_evergreen       = getattr(_ext, "run_evergreen", None) if _ext else None
-run_traffic_audit   = getattr(_ext, "run_traffic_audit", None) if _ext else None
-run_names_analysis  = getattr(_ext, "run_names_analysis", None) if _ext else None
-# NUEVO: Discover Snoop
-run_discover_snoop  = getattr(_ext, "run_discover_snoop", None) if _ext else None
+# =================== Cargas desde paquete externo (si existe) ===================
 
-# ----------------- Fallbacks locales -----------------
+run_core_update      = getattr(_ext, "run_core_update", None) if _ext else None
+run_evergreen        = getattr(_ext, "run_evergreen", None) if _ext else None
+run_traffic_audit    = getattr(_ext, "run_traffic_audit", None) if _ext else None
+run_names_analysis   = getattr(_ext, "run_names_analysis", None) if _ext else None
+run_discover_snoop   = getattr(_ext, "run_discover_snoop", None) if _ext else None
+# NUEVO: Análisis de contenido
+run_content_analysis = getattr(_ext, "run_content_analysis", None) if _ext else None
+
+# ============================= Fallbacks locales ================================
+# (para que la app no se rompa si el paquete externo no está instalado)
 
 if (run_core_update is None) or (run_evergreen is None):
     try:
@@ -39,14 +53,14 @@ if run_names_analysis is None:
         except Exception:
             run_names_analysis = None
 
-# Fallbacks para Discover Snoop (si no viene del paquete externo)
+# Discover Snoop (si no vino del paquete externo)
 if run_discover_snoop is None:
     _rds = None
     try:
         from seo_analisis_ext.discover_snoop import run_discover_snoop as _rds  # type: ignore
     except Exception:
         try:
-            # Si tuvieras una implementación local, descomenta una de estas:
+            # Si tuvieras implementación local, podés activarla aquí:
             # from modules.discover_snoop import run_discover_snoop as _rds  # type: ignore
             # from modules.analysis_discover_snoop import run_discover_snoop as _rds  # type: ignore
             _rds = None
@@ -54,90 +68,131 @@ if run_discover_snoop is None:
             _rds = None
     run_discover_snoop = _rds
 
-USING_EXT = bool(_ext)
-EXT_PACKAGE = _ext  # útil para localizar archivos (ai_summaries.py), si existe
+# Análisis de contenido (si no vino del paquete externo)
+if run_content_analysis is None:
+    _rca = None
+    # Intentos en el paquete externo con distintos nombres posibles
+    try:
+        from seo_analisis_ext.content_analysis import run_content_analysis as _rca  # type: ignore
+    except Exception:
+        try:
+            from seo_analisis_ext.analysis_content import run_content_analysis as _rca  # type: ignore
+        except Exception:
+            try:
+                from seo_analisis_ext.content import run_content_analysis as _rca  # type: ignore
+            except Exception:
+                _rca = None
+    # Fallbacks locales opcionales
+    if _rca is None:
+        try:
+            from modules.content_analysis import run_content_analysis as _rca  # type: ignore
+        except Exception:
+            try:
+                from modules.analysis_content import run_content_analysis as _rca  # type: ignore
+            except Exception:
+                _rca = None
+    run_content_analysis = _rca
 
-# =====================================================================
+USING_EXT = bool(_ext)
+EXT_PACKAGE = _ext  # útil para localizar archivos (ej.: ai_summaries.py), si existe
+
+# =============================================================================
 # Parche de compatibilidad: evitar "TypeError: Object of type Timestamp
-# is not JSON serializable" cuando discover_snoop escribe a Sheets.
+# is not JSON serializable" cuando se escriben DataFrames a Sheets desde
+# runners externos (Discover Snoop / Análisis de contenido / etc).
 #
 # Convertimos Timestamps/fechas/np types a tipos JSON-serializables
-# (strings o nativos de Python) *antes* de que gspread haga el update.
-# =====================================================================
+# *antes* de que gspread haga el update.
+# =============================================================================
 try:
     import importlib
     import pandas as pd  # type: ignore
-    import numpy as np    # type: ignore
+    import numpy as np   # type: ignore
     import datetime as _dt
+except Exception:
+    pd = None  # type: ignore
+    np = None  # type: ignore
 
-    _mod_ds = None
-    # Solo intentamos si el módulo externo existe
+def _patch_write_ws_if_present(module_name: str) -> None:
+    """
+    Si `module_name` existe y define `_write_ws(gs_client, spreadsheet, title, df_or_values)`,
+    lo parcheamos para garantizar serialización segura.
+    """
+    if pd is None:
+        return
     try:
-        _mod_ds = importlib.import_module("seo_analisis_ext.discover_snoop")
+        mod = importlib.import_module(module_name)
     except Exception:
-        _mod_ds = None
+        return
+    if not hasattr(mod, "_write_ws"):
+        return
 
-    if _mod_ds is not None and hasattr(_mod_ds, "_write_ws"):
-        _orig_write_ws = _mod_ds._write_ws  # guardamos el original
+    _orig_write_ws = getattr(mod, "_write_ws")
 
-        def _coerce_df_for_json(df: pd.DataFrame) -> pd.DataFrame:
-            """Convierte columnas problemáticas a strings/valores nativos."""
-            out = df.copy()
-            for c in out.columns:
-                s = out[c]
-                # 1) Columnas datetime -> string legible
-                if pd.api.types.is_datetime64_any_dtype(s):
-                    out[c] = s.dt.strftime("%Y-%m-%d %H:%M:%S")
-                    continue
+    def _coerce_df_for_json(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        for c in out.columns:
+            s = out[c]
+            # 1) Columnas datetime -> string legible
+            if pd.api.types.is_datetime64_any_dtype(s):
+                out[c] = s.dt.strftime("%Y-%m-%d %H:%M:%S")
+                continue
 
-                # 2) En columnas object, convertir Timestamps/datetimes sueltos
-                def _cell_fix(x):
-                    # NaN / NaT
+            # 2) En columnas object, convertir casos sueltos problemáticos
+            def _cell_fix(x):
+                # NaN / NaT
+                try:
+                    if x is None or (isinstance(x, float) and pd.isna(x)):
+                        return None
+                except Exception:
+                    pass
+                if x is pd.NaT:
+                    return None
+                # pandas/py datetime-like
+                if isinstance(x, (pd.Timestamp, _dt.datetime, _dt.date, _dt.time)):
                     try:
-                        if x is None or (isinstance(x, float) and pd.isna(x)):
-                            return None
+                        if isinstance(x, pd.Timestamp) and x.tz is not None:
+                            x = x.tz_convert("UTC").tz_localize(None)
                     except Exception:
                         pass
-                    if x is pd.NaT:
-                        return None
-                    # pandas/py datetime-like
-                    if isinstance(x, (pd.Timestamp, _dt.datetime, _dt.date, _dt.time)):
-                        try:
-                            # normalizamos tz si la hubiera
-                            if isinstance(x, pd.Timestamp) and x.tz is not None:
-                                x = x.tz_convert("UTC").tz_localize(None)
-                        except Exception:
-                            pass
-                        # iso con espacio (más legible en Sheets)
-                        return x.isoformat(sep=" ")
-                    # numpy escalares -> nativos Python
-                    if isinstance(x, np.generic):
+                    return x.isoformat(sep=" ")
+                # numpy escalares -> nativos Python
+                if np is not None and isinstance(x, np.generic):
+                    try:
                         return x.item()
-                    return x
+                    except Exception:
+                        return str(x)
+                return x
 
-                out[c] = s.map(_cell_fix)
-            return out
+            out[c] = s.map(_cell_fix)
+        return out
 
-        def _write_ws_patched(gs_client, spreadsheet, title, df_or_values):
-            """Wrapper que asegura serialización segura antes de llamar al original."""
-            try:
-                if isinstance(df_or_values, pd.DataFrame):
-                    safe_df = _coerce_df_for_json(df_or_values)
-                    return _orig_write_ws(gs_client, spreadsheet, title, safe_df)
-                # Si no es DataFrame, delegamos tal cual
-                return _orig_write_ws(gs_client, spreadsheet, title, df_or_values)
-            except TypeError:
-                # Fallback ultra-defensivo: casteo completo a str
-                if isinstance(df_or_values, pd.DataFrame):
-                    return _orig_write_ws(gs_client, spreadsheet, title, df_or_values.astype(str))
-                raise
+    def _write_ws_patched(gs_client, spreadsheet, title, df_or_values):
+        try:
+            if pd is not None and isinstance(df_or_values, pd.DataFrame):
+                safe_df = _coerce_df_for_json(df_or_values)
+                return _orig_write_ws(gs_client, spreadsheet, title, safe_df)
+            return _orig_write_ws(gs_client, spreadsheet, title, df_or_values)
+        except TypeError:
+            # Fallback ultra-defensivo: casteo completo a str
+            if pd is not None and isinstance(df_or_values, pd.DataFrame):
+                return _orig_write_ws(gs_client, spreadsheet, title, df_or_values.astype(str))
+            raise
 
-        # Aplicamos el parche
-        _mod_ds._write_ws = _write_ws_patched
+    try:
+        setattr(mod, "_write_ws", _write_ws_patched)
+    except Exception:
+        # Nunca romper la app por el parche
+        pass
 
-except Exception:
-    # Nunca romper la app por el parche
-    pass
+# Intentamos parchear los módulos donde suele vivir _write_ws
+for _candidate in [
+    "seo_analisis_ext.discover_snoop",
+    "seo_analisis_ext.content_analysis",
+    "seo_analisis_ext.analysis_content",
+    "seo_analisis_ext.utils_gsheets",
+]:
+    _patch_write_ws_if_present(_candidate)
 
 __all__ = [
     "USING_EXT",
@@ -147,4 +202,5 @@ __all__ = [
     "run_traffic_audit",
     "run_names_analysis",
     "run_discover_snoop",
+    "run_content_analysis",
 ]
