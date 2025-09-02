@@ -184,7 +184,6 @@ def _normalize_selectors(sel: dict | None) -> dict:
             elif css:
                 out[k] = css
         elif isinstance(v, list):
-            # si viniera lista de selectores, los unimos por coma
             try:
                 out[k] = ", ".join(map(str, v))
             except Exception:
@@ -215,8 +214,8 @@ if prefer_oidc and st.session_state.get("_auth_bypass"):
     user = None
 
 # --- PASO 0: Login botón Google (web) ---
-if prefer_oidc && not ident:
-    ident = step0_google_identity()
+if prefer_oidc and not ident:
+    ident = step0_google_identity()  # guarda st.session_state["creds_dest"] y token_store["creds_dest"]
     if not ident:
         st.stop()
 
@@ -250,6 +249,7 @@ if isinstance(_action, list):
     _action = _action[0] if _action else None
 
 if _action == "change_personal":
+    # Reiniciar el login personal del Paso 0
     for k in ("oauth_oidc","_google_identity","creds_dest"):
         st.session_state.pop(k, None)
     try:
@@ -283,11 +283,12 @@ if st.session_state.get("creds_dest"):
     except Exception:
         creds_dest = None
 
-# 2) Fallback cross-pestaña: token_store
+# 2) Fallback cross-pestaña: token_store (si el login se hizo en otra pestaña)
 if not creds_dest:
     try:
         creds_dest = token_store.as_credentials("creds_dest")
         if creds_dest:
+            # hidratar también el session_state para el resto del flujo
             st.session_state["creds_dest"] = {
                 "token": creds_dest.token,
                 "refresh_token": getattr(creds_dest, "refresh_token", None),
@@ -300,22 +301,27 @@ if not creds_dest:
         creds_dest = None
 
 if not creds_dest:
-    st.error("No recibí credenciales personales tras el Paso 0. Volvé a pulsar **Iniciar sesión con Google**.")
+    st.error(
+        "No recibí credenciales personales tras el Paso 0. "
+        "Volvé a pulsar **Iniciar sesión con Google** (un solo click)."
+    )
     st.stop()
 
 # Clientes Google Drive/Sheets y resumen de identidad
 try:
     drive_service, gs_client = ensure_drive_clients(creds_dest)
     _me = get_google_identity(drive_service)
+    # Refrescar identidad por si llega con foto/nombre
     st.session_state["_google_identity"] = _me or st.session_state.get("_google_identity", {})
     email_txt = (_me or {}).get("emailAddress") or "email desconocido"
     st.markdown(
         f'''
         <div class="success-inline">
             Sesión personal: <strong>{email_txt}</strong>
-            <a href="{get_app_home()}?action=change_personal" target="_self" rel="nofollow">(Cambiar cuenta personal)</a>
+            <a href="{APP_HOME}?action=change_personal" target="_self" rel="nofollow">(Cambiar cuenta personal)</a>
         </div>
-        ''', unsafe_allow_html=True
+        ''',
+        unsafe_allow_html=True
     )
     activity_log_append(
         drive_service, gs_client,
@@ -333,7 +339,8 @@ if "step2_done" not in st.session_state:
 
 if not st.session_state["step2_done"]:
     with st.expander("2) Destino de la copia (opcional)", expanded=False):
-        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**.")
+        st.caption("Por defecto el archivo se guardará en **Mi unidad (raíz)**. "
+                   "Si querés otra carpeta, abrí este panel y elegila aquí.")
         dest_folder_id = pick_destination(drive_service, _me, show_header=False)
         c1, c2 = st.columns([1, 3])
         with c1:
@@ -349,9 +356,10 @@ else:
         f'''
         <div class="success-inline">
             Destino de la copia: <strong>{pretty}</strong>
-            <a href="{get_app_home()}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
+            <a href="{APP_HOME}?action=change_folder" target="_self" rel="nofollow">(Cambiar carpeta)</a>
         </div>
-        ''', unsafe_allow_html=True
+        ''',
+        unsafe_allow_html=True
     )
 
 # ---------- Elegir análisis ----------
@@ -457,9 +465,9 @@ if analisis == "8":
             if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary"):
                 sid = run_with_indicator(
                     "Procesando Discover Snoop",
-                    run_discover_snoop,
-                    drive_service, gs_client,
-                    df, params_ds,
+                    run_discover_snoop,  # función del paquete externo
+                    drive_service, gs_client,  # servicios Google
+                    df, params_ds,            # datos + parámetros
                     st.session_state.get("dest_folder_id")
                 )
                 st.success("¡Listo! Tu documento está creado.")
@@ -515,6 +523,9 @@ def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
 GSC_SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 def pick_source_oauth_forced(account_key: str) -> Credentials | None:
+    """
+    Igual a un pick_source_oauth pero fijando la cuenta (sin radios).
+    """
     st.subheader("Cuenta de Search Console (fuente de datos)")
     key = f"oauth_src_{account_key}"
     if key not in st.session_state:
@@ -600,10 +611,10 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
         st.session_state["step3_done"] = True
         st.markdown(
-            '''
+            f'''
             <div class="success-inline">
                 Cuenta de acceso (Search Console): <strong>Acceso en cuenta personal de Nomadic</strong>
-                <a href="?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
             </div>
             ''',
             unsafe_allow_html=True
@@ -612,7 +623,7 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
         st.stop()
 else:
-    wanted_key = _choice_to_key(sc_choice)
+    wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
     need_new_auth = (
         not st.session_state.get("step3_done") or
         norm(st.session_state.get("src_account_label")) != norm(sc_choice) or
@@ -630,12 +641,14 @@ else:
             "client_secret": creds_src_obj.client_secret,
             "scopes": list(getattr(creds_src_obj, "scopes", [])),
         }
+        # Guardá también la fuente por si cambiás de pestaña
         token_store.save("creds_src", st.session_state["creds_src"])
         st.session_state["src_account_label"] = sc_choice
         st.session_state["step3_done"] = True
         clear_qp(); st.rerun()
     else:
         try:
+            # Rehidratar si fuese necesario
             if not st.session_state.get("creds_src"):
                 cdict = token_store.load("creds_src")
                 if cdict:
@@ -647,9 +660,10 @@ else:
                 f'''
                 <div class="success-inline">
                     Cuenta de acceso (Search Console): <strong>{src_label}</strong>
-                    <a href="{get_app_home()}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                    <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
                 </div>
-                ''', unsafe_allow_html=True
+                ''',
+                unsafe_allow_html=True
             )
         except Exception as e:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
