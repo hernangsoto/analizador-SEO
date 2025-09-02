@@ -71,7 +71,7 @@ if run_discover_snoop is None:
 # Content Analysis
 if run_content_analysis is None:
     _rca = None
-    # Probar módulos alternativos en el paquete externo
+    # Probar rutas alternativas dentro del paquete externo
     try:
         from seo_analisis_ext.content_analysis import run_content_analysis as _rca  # type: ignore
     except Exception:
@@ -82,7 +82,7 @@ if run_content_analysis is None:
                 from seo_analisis_ext.content import run_content_analysis as _rca  # type: ignore
             except Exception:
                 _rca = None
-    # Fallbacks locales opcionales
+    # Fallbacks locales (si existieran)
     if _rca is None:
         try:
             from modules.content_analysis import run_content_analysis as _rca  # type: ignore
@@ -99,8 +99,8 @@ EXT_PACKAGE = _ext
 # =============================================================================
 # Shim de normalización para run_content_analysis
 # - Fechas: window.start/end, window.start_date/end_date, period.start/end,
-#           y además alias top-level: start/end, desde/hasta, fecha_inicio/fecha_fin
-# - Tipo: 'search' | 'discover' | 'both' + variantes en español
+#           y alias top-level: start/end, desde/hasta, fecha_inicio/fecha_fin
+# - Tipo: 'search' | 'discover' | 'both' (+ variantes en español)
 # - Filtros: alias para pais/dispositivo/secciones
 # - period_label para armar nombre de archivo
 # =============================================================================
@@ -119,10 +119,8 @@ def _rca_normalize_params(p: dict) -> dict:
     elif raw_tipo == "search":
         tipo = "search"
     else:
-        # por defecto, ambos
         tipo = "both"
     p["tipo"] = tipo
-    # alias por si el runner mira otro nombre
     p.setdefault("source", tipo)
     p.setdefault("origen", "Search + Discover" if tipo == "both" else tipo.title())
 
@@ -131,34 +129,29 @@ def _rca_normalize_params(p: dict) -> dict:
     win = dict(p.get("window") or {})
     per = dict(p.get("period") or {})
 
-    # recolectar candidatos de fechas
     start = (win.get("start") or win.get("start_date") or per.get("start") or per.get("start_date")
              or p.get("start") or p.get("start_date") or p.get("desde") or p.get("fecha_inicio"))
     end   = (win.get("end")   or win.get("end_date")   or per.get("end")   or per.get("end_date")
              or p.get("end")  or p.get("end_date")     or p.get("hasta")   or p.get("fecha_fin"))
     days  = per.get("days") or win.get("days") or p.get("days")
 
-    # helper ISO
     def _iso(d):
         try:
             return d.isoformat()
         except Exception:
             return str(d)
 
-    # completar si faltan
     if not (start and end):
         if not days:
-            days = 28  # default robusto
+            days = 28
         end_dt = date.today() - timedelta(days=lag)
         start_dt = end_dt - timedelta(days=int(days) - 1)
         start = start or _iso(start_dt)
         end   = end   or _iso(end_dt)
 
-    # asegurar ISO string si vinieron como date/datetime
     start = _iso(start)
     end = _iso(end)
 
-    # escribir en window
     win["start"] = start
     win["end"] = end
     win["start_date"] = start
@@ -166,13 +159,11 @@ def _rca_normalize_params(p: dict) -> dict:
     win.setdefault("days", days)
     p["window"] = win
 
-    # escribir en period (alias)
     per["start"] = start
     per["end"] = end
     per.setdefault("days", days)
     p["period"] = per
 
-    # alias top-level adicionales
     p["start"] = start
     p["end"] = end
     p["desde"] = start
@@ -180,19 +171,16 @@ def _rca_normalize_params(p: dict) -> dict:
     p["fecha_inicio"] = start
     p["fecha_fin"] = end
 
-    # etiqueta útil para títulos
     p["period_label"] = f"{start} a {end}"
 
     # ---------- filtros ----------
     filters = dict(p.get("filters") or {})
-    # country/pais
     country = filters.get("country")
     if country in ("Todos", "", None):
         country = None
     filters["country"] = country
     filters.setdefault("pais", country)
 
-    # device/dispositivo
     device = filters.get("device")
     if isinstance(device, str):
         dev = device.strip().lower()
@@ -205,7 +193,6 @@ def _rca_normalize_params(p: dict) -> dict:
     filters["device"] = device
     filters.setdefault("dispositivo", device)
 
-    # secciones
     sec_payload = filters.get("sections_payload") or filters.get("sections")
     if isinstance(sec_payload, dict) and sec_payload:
         filters["sections_payload"] = sec_payload
@@ -225,25 +212,30 @@ def _rca_normalize_params(p: dict) -> dict:
 
     return p
 
-# envolver el runner con el shim + manejo de errores visibles en Streamlit
+# Envolver el runner con shim y manejo de errores visibles (sin relanzar)
 if run_content_analysis is not None:
     _ext_rca_fn = run_content_analysis
 
     def _rca_wrapper(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
         import json as _json
         try:
-            norm_params = _rca_normalize_params(dict(params or {}))
-            return _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
+            import streamlit as st
+        except Exception:
+            st = None  # por si se ejecuta en entorno no-Streamlit
+
+        norm_params = _rca_normalize_params(dict(params or {}))
+        try:
+            sid = _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
+            return sid
         except Exception as e:
-            # Mostrar error y payload normalizado en la UI (evita el "redacted")
-            try:
-                import streamlit as st
+            # Guardar detalle en sesión y mostrarlo. NO relanzamos.
+            if st is not None:
+                st.session_state["_rca_norm_params"] = norm_params
+                st.session_state["_rca_error"] = str(e)
                 st.error(f"❌ Análisis de contenido falló: {e}")
                 st.caption("Payload normalizado enviado al runner:")
                 st.code(_json.dumps(norm_params, ensure_ascii=False, indent=2))
-            except Exception:
-                pass
-            raise
+            return None
 
     run_content_analysis = _rca_wrapper
 
@@ -276,12 +268,10 @@ def _patch_write_ws_if_present(module_name: str) -> None:
         out = df.copy()
         for c in out.columns:
             s = out[c]
-            # 1) datetime64 -> string legible
             if pd.api.types.is_datetime64_any_dtype(s):
                 out[c] = s.dt.strftime("%Y-%m-%d %H:%M:%S")
                 continue
 
-            # 2) object con casos problemáticos
             def _cell_fix(x):
                 try:
                     if x is None or (isinstance(x, float) and pd.isna(x)):
