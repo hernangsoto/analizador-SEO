@@ -459,6 +459,14 @@ try:
 except Exception:
     run_report_results = None
 
+# Fallback: traerla desde el submódulo si no está expuesta en __init__.py
+if run_report_results is None:
+    try:
+        from seo_analisis_ext.report_results import run_report_results as _rrr  # type: ignore
+        run_report_results = _rrr
+    except Exception:
+        run_report_results = None
+
 __all__ = [
     "USING_EXT",
     "EXT_PACKAGE",
