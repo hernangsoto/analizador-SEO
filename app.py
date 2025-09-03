@@ -1285,6 +1285,98 @@ if analisis == "4":
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "core"
+elif analisis == "3":
+    if run_sections_analysis is None:
+        st.warning("Este despliegue no incluye `run_sections_analysis` (agregá `seo_analisis_ext/sections_analysis.py`).")
+        st.stop()
+
+    st.subheader("Análisis de secciones")
+    st.caption("Compara secciones y subsecciones por períodos consecutivos (semanal, quincenal, mensual o personalizado), para Search y/o Discover.")
+
+    # ------- Parámetros -------
+    lag = st.number_input("Lag de días (para evitar datos incompletos)", 0, 10, 3, 1, key="sec_lag")
+
+    period_choice = st.radio(
+        "Periodo",
+        ["Semanal", "Quincenal", "Mensual", "Personalizado"],
+        index=0, horizontal=True, key="sec_period"
+    )
+
+    n_prev = st.number_input("¿Cuántos períodos previos comparar?", 0, 24, 4, 1, key="sec_nprev")
+
+    # Personalizado
+    custom_start = None; custom_end = None
+    if period_choice == "Personalizado":
+        c1, c2 = st.columns(2)
+        with c1: custom_start = st.date_input("Desde (inclusive)", key="sec_custom_from")
+        with c2: custom_end   = st.date_input("Hasta (inclusive)", key="sec_custom_to")
+
+    # Origen
+    origin_label = st.radio("Origen", ["Search", "Discover", "Search y Discover"], index=0, horizontal=True, key="sec_origin")
+    origin_map = {"Search": "search", "Discover": "discover", "Search y Discover": "both"}
+    origin = origin_map[origin_label]
+
+    # (Opcionales) Filtros
+    with st.expander("Filtros opcionales"):
+        path = st.text_input("Filtrar por sección (path contiene)", value="", key="sec_path") or None
+        country = st.text_input("País (ISO-3, ej: ARG/ESP/USA)", value="", key="sec_country") or None
+
+    # Métricas a incluir (pos solo afecta a Search)
+    st.markdown("**Métricas a incluir en Detalle**")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1: m_clicks = st.checkbox("Clics", value=True, key="sec_m_clicks")
+    with mc2: m_impr   = st.checkbox("Impresiones", value=True, key="sec_m_impr")
+    with mc3: m_ctr    = st.checkbox("CTR", value=True, key="sec_m_ctr")
+    with mc4:
+        disable_pos = (origin == "discover")
+        m_pos = st.checkbox("Posición (solo Search)", value=(origin != "discover"), key="sec_m_pos", disabled=disable_pos)
+
+    # Mapear modo
+    mode_map = {"Semanal":"weekly","Quincenal":"biweekly","Mensual":"monthly","Personalizado":"custom"}
+    mode = mode_map[period_choice]
+
+    params = {
+        "period_mode": mode,
+        "lag_days": int(lag),
+        "n_prev": int(n_prev),
+        "origin": origin,
+        "metrics": {"clicks": bool(m_clicks), "impressions": bool(m_impr), "ctr": bool(m_ctr), "position": bool(m_pos)},
+        "path": path,
+        "country_iso3": country,
+    }
+    if mode == "custom":
+        params["custom_start"] = custom_start
+        params["custom_end"] = custom_end
+
+    can_run = (mode != "custom") or (custom_start and custom_end and custom_start <= custom_end)
+    if st.button("🧭 Ejecutar Análisis de secciones", type="primary", disabled=not can_run, key="sec_run"):
+        sid = run_with_indicator(
+            "Procesando Secciones",
+            run_sections_analysis, sc_service, drive_service, gs_client, site_url, params,
+            st.session_state.get("dest_folder_id")
+        )
+        maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+        st.success("¡Listo! Tu documento está creado.")
+        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+        with st.expander("Compartir acceso al documento (opcional)"):
+            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+        try:
+            meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+            sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+        except Exception:
+            sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+        activity_log_append(
+            drive_service, gs_client,
+            user_email=( _me or {}).get("emailAddress") or "",
+            event="analysis", site_url=site_url,
+            analysis_kind="Secciones",
+            sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+            gsc_account=st.session_state.get("src_account_label") or "",
+            notes=f"mode={mode}, n_prev={int(n_prev)}, lag={int(lag)}, origin={origin}, path={path or 'site'}, country={country or 'GLOBAL'}"
+        )
+        st.session_state["last_file_id"] = sid
+        st.session_state["last_file_kind"] = "sections"
 
 elif analisis == "5":
     if run_evergreen is None:
