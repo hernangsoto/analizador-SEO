@@ -1347,6 +1347,168 @@ elif analisis == "6":
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "audit"
 
+elif analisis == "2":
+    from modules.app_ext import run_report_results
+    if run_report_results is None:
+        st.warning("Este despliegue no incluye `run_report_results` (agregá `seo_analisis_ext/report_results.py`).")
+        st.stop()
+
+    st.subheader("Reporte de resultados")
+    st.caption("Extrae series por fecha desde Search Console, por origen (Search/Discover) y opcionalmente por países y sección.")
+
+    # ---------- Periodo ----------
+    from datetime import date, timedelta
+
+    def first_day_of_month(d: date) -> date:
+        return d.replace(day=1)
+
+    def last_day_of_month(d: date) -> date:
+        nd = (d.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return nd
+
+    def add_months(d: date, months: int) -> date:
+        # sin dateutil: cálculo robusto
+        y = d.year + (d.month - 1 + months) // 12
+        m = (d.month - 1 + months) % 12 + 1
+        day = min(d.day, [31,29 if y%4==0 and (y%100!=0 or y%400==0) else 28,31,30,31,30,31,31,30,31,30,31][m-1])
+        return date(y, m, day)
+
+    today = date.today()
+    lag = st.number_input("Lag de días (para evitar datos incompletos)", 0, 10, 3, 1, key="rep_lag")
+
+    period_choice = st.radio(
+        "Periodo",
+        ["Semanal", "Quincenal", "Últimos 30 días", "Último mes completo", "Último trimestre completo", "Último año completo", "Últimos 16 meses", "Personalizado"],
+        index=0, horizontal=True, key="rep_period"
+    )
+
+    anchor = today - timedelta(days=int(lag))
+    if period_choice == "Semanal":
+        end_dt = anchor
+        start_dt = end_dt - timedelta(days=7)
+    elif period_choice == "Quincenal":
+        end_dt = anchor
+        start_dt = end_dt - timedelta(days=15)
+    elif period_choice == "Últimos 30 días":
+        end_dt = anchor
+        start_dt = end_dt - timedelta(days=30)
+    elif period_choice == "Último mes completo":
+        last_full_end = first_day_of_month(anchor) - timedelta(days=1)
+        start_dt = first_day_of_month(last_full_end)
+        end_dt = last_full_end
+    elif period_choice == "Último trimestre completo":
+        # trimestre completo anterior al anchor
+        m0 = first_day_of_month(anchor)
+        prev_month = m0 - timedelta(days=1)
+        q = (prev_month.month - 1) // 3  # 0..3
+        q_start_month = q * 3 + 1
+        q_start = date(prev_month.year, q_start_month, 1)
+        q_end = last_day_of_month(add_months(q_start, 2))
+        start_dt, end_dt = q_start, q_end
+    elif period_choice == "Último año completo":
+        y = (anchor.year - 1) if anchor.month == 1 and anchor.day == 1 else (anchor.year - 1)
+        start_dt = date(y, 1, 1)
+        end_dt = date(y, 12, 31)
+    elif period_choice == "Últimos 16 meses":
+        # de mes completo a mes completo: 16 meses hasta el mes anterior al anchor
+        end_month_last_day = last_day_of_month(first_day_of_month(anchor) - timedelta(days=1))
+        start_month_first_day = first_day_of_month(add_months(end_month_last_day, -15))
+        start_dt, end_dt = start_month_first_day, end_month_last_day
+    else:
+        # Personalizado
+        end_dt = anchor
+        start_dt = anchor - timedelta(days=30)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("Fecha inicio", value=start_dt, key="rep_start")
+    with c2:
+        end_date = st.date_input("Fecha fin (inclusive)", value=end_dt, key="rep_end")
+
+    # ---------- Origen ----------
+    origin_label = st.radio("Origen", ["Search", "Discover", "Search y Discover"], index=0, horizontal=True, key="rep_origin")
+    origin_map = {"Search": "search", "Discover": "discover", "Search y Discover": "both"}
+    origin = origin_map[origin_label]
+
+    # ---------- Sección ----------
+    path = st.text_input("Sección (path, ej: /vida/) — vacío = todo el sitio", value="", key="rep_path")
+    if path and not path.startswith("/"):
+        path = "/" + path
+
+    # ---------- Región ----------
+    region_mode = st.radio("Región", ["Global", "Países (ISO-3)"], index=0, horizontal=True, key="rep_region_mode")
+
+    ISO3_OPTIONS = [
+        "ARG","URY","PRY","BOL","CHL","PER","COL","ECU","VEN","MEX","CRI","PAN","DOM",
+        "ESP","PRT","USA","CAN","GBR","FRA","DEU","ITA","NLD","BEL","SWE","NOR","DNK","IRL","CHE","AUT",
+        "BRA"
+    ]
+    countries = []
+    if region_mode.startswith("Países"):
+        countries = st.multiselect("Elige países (ISO-3)", ISO3_OPTIONS, default=["ARG"], key="rep_countries")
+        extra = st.text_input("Códigos adicionales separados por coma (opcional)", value="", key="rep_countries_extra")
+        if extra.strip():
+            countries += [c.strip().upper() for c in extra.split(",") if c.strip()]
+
+    # ---------- Métricas ----------
+    st.markdown("**Métricas a incluir**")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1: m_clicks = st.checkbox("Clics", value=True, key="rep_m_clicks")
+    with mc2: m_impr = st.checkbox("Impresiones", value=True, key="rep_m_impr")
+    with mc3: m_ctr = st.checkbox("CTR", value=True, key="rep_m_ctr")
+    with mc4:
+        disable_pos = (origin == "discover")
+        m_pos = st.checkbox("Posición (solo Search)", value=True and not disable_pos, key="rep_m_pos", disabled=disable_pos)
+
+    can_run = (start_date <= end_date)
+    if st.button("📈 Generar Reporte de resultados", type="primary", disabled=not can_run, key="rep_run"):
+        params = {
+            "start": start_date,
+            "end": end_date,
+            "origin": origin,
+            "path": path or None,
+            "countries": countries or [],
+            "metrics": {
+                "clicks": bool(m_clicks),
+                "impressions": bool(m_impr),
+                "ctr": bool(m_ctr),
+                "position": bool(m_pos),
+            },
+            "lag_days": int(lag),
+            "sheet_title_prefix": "Reporte de resultados",
+        }
+        try:
+            sid = run_with_indicator(
+                "Generando Reporte de resultados",
+                run_report_results,  # runner externo
+                sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id")
+            )
+            if sid:
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Reporte de resultados",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "report_results"
+        except Exception as e:
+            st.error(f"Falló la generación del reporte: {e}")
+
 elif analisis == "9":
     # ===== NUEVO: Análisis de contenido (repo externo) =====
     if (run_content_analysis is None) or (params_for_content is None):
