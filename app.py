@@ -55,7 +55,7 @@ except Exception:
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
-from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
+from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context  # (disponible si está en el repo)
 
 # 🔑 para leer tokens guardados por el Paso 0 en otra pestaña
 from modules.utils import token_store
@@ -66,6 +66,11 @@ from modules.gsc import ensure_sc_client
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
+# Aplica estilos adicionales de UI si el módulo está disponible
+try:
+    apply_page_style()
+except Exception:
+    pass
 
 # ⬇️ Sin espacios arriba + CSS
 st.markdown("""
@@ -148,6 +153,13 @@ def maintenance_extra_ui():
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
+    # Pequeño panel de diagnóstico opcional
+    if st.session_state.get("DEBUG"):
+        try:
+            ctx = read_context()
+            st.caption(f"Context: {ctx}")
+        except Exception:
+            pass
 
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
@@ -477,7 +489,7 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
                 st.error("No se pudo conectar Search Console. Reintentá la autorización.")
                 st.caption(f"Detalle técnico: {e}")
     with c2:
-        if st.button("Reiniciar Paso 2", key=f"btn_reset_src_{account_key}"):
+        if st.button("Reiniciar conexión", key=f"btn_reset_src_{account_key}"):
             st.session_state.pop(key, None)
             for k in ("creds_src","step3_done","src_account_label"):
                 st.session_state.pop(k, None)
@@ -517,10 +529,10 @@ if sc_choice == "Acceso en cuenta personal de Nomadic":
         st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
         st.session_state["step3_done"] = True
         st.markdown(
-            '''
+            f'''
             <div class="success-inline">
                 Cuenta de acceso (Search Console): <strong>Acceso en cuenta personal de Nomadic</strong>
-                <a href="?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
             </div>
             ''',
             unsafe_allow_html=True
@@ -687,6 +699,7 @@ def _suggest_user_agent(ua: str | None) -> str:
             "Chrome/126.0.0.0 Safari/537.36")
 
 # ===== spaCy bootstrap (modelo autoinstalable sin permisos en site-packages) =====
+@st.cache_resource(show_spinner=False)
 def ensure_spacy(preferred_models=("es_core_news_sm","xx_ent_wiki_sm","en_core_web_sm"),
                  local_dirs=("models/es_core_news_sm","models/xx_ent_wiki_sm","models/en_core_web_sm")):
     """
@@ -1357,6 +1370,11 @@ elif analisis == "10":
     with colC:
         tipo = st.radio("Origen", ["Search", "Discover", "Search + Discover"], horizontal=True, key="fast_source")
 
+    # Validación de rango de fechas
+    if start_date > end_date:
+        st.error("La fecha 'Desde' no puede ser posterior a 'Hasta'. Corrigelo para continuar.")
+        st.stop()
+
     col0a, col0b = st.columns([1,1])
     with col0a:
         row_limit = st.number_input("Máximo de URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
@@ -1495,14 +1513,14 @@ elif analisis == "10":
     if src in ("web","both"):
         seeds_search = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "web",
-            country or None if country != "(TODOS)" else None,
+            country or (None if country == "(TODOS)" else None),
             device if device and device != "(Todos)" else None,
             order_by, int(row_limit)
         )
     if src in ("discover","both"):
         seeds_discover = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "discover",
-            country or None if country != "(TODOS)" else None,
+            country or (None if country == "(TODOS)" else None),
             device if device and device != "(Todos)" else None,
             order_by, int(row_limit)
         )
