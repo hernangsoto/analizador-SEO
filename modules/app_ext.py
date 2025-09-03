@@ -7,9 +7,11 @@ Exporta:
 - USING_EXT, EXT_PACKAGE
 - run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 - run_discover_snoop, run_content_analysis
+- run_content_structure  <-- NUEVO
 
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
+- Shim de normalización para run_content_structure (fechas, source, filtros, scraping)
 - Parche de serialización segura al escribir DataFrames a Google Sheets
 """
 
@@ -19,12 +21,13 @@ _ext = ensure_external_package()
 
 # =================== Preferimos funciones del paquete externo ===================
 
-run_core_update       = getattr(_ext, "run_core_update", None) if _ext else None
-run_evergreen         = getattr(_ext, "run_evergreen", None) if _ext else None
-run_traffic_audit     = getattr(_ext, "run_traffic_audit", None) if _ext else None
-run_names_analysis    = getattr(_ext, "run_names_analysis", None) if _ext else None
-run_discover_snoop    = getattr(_ext, "run_discover_snoop", None) if _ext else None
-run_content_analysis  = getattr(_ext, "run_content_analysis", None) if _ext else None
+run_core_update        = getattr(_ext, "run_core_update", None) if _ext else None
+run_evergreen          = getattr(_ext, "run_evergreen", None) if _ext else None
+run_traffic_audit      = getattr(_ext, "run_traffic_audit", None) if _ext else None
+run_names_analysis     = getattr(_ext, "run_names_analysis", None) if _ext else None
+run_discover_snoop     = getattr(_ext, "run_discover_snoop", None) if _ext else None
+run_content_analysis   = getattr(_ext, "run_content_analysis", None) if _ext else None
+run_content_structure  = getattr(_ext, "run_content_structure", None) if _ext else None  # <- NUEVO
 
 # ============================= Fallbacks locales =================================
 
@@ -93,16 +96,28 @@ if run_content_analysis is None:
                 _rca = None
     run_content_analysis = _rca
 
+# Content Structure (nuevo)
+if run_content_structure is None:
+    _rcs = None
+    try:
+        from seo_analisis_ext.content_structure import run_content_structure as _rcs  # type: ignore
+    except Exception:
+        try:
+            from seo_analisis_ext.analysis_structure import run_content_structure as _rcs  # type: ignore
+        except Exception:
+            try:
+                # Fallbacks locales opcionales, si los hubiera:
+                # from modules.content_structure import run_content_structure as _rcs  # type: ignore
+                _rcs = None
+            except Exception:
+                _rcs = None
+    run_content_structure = _rcs
+
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
 
 # =============================================================================
 # Shim de normalización para run_content_analysis
-# - Fechas: window.start/end, window.start_date/end_date, period.start/end,
-#           y alias top-level: start/end, desde/hasta, fecha_inicio/fecha_fin
-# - Tipo: 'search' | 'discover' | 'both' (+ variantes en español)
-# - Filtros: alias para pais/dispositivo/secciones
-# - period_label para armar nombre de archivo
 # =============================================================================
 def _rca_normalize_params(p: dict) -> dict:
     from datetime import date, timedelta
@@ -184,7 +199,7 @@ def _rca_normalize_params(p: dict) -> dict:
     device = filters.get("device")
     if isinstance(device, str):
         dev = device.strip().lower()
-        if dev in ("desktop", "mobile"):
+        if dev in ("desktop", "mobile", "tablet"):
             device = dev
         elif dev in ("todos", "", "none", None):
             device = None
@@ -212,7 +227,7 @@ def _rca_normalize_params(p: dict) -> dict:
 
     return p
 
-# Envolver el runner con shim y manejo de errores visibles (sin relanzar)
+# Envolver el runner de contenido con shim y manejo de errores visibles (sin relanzar)
 if run_content_analysis is not None:
     _ext_rca_fn = run_content_analysis
 
@@ -228,7 +243,6 @@ if run_content_analysis is not None:
             sid = _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
             return sid
         except Exception as e:
-            # Guardar detalle en sesión y mostrarlo. NO relanzamos.
             if st is not None:
                 st.session_state["_rca_norm_params"] = norm_params
                 st.session_state["_rca_error"] = str(e)
@@ -238,6 +252,124 @@ if run_content_analysis is not None:
             return None
 
     run_content_analysis = _rca_wrapper
+
+# =============================================================================
+# Shim de normalización para run_content_structure (nuevo)
+# Espera un dict con:
+#  - date_from, date_to (date o str ISO)
+#  - source: 'search' | 'discover' | 'both'
+#  - row_limit, country, device, order_by, only_articles, min_clicks, min_impressions
+#  - concurrency, timeout_s, ua, joiner, entities, sheet_title_prefix
+#  - wants: {...}, xpaths: {...}
+# =============================================================================
+def _cs_normalize_params(p: dict) -> dict:
+    if not isinstance(p, dict):
+        return {}
+
+    out = dict(p)
+
+    # Fechas
+    def _iso(d):
+        try:
+            return d.isoformat()
+        except Exception:
+            return str(d)
+
+    if "date_from" in out:
+        out["date_from"] = _iso(out["date_from"])
+    if "date_to" in out:
+        out["date_to"] = _iso(out["date_to"])
+
+    # Source
+    src = str(out.get("source", "both")).strip().lower()
+    if src in ("search + discover", "search+discover", "both", "ambos"):
+        src = "both"
+    elif src in ("search", "web"):
+        src = "search"
+    elif src == "discover":
+        src = "discover"
+    else:
+        src = "both"
+    out["source"] = src
+
+    # Orden
+    order_by = str(out.get("order_by", "clicks")).strip().lower()
+    if order_by not in ("clicks", "impressions", "ctr", "position"):
+        order_by = "clicks"
+    out["order_by"] = order_by
+
+    # Límites y números
+    def _to_int(key, default=None):
+        try:
+            out[key] = int(out.get(key)) if out.get(key) is not None else default
+        except Exception:
+            out[key] = default
+
+    _to_int("row_limit", 500)
+    _to_int("min_clicks", 0)
+    _to_int("min_impressions", 0)
+    _to_int("concurrency", 24)
+    _to_int("timeout_s", 12)
+
+    # Flags
+    out["only_articles"] = bool(out.get("only_articles", True))
+    out["entities"] = bool(out.get("entities", False))
+
+    # Device/Country
+    dev = out.get("device")
+    if isinstance(dev, str):
+        dev = dev.strip().upper()
+        if dev not in ("DESKTOP", "MOBILE", "TABLET", ""):
+            dev = ""
+    else:
+        dev = ""
+    out["device"] = dev or None
+
+    cty = out.get("country")
+    if isinstance(cty, str):
+        cty = cty.strip().upper()
+    out["country"] = cty or None
+
+    # Joiner y UA
+    out["joiner"] = out.get("joiner") or " | "
+    out["ua"] = out.get("ua") or ""
+
+    # wants/xpaths dicts
+    wants = dict(out.get("wants") or {})
+    xpaths = dict(out.get("xpaths") or {})
+    out["wants"] = wants
+    out["xpaths"] = {k: (str(v) if v is not None else "") for k, v in xpaths.items()}
+
+    # Prefijo título
+    out["sheet_title_prefix"] = out.get("sheet_title_prefix") or "Estructura contenidos"
+
+    return out
+
+# Envolver el runner de estructura con shim y manejo de errores visibles (sin relanzar)
+if run_content_structure is not None:
+    _ext_rcs_fn = run_content_structure
+
+    def _rcs_wrapper(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
+        import json as _json
+        try:
+            import streamlit as st
+        except Exception:
+            st = None
+
+        norm_params = _cs_normalize_params(dict(params or {}))
+        try:
+            sid = _ext_rcs_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
+            return sid
+        except Exception as e:
+            if st is not None:
+                st.session_state["_cs_norm_params"] = norm_params
+                st.session_state["_cs_error"] = str(e)
+                st.error(f"❌ Análisis de estructura de contenidos falló: {e}")
+                st.caption("Payload normalizado enviado al runner:")
+                st.code(_json.dumps(norm_params, ensure_ascii=False, indent=2))
+            return None
+
+    run_content_structure = _rcs_wrapper
 
 # =============================================================================
 # Parche de serialización segura al escribir a Sheets desde módulos externos
@@ -282,7 +414,7 @@ def _patch_write_ws_if_present(module_name: str) -> None:
                     return None
                 if isinstance(x, (pd.Timestamp, _dt.datetime, _dt.date, _dt.time)):
                     try:
-                        if isinstance(x, pd.Timestamp) and x.tz is not None:
+                        if isinstance(x, pd.Timestamp) and getattr(x, "tz", None) is not None:
                             x = x.tz_convert("UTC").tz_localize(None)
                     except Exception:
                         pass
@@ -317,6 +449,7 @@ for _candidate in [
     "seo_analisis_ext.discover_snoop",
     "seo_analisis_ext.content_analysis",
     "seo_analisis_ext.analysis_content",
+    "seo_analisis_ext.content_structure",   # <- NUEVO
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
@@ -330,4 +463,5 @@ __all__ = [
     "run_names_analysis",
     "run_discover_snoop",
     "run_content_analysis",
+    "run_content_structure",   # <- NUEVO
 ]
