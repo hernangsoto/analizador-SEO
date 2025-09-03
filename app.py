@@ -1423,10 +1423,10 @@ elif analisis == "2":
     start_month = first_day_of_month(cut) if cut.day == 1 else first_day_of_month(add_months(cut, 1))
 
     start_dt, end_dt = start_month, last_full_end
-    else:
+    	else:
         # Personalizado
-        end_dt = anchor
-        start_dt = anchor - timedelta(days=30)
+        	end_dt = anchor
+        	start_dt = anchor - timedelta(days=30)
 
     c1, c2 = st.columns(2)
     with c1:
