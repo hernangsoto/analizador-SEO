@@ -1382,82 +1382,94 @@ elif analisis == "10":
                 st.code(_suggest_user_agent(""))
         joiner = st.text_input("Separador para listas (H2/H3/Tags/Anchors/Negritas/Entidades)", value=" | ", key="joiner")
 
-    # === Botones Seleccionar / Deseleccionar todo ===
-    st.markdown("### 🧩 Campos a extraer")
-    field_keys = [
-        "w_title","w_h1","w_md","w_ogt","w_ogd","w_canon","w_pub","w_upd","w_author","w_lang",
-        "w_firstp","w_h2_list","w_h2_count","w_h3_list","w_h3_count","w_bold","w_bold_list",
-        "w_links","w_link_anchors","w_rel_count","w_rel_anchors","w_tags"
-    ]
-    b1, b2, _sp = st.columns([1,1,6])
-    with b1:
-        if st.button("Seleccionar todo", key="btn_sel_all"):
-            for k in field_keys:
-                st.session_state[k] = True
-            st.rerun()
-    with b2:
-        if st.button("Deseleccionar todo", key="btn_unsel_all"):
-            for k in field_keys:
-                st.session_state[k] = False
-            st.rerun()
+# === 🧩 Campos a extraer ===
+st.markdown("### 🧩 Campos a extraer")
 
-    # === Campos (lineales)
-    colX, colY = st.columns(2)
+# Claves de checkboxes que se pueden seleccionar en bloque
+field_keys = [
+    "w_title","w_h1","w_md","w_ogt","w_ogd","w_canon","w_pub","w_upd","w_author","w_lang",
+    "w_firstp","w_h2_list","w_h2_count","w_h3_list","w_h3_count","w_bold","w_bold_list",
+    "w_links","w_link_anchors","w_rel_count","w_rel_anchors","w_tags"
+]
 
-    with colX:
-        w_title = st.checkbox("Title", value=st.session_state.get("w_title", True), key="w_title")
-        w_h1 = st.checkbox("H1", value=st.session_state.get("w_h1", True), key="w_h1")
-        w_md = st.checkbox("Meta Description", value=st.session_state.get("w_md", True), key="w_md")
-        w_ogt = st.checkbox("OG:title", value=st.session_state.get("w_ogt", False), key="w_ogt")
-        w_ogd = st.checkbox("OG:description", value=st.session_state.get("w_ogd", False), key="w_ogd")
-        w_canon = st.checkbox("Canonical", value=st.session_state.get("w_canon", True), key="w_canon")
-        w_pub = st.checkbox("Fecha publicación (meta/time)", value=st.session_state.get("w_pub", False), key="w_pub")
-        w_upd = st.checkbox("Fecha actualización (meta/time)", value=st.session_state.get("w_upd", False), key="w_upd")
-        w_author = st.checkbox("Autor", value=st.session_state.get("w_author", False), key="w_author")
-        w_lang = st.checkbox("Lang (html@lang)", value=st.session_state.get("w_lang", False), key="w_lang")
+# Defaults para evitar value= en los widgets (y así no chocar con Session State)
+FIELD_DEFAULTS = {
+    "w_title": True, "w_h1": True, "w_md": True, "w_ogt": False, "w_ogd": False,
+    "w_canon": True, "w_pub": False, "w_upd": False, "w_author": False, "w_lang": False,
+    "w_firstp": True, "w_h2_list": False, "w_h2_count": False, "w_h3_list": False, "w_h3_count": False,
+    "w_bold": False, "w_bold_list": False, "w_links": False, "w_link_anchors": False,
+    "w_rel_count": False, "w_rel_anchors": False, "w_tags": False,
+}
+for k, v in FIELD_DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=st.session_state.get("w_firstp", True), key="w_firstp")
-        xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value=st.session_state.get("xp_firstp",""), key="xp_firstp",
-                                  help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
+# Botones Seleccionar / Deseleccionar todo
+b1, b2, _sp = st.columns([1,1,6])
+with b1:
+    if st.button("Seleccionar todo", key="btn_sel_all"):
+        for k in field_keys:
+            st.session_state[k] = True
+        st.rerun()
+with b2:
+    if st.button("Deseleccionar todo", key="btn_unsel_all"):
+        for k in field_keys:
+            st.session_state[k] = False
+        st.rerun()
 
-        # XPath del contenedor del artículo
-        xp_article = st.text_input(
-            "XPath del contenedor del artículo (recomendado)",
-            value=st.session_state.get("xp_article",""),
-            key="xp_article",
-            help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
-        )
-        st.caption("Si no lo indicás, usaré heurística (//article | //main).")
+# Widgets SIN 'value=' (usan el estado ya inicializado arriba)
+colX, colY = st.columns(2)
 
-        # Caja de noticias relacionadas
-        st.markdown("**Caja de noticias relacionadas**")
-        w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", value=st.session_state.get("w_rel_count", False), key="w_rel_count")
-        w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", value=st.session_state.get("w_rel_anchors", False), key="w_rel_anchors")
-        xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", value=st.session_state.get("xp_related",""), key="xp_related",
-                                   help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
+with colX:
+    w_title = st.checkbox("Title", key="w_title")
+    w_h1 = st.checkbox("H1", key="w_h1")
+    w_md = st.checkbox("Meta Description", key="w_md")
+    w_ogt = st.checkbox("OG:title", key="w_ogt")
+    w_ogd = st.checkbox("OG:description", key="w_ogd")
+    w_canon = st.checkbox("Canonical", key="w_canon")
+    w_pub = st.checkbox("Fecha publicación (meta/time)", key="w_pub")
+    w_upd = st.checkbox("Fecha actualización (meta/time)", key="w_upd")
+    w_author = st.checkbox("Autor", key="w_author")
+    w_lang = st.checkbox("Lang (html@lang)", key="w_lang")
 
-    with colY:
-        w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=st.session_state.get("w_h2_list", False), key="w_h2_list")
-        w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=st.session_state.get("w_h2_count", False), key="w_h2_count")
-        xp_h2 = st.text_input("XPath H2 (opcional)", value=st.session_state.get("xp_h2",""), key="xp_h2",
-                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
-        w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=st.session_state.get("w_h3_list", False), key="w_h3_list")
-        w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=st.session_state.get("w_h3_count", False), key="w_h3_count")
-        xp_h3 = st.text_input("XPath H3 (opcional)", value=st.session_state.get("xp_h3",""), key="xp_h3",
-                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
-        w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=st.session_state.get("w_bold", False), key="w_bold")
-        w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", value=st.session_state.get("w_bold_list", False), key="w_bold_list")
-        w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=st.session_state.get("w_links", False), key="w_links")
-        w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", value=st.session_state.get("w_link_anchors", False), key="w_link_anchors")
-        w_tags = st.checkbox("Tags (lista)", value=st.session_state.get("w_tags", False), key="w_tags")
-        xp_tags = st.text_input("XPath Tags (opcional)", value=st.session_state.get("xp_tags",""), key="xp_tags",
-                                help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
+    w_firstp = st.checkbox("Primer párrafo (XPath opcional)", key="w_firstp")
+    xp_firstp = st.text_input("XPath Primer párrafo (opcional)", key="xp_firstp",
+                              help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
 
-        # XPaths opcionales para autor/updated específicos
-        xp_author = st.text_input("XPath Autor (opcional)", value=st.session_state.get("xp_author",""), key="xp_author",
-                                  help="Ej: //span[@class='author-name']")
-        xp_updated = st.text_input("XPath Fecha actualización (opcional)", value=st.session_state.get("xp_updated",""), key="xp_updated",
-                                   help="Ej: //time[contains(@class,'update')]")
+    xp_article = st.text_input(
+        "XPath del contenedor del artículo (recomendado)",
+        key="xp_article",
+        help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
+    )
+    st.caption("Si no lo indicás, usaré heurística (//article | //main).")
+
+    st.markdown("**Caja de noticias relacionadas**")
+    w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", key="w_rel_count")
+    w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", key="w_rel_anchors")
+    xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", key="xp_related",
+                               help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
+
+with colY:
+    w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", key="w_h2_list")
+    w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", key="w_h2_count")
+    xp_h2 = st.text_input("XPath H2 (opcional)", key="xp_h2",
+                          help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
+    w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", key="w_h3_list")
+    w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", key="w_h3_count")
+    xp_h3 = st.text_input("XPath H3 (opcional)", key="xp_h3",
+                          help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
+    w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", key="w_bold")
+    w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", key="w_bold_list")
+    w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", key="w_links")
+    w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", key="w_link_anchors")
+    w_tags = st.checkbox("Tags (lista)", key="w_tags")
+    xp_tags = st.text_input("XPath Tags (opcional)", key="xp_tags",
+                            help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
+
+    xp_author = st.text_input("XPath Autor (opcional)", key="xp_author",
+                              help="Ej: //span[@class='author-name']")
+    xp_updated = st.text_input("XPath Fecha actualización (opcional)", key="xp_updated",
+                               help="Ej: //time[contains(@class,'update')]")
 
     # NER con spaCy
     st.markdown("### 🧠 Entidades (spaCy)")
