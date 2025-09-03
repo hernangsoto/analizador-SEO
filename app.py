@@ -2066,7 +2066,7 @@ elif analisis == "10":
         st.info("Ajustá la ventana o filtros para obtener semillas desde GSC.")
 
 else:
-    st.info("Las opciones 1, 2 y 3 aún no están disponibles en esta versión.")
+    st.info("La opción 1 aún no esta disponible en esta versión.")
 
 # --- Panel persistente de resumen (una sola vez) ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
