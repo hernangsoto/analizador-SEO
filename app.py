@@ -6,7 +6,6 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 import sys
-import re
 import json
 import asyncio
 from types import SimpleNamespace
@@ -73,7 +72,6 @@ except Exception:
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
-from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 
 # 🔑 para leer tokens guardados por el Paso 0 en otra pestaña
 from modules.utils import token_store
@@ -306,7 +304,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if include_content:
         opciones.append("9. Análisis de contenido (repo externo) ✅")
     # EXTRACTOR rápido
-    opciones.append("10. Extractor rápido GSC → H1 (+ metadatos) ✅")
+    opciones.append("10. Extractor rápido GSC → H1 (+ metadatos + NER) ✅")
 
     key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
     if key.startswith("4."): return "4"
@@ -423,6 +421,664 @@ if analisis == "8":
         gemini_summary(gs_client, st.session_state["last_file_id"],
                        kind=st.session_state["last_file_kind"], widget_suffix="panel")
     st.stop()
+
+# =========================
+# Utilidades comunes
+# =========================
+
+def _iso3_lower(x: str | None) -> str | None:
+    if not x: return None
+    return str(x).strip().lower()
+
+def _device_upper(x: str | None) -> str | None:
+    if not x: return None
+    v = str(x).strip().lower()
+    if v in ("desktop","mobile","tablet"):
+        return v.upper()
+    return None
+
+def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
+                        country: str | None, device: str | None,
+                        order_by: str, row_limit: int) -> list[dict]:
+    """
+    search_type: "web" (Search) | "discover"
+    order_by: "clicks" | "impressions" | "ctr" | "position"
+    """
+    try:
+        body = {
+            "startDate": str(start),
+            "endDate": str(end),
+            "dimensions": ["page"],
+            "rowLimit": int(row_limit),
+            "startRow": 0,
+            "type": search_type,
+            "orderBy": [{"field": order_by, "descending": True}],
+        }
+        filters = []
+        if country:
+            filters.append({
+                "dimension": "country",
+                "operator": "equals",
+                "expression": _iso3_lower(country)
+            })
+        if device:
+            filters.append({
+                "dimension": "device",
+                "operator": "equals",
+                "expression": _device_upper(device)
+            })
+        if filters:
+            body["dimensionFilterGroups"] = [{"groupType":"and","filters":filters}]
+        resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
+        rows = resp.get("rows", []) or []
+        out = []
+        for r in rows:
+            keys = r.get("keys") or []
+            page = keys[0] if keys else ""
+            out.append({
+                "page": page,
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "ctr": r.get("ctr", 0.0),
+                "position": r.get("position", 0.0),
+            })
+        return out
+    except Exception as e:
+        st.session_state["_fast_error"] = f"GSC query error ({search_type}): {e}"
+        return []
+
+# Patrones default para excluir URLs no-article
+_DEFAULT_DROP_PATTERNS = (
+    "/player/", "/tag/", "/tags/", "/etiqueta/", "/categoria/", "/category/",
+    "/author/", "/autores/", "/programas/", "/hd/", "/podcast", "/videos/",
+    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?"
+)
+def _is_article_url(u: str, extra_drop: tuple[str, ...] = ()) -> bool:
+    if not u: return False
+    u = u.strip().lower()
+    if u in ("https://", "http://"): return False
+    if u.endswith((".jpg",".jpeg",".png",".gif",".svg",".webp",".mp4",".mp3",".m3u8",".pdf",".webm",".avi",".mov")):
+        return False
+    if u.count("/") <= 3:
+        return False
+    for p in (_DEFAULT_DROP_PATTERNS + tuple(extra_drop)):
+        if p and p.strip() and p.strip().lower() in u:
+            return False
+    return True
+
+def _filter_article_urls(urls: list[str], extra_drop: tuple[str, ...] = ()) -> list[str]:
+    return [u for u in urls if _is_article_url(u, extra_drop)]
+
+def _suggest_user_agent(ua: str | None) -> str:
+    if ua and ua.strip():
+        return ua
+    return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36")
+
+# -------------------------
+# Cargador spaCy tolerante a falta de permisos (instala en carpeta de usuario)
+# -------------------------
+@st.cache_resource(show_spinner=False)
+def _load_spacy_model(preferred: str | None = None):
+    """
+    Intenta cargar un modelo spaCy. Si no está instalado:
+    - prueba pip --target a un directorio del usuario (sin tocar site-packages del venv)
+    - si pip falla, descarga el wheel y lo descomprime en ese directorio
+    Devuelve `nlp` o None si no pudo.
+    """
+    try:
+        import os, sys, site, subprocess, zipfile, urllib.request, importlib
+        import spacy
+        from spacy.util import is_package
+    except Exception:
+        return None
+
+    TARGETS = [
+        os.path.join(os.path.expanduser("~"), ".local", "spacy_models"),
+        os.path.join(os.getcwd(), ".spacy_models"),
+        "/tmp/spacy_models",
+    ]
+    for t in TARGETS:
+        try: os.makedirs(t, exist_ok=True)
+        except Exception: pass
+
+    def _model_ver():
+        try:
+            major, minor = spacy.__version__.split(".")[:2]
+            return f"{major}.{minor}.0"
+        except Exception:
+            return "3.8.0"
+
+    names = []
+    if preferred and preferred.strip():
+        names.append(preferred.strip())
+    names += ["es_core_news_sm", "en_core_web_sm", "xx_ent_wiki_sm"]
+    seen=set(); names=[n for n in names if not (n in seen or seen.add(n))]
+
+    tried=[]
+    for pkg in names:
+        # ya está?
+        try:
+            if is_package(pkg):
+                return spacy.load(pkg)
+        except Exception:
+            pass
+        # pip --target
+        for tgt in TARGETS:
+            try:
+                cmd=[sys.executable,"-m","pip","install","--no-cache-dir","--no-deps","--disable-pip-version-check","--target",tgt,f"{pkg}=={_model_ver()}"]
+                subprocess.check_call(cmd)
+                site.addsitedir(tgt)
+                importlib.import_module(pkg)
+                return spacy.load(pkg)
+            except Exception as e:
+                tried.append(f"{pkg} pip --target {tgt}: {e}")
+            # wheel unzip
+            try:
+                ver=_model_ver()
+                url=f"https://github.com/explosion/spacy-models/releases/download/{pkg}-{ver}/{pkg}-{ver}-py3-none-any.whl"
+                wheel_path=os.path.join(tgt,f"{pkg}-{ver}.whl")
+                urllib.request.urlretrieve(url,wheel_path)
+                with zipfile.ZipFile(wheel_path) as zf:
+                    zf.extractall(tgt)
+                site.addsitedir(tgt)
+                importlib.import_module(pkg)
+                return spacy.load(pkg)
+            except Exception as e:
+                tried.append(f"{pkg} wheel unzip {tgt}: {e}")
+    st.warning("No pude cargar un modelo de spaCy. Probé: " + " | ".join(tried))
+    return None
+
+# -------------------------
+# Scraping rápido (async) + fallback sync
+# -------------------------
+def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " | ") -> dict:
+    """
+    Extrae campos en función de 'wants' (dict de booleans) y 'xpaths' (opcional).
+    Soporta:
+      title, h1, meta_description, og_title, og_description, canonical, published_time, updated_time, author, lang,
+      first_paragraph,
+      h2_list, h2_count, h3_list, h3_count,
+      bold_count, bold_list,
+      link_count, link_anchor_texts,
+      related_links_count, related_link_anchors,
+      tags_list
+
+    *IMPORTANTE*: h2/h3/negritas/links se buscan SOLO dentro del contenedor del artículo si se provee
+    `xpaths['article']`. Si no, se usa heurística (//article | //main).
+    """
+    data = {
+        "h1": "", "title": "", "meta_description": "", "og_title": "", "og_description": "",
+        "canonical": "", "published_time": "", "updated_time": "", "author": "", "lang": "",
+        "first_paragraph": "",
+        "h2_list": "", "h2_count": 0, "h3_list": "", "h3_count": 0,
+        "bold_count": 0, "bold_list": "",
+        "link_count": 0, "link_anchor_texts": "",
+        "related_links_count": 0, "related_link_anchors": "",
+        "tags_list": "",
+        "_article_text": ""  # para NER (no se exporta salvo que se pida)
+    }
+
+    # Intentar lxml para XPath
+    doc = None
+    have_lxml = False
+    try:
+        import lxml.html as LH  # type: ignore
+        doc = LH.fromstring(html)
+        have_lxml = True
+    except Exception:
+        have_lxml = False
+
+    # BeautifulSoup para heurísticas
+    soup = None
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        soup = None
+
+    def _meta_bs(name=None, prop=None):
+        if not soup: return ""
+        if name:
+            el = soup.find("meta", attrs={"name": name})
+            if el: return (el.get("content") or "").strip()
+        if prop:
+            el = soup.find("meta", attrs={"property": prop})
+            if el: return (el.get("content") or "").strip()
+        return ""
+
+    def _xpath_text_list(_doc_or_node, xp: str) -> list[str]:
+        if not _doc_or_node or not xp: return []
+        try:
+            nodes = _doc_or_node.xpath(xp)
+            out = []
+            for n in nodes:
+                if isinstance(n, str):
+                    txt = n.strip()
+                elif hasattr(n, "text_content"):
+                    txt = n.text_content().strip()
+                else:
+                    txt = str(n).strip()
+                if txt:
+                    out.append(txt)
+            return out
+        except Exception:
+            return []
+
+    # Determinar contenedor del artículo (scope)
+    lxml_scope_nodes = []
+    soup_scope = None
+    xp_article = (xpaths.get("article") or "").strip()
+    if have_lxml:
+        try:
+            if xp_article:
+                nodes = doc.xpath(xp_article)
+                lxml_scope_nodes = [n for n in nodes if hasattr(n, "xpath")]
+            if not lxml_scope_nodes:
+                lxml_scope_nodes = [n for n in doc.xpath("//article | //main") if hasattr(n, "xpath")]
+        except Exception:
+            lxml_scope_nodes = []
+    if soup and not lxml_scope_nodes:
+        try:
+            soup_scope = soup.select_one("article") or soup.select_one("main")
+        except Exception:
+            soup_scope = None
+
+    # Texto completo del artículo (para NER/ponderación)
+    art_text = ""
+    try:
+        if lxml_scope_nodes:
+            parts=[]
+            for node in lxml_scope_nodes:
+                try:
+                    t = node.text_content()
+                    if t and t.strip(): parts.append(t.strip())
+                except Exception:
+                    pass
+            art_text = " ".join(parts).strip()
+        elif soup_scope:
+            art_text = soup_scope.get_text(separator=" ", strip=True)
+    except Exception:
+        art_text = ""
+    data["_article_text"] = art_text
+
+    # --- Campos básicos (document-wide) ---
+    if wants.get("title"):
+        if soup and soup.title and soup.title.string:
+            data["title"] = soup.title.string.strip()
+        elif have_lxml:
+            try:
+                t = doc.xpath("string(//title)")
+                data["title"] = (t or "").strip()
+            except Exception:
+                pass
+
+    if wants.get("h1"):
+        if have_lxml:
+            try:
+                t = doc.xpath("string((//h1)[1])")
+                data["h1"] = (t or "").strip()
+            except Exception:
+                pass
+        if not data["h1"] and soup:
+            el = soup.find("h1")
+            if el: data["h1"] = el.get_text(strip=True)
+
+    if wants.get("meta_description"):
+        data["meta_description"] = _meta_bs(name="description") or _meta_bs(prop="description")
+
+    if wants.get("og_title"):
+        data["og_title"] = _meta_bs(prop="og:title")
+
+    if wants.get("og_description"):
+        data["og_description"] = _meta_bs(prop="og:description")
+
+    if wants.get("canonical"):
+        if have_lxml:
+            try:
+                hrefs = doc.xpath("//link[translate(@rel,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')='canonical']/@href")
+                if hrefs: data["canonical"] = hrefs[0].strip()
+            except Exception:
+                pass
+        if not data["canonical"] and soup:
+            try:
+                link = soup.find("link", rel=lambda v: v and ("canonical" in [x.lower() for x in (v if isinstance(v, list) else [v])]))
+                if link: data["canonical"] = (link.get("href") or "").strip()
+            except Exception:
+                pass
+
+    if wants.get("published_time"):
+        val = _meta_bs(prop="article:published_time") or _meta_bs(name="pubdate") or _meta_bs(name="date")
+        if not val and have_lxml:
+            try:
+                val = (doc.xpath("string(//time/@datetime)")) or (doc.xpath("string(//time[1])"))
+            except Exception:
+                pass
+        if not val and soup:
+            try:
+                time_tag = soup.find("time")
+                if time_tag:
+                    val = (time_tag.get("datetime") or "").strip() or time_tag.get_text(strip=True)
+            except Exception:
+                pass
+        data["published_time"] = (val or "").strip()
+
+    if wants.get("updated_time"):
+        val = _meta_bs(prop="article:modified_time") or _meta_bs(name="lastmod")
+        if not val and have_lxml:
+            try:
+                val = (doc.xpath("string((//time[@itemprop='dateModified' or contains(@class,'update')])[1]/@datetime)")) or \
+                      (doc.xpath("string((//time[@itemprop='dateModified' or contains(@class,'update')])[1])"))
+            except Exception:
+                pass
+        data["updated_time"] = (val or "").strip()
+
+    if wants.get("author"):
+        val = _meta_bs(name="author") or _meta_bs(prop="article:author")
+        if not val and have_lxml:
+            try:
+                val = (doc.xpath("string((//*[@rel='author' or contains(@class,'author')][1]))")).strip()
+            except Exception:
+                pass
+        data["author"] = (val or "").strip()
+
+    if wants.get("lang"):
+        if have_lxml:
+            try:
+                data["lang"] = (doc.xpath("string(//html/@lang)") or "").strip()
+            except Exception:
+                pass
+        if not data["lang"] and soup:
+            try:
+                html_tag = soup.find("html")
+                if html_tag:
+                    data["lang"] = (html_tag.get("lang") or "").strip()
+            except Exception:
+                pass
+
+    # --- Avanzados (dentro del artículo cuando aplique) ---
+    # Primer párrafo
+    if wants.get("first_paragraph"):
+        xp_first = (xpaths.get("first_paragraph") or "").strip()
+        text = ""
+        if xp_first and have_lxml:
+            lst = _xpath_text_list(doc, xp_first)
+            text = next((t for t in lst if t.strip()), "")
+        if not text:
+            if have_lxml and lxml_scope_nodes:
+                for node in lxml_scope_nodes:
+                    try:
+                        t = node.xpath("string(.//p[normalize-space()][1])")
+                        if t and t.strip():
+                            text = t.strip(); break
+                    except Exception:
+                        pass
+            if not text and soup_scope:
+                p = soup_scope.find("p")
+                if p: text = p.get_text(strip=True)
+            if not text and soup:
+                p = soup.find("p")
+                if p: text = p.get_text(strip=True)
+        data["first_paragraph"] = text
+
+    # Helper para juntar textos dentro del scope lxml
+    def _collect_scope_texts(nodeset, xpath_rel: str) -> list[str]:
+        vals: list[str] = []
+        if nodeset:
+            for node in nodeset:
+                try:
+                    parts = node.xpath(xpath_rel)
+                except Exception:
+                    parts = []
+                for p in parts:
+                    if isinstance(p, str):
+                        txt = p.strip()
+                    elif hasattr(p, "text_content"):
+                        txt = p.text_content().strip()
+                    else:
+                        txt = str(p).strip()
+                    if txt:
+                        vals.append(txt)
+        return vals
+
+    # H2
+    if wants.get("h2_list") or wants.get("h2_count"):
+        xp_h2 = (xpaths.get("h2") or "").strip()
+        h2s: list[str] = []
+        if xp_h2 and have_lxml:
+            if _article_scoped := bool(lxml_scope_nodes and (xp_h2.startswith(".") or not xp_h2.startswith("/"))):
+                h2s = _collect_scope_texts(lxml_scope_nodes, xp_h2 if xp_h2.startswith(".") else ".//" + xp_h2.strip("./"))
+            else:
+                h2s = _xpath_text_list(doc, xp_h2)
+        elif have_lxml and lxml_scope_nodes:
+            h2s = _collect_scope_texts(lxml_scope_nodes, ".//h2")
+        elif soup_scope:
+            h2s = [el.get_text(strip=True) for el in soup_scope.find_all("h2")]
+        h2s = [t for t in (h2s or []) if t]
+        if wants.get("h2_list"):  data["h2_list"]  = (joiner.join(h2s)) if h2s else ""
+        if wants.get("h2_count"): data["h2_count"] = len(h2s)
+
+    # H3
+    if wants.get("h3_list") or wants.get("h3_count"):
+        xp_h3 = (xpaths.get("h3") or "").strip()
+        h3s: list[str] = []
+        if xp_h3 and have_lxml:
+            if lxml_scope_nodes and (xp_h3.startswith(".") or not xp_h3.startswith("/")):
+                h3s = _collect_scope_texts(lxml_scope_nodes, xp_h3 if xp_h3.startswith(".") else ".//" + xp_h3.strip("./"))
+            else:
+                h3s = _xpath_text_list(doc, xp_h3)
+        elif have_lxml and lxml_scope_nodes:
+            h3s = _collect_scope_texts(lxml_scope_nodes, ".//h3")
+        elif soup_scope:
+            h3s = [el.get_text(strip=True) for el in soup_scope.find_all("h3")]
+        h3s = [t for t in (h3s or []) if t]
+        if wants.get("h3_list"):  data["h3_list"]  = (joiner.join(h3s)) if h3s else ""
+        if wants.get("h3_count"): data["h3_count"] = len(h3s)
+
+    # Negritas — count + lista
+    if wants.get("bold_count") or wants.get("bold_list"):
+        cnt = 0
+        blist: list[str] = []
+        if have_lxml and lxml_scope_nodes:
+            for node in lxml_scope_nodes:
+                try:
+                    bs = node.xpath(".//*[self::b or self::strong]")
+                    cnt += len(bs)
+                    if wants.get("bold_list"):
+                        for b in bs:
+                            try:
+                                t = b.text_content().strip()
+                                if t: blist.append(t)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        elif soup_scope:
+            try:
+                bs = soup_scope.select("b, strong")
+                cnt = len(bs)
+                if wants.get("bold_list"):
+                    blist = [el.get_text(strip=True) for el in bs if el.get_text(strip=True)]
+            except Exception:
+                cnt = 0
+        data["bold_count"] = int(cnt or 0)
+        if wants.get("bold_list"):
+            data["bold_list"] = joiner.join([t for t in blist if t])
+
+    # Links — count + anchors
+    if wants.get("link_count") or wants.get("link_anchor_texts"):
+        cnt = 0
+        anchors: list[str] = []
+        if have_lxml and lxml_scope_nodes:
+            for node in lxml_scope_nodes:
+                try:
+                    alist = node.xpath(".//a[@href]")
+                    cnt += len(alist)
+                    if wants.get("link_anchor_texts"):
+                        for a in alist:
+                            try:
+                                t = a.text_content().strip()
+                                if t: anchors.append(t)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        elif soup_scope:
+            try:
+                alist = soup_scope.find_all("a", href=True)
+                cnt = len(alist)
+                if wants.get("link_anchor_texts"):
+                    anchors = [a.get_text(strip=True) for a in alist if a.get_text(strip=True)]
+            except Exception:
+                cnt = 0
+        data["link_count"] = int(cnt or 0)
+        if wants.get("link_anchor_texts"):
+            data["link_anchor_texts"] = joiner.join([t for t in anchors if t])
+
+    # Caja de noticias relacionadas (xpath contenedor) → count + anchors
+    if wants.get("related_links_count") or wants.get("related_link_anchors"):
+        xp_rel = (xpaths.get("related_box") or "").strip()
+        rel_cnt = 0
+        rel_anchors: list[str] = []
+        if xp_rel and have_lxml:
+            try:
+                boxes = doc.xpath(xp_rel)
+            except Exception:
+                boxes = []
+            for bx in boxes:
+                try:
+                    alist = bx.xpath(".//a[@href]")
+                except Exception:
+                    alist = []
+                rel_cnt += len(alist)
+                if wants.get("related_link_anchors"):
+                    for a in alist:
+                        try:
+                            t = a.text_content().strip()
+                            if t: rel_anchors.append(t)
+                        except Exception:
+                            pass
+        data["related_links_count"] = int(rel_cnt or 0)
+        if wants.get("related_link_anchors"):
+            data["related_link_anchors"] = joiner.join([t for t in rel_anchors if t])
+
+    # Tags (lista)
+    if wants.get("tags_list"):
+        xp_tags = (xpaths.get("tags") or "").strip()
+        tags = []
+        if xp_tags and have_lxml:
+            if lxml_scope_nodes and (xp_tags.startswith(".") or not xp_tags.startswith("/")):
+                for node in lxml_scope_nodes:
+                    tags += _xpath_text_list(node, xp_tags if xp_tags.startswith(".") else ".//" + xp_tags.strip("./"))
+            else:
+                tags = _xpath_text_list(doc, xp_tags)
+        else:
+            mt = []
+            if have_lxml:
+                try:
+                    mt = [t for t in doc.xpath("//meta[@property='article:tag']/@content") if t and str(t).strip()]
+                except Exception:
+                    mt = []
+            if not mt and soup:
+                try:
+                    mt = [ (m.get("content") or "").strip()
+                           for m in soup.find_all("meta", attrs={"property":"article:tag"}) ]
+                    mt = [t for t in mt if t]
+                except Exception:
+                    mt = []
+            tags = mt
+        tags = [t.strip() for t in (tags or []) if t and str(t).strip()]
+        data["tags_list"] = (joiner.join(tags)) if tags else ""
+
+    return data
+
+async def _fetch_one(session, url: str, ua: str, timeout_s: int, wants: dict, xpaths: dict, joiner: str) -> dict:
+    base = {"url": url, "ok": False, "status": 0, "error": ""}
+    try:
+        async with session.get(url, headers={"User-Agent": ua}, timeout=timeout_s, allow_redirects=True) as resp:
+            base["status"] = resp.status
+            if resp.status >= 400:
+                base["error"] = f"http {resp.status}"
+                return base
+            html = await resp.text(errors="ignore")
+            meta = _parse_html_for_meta(html, wants=wants, xpaths=xpaths, joiner=joiner)
+            base.update(meta)
+            base["ok"] = True
+            return base
+    except Exception as e:
+        base["error"] = str(e)
+        return base
+
+async def _scrape_async(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: str,
+                        timeout_s: int = 12, concurrency: int = 20) -> list[dict]:
+    # aiohttp es opcional
+    try:
+        import aiohttp  # type: ignore
+    except Exception:
+        return _scrape_sync(urls, ua, wants, xpaths, joiner, timeout_s, concurrency)
+
+    connector = aiohttp.TCPConnector(limit=concurrency, ssl=False)
+    timeout = aiohttp.ClientTimeout(total=max(timeout_s+2, timeout_s))
+    results: list[dict] = []
+    sem = asyncio.Semaphore(concurrency)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=True) as session:
+        async def _bound(u):
+            async with sem:
+                return await _fetch_one(session, u, ua, timeout_s, wants, xpaths, joiner)
+        tasks = [_bound(u) for u in urls]
+        done = 0
+        progress = st.progress(0.0, text="Scrapeando páginas…")
+        for coro in asyncio.as_completed(tasks):
+            res = await coro
+            results.append(res)
+            done += 1
+            progress.progress(done/len(tasks), text=f"Scrapeando páginas… {done}/{len(tasks)}")
+        progress.empty()
+    order = {u:i for i,u in enumerate(urls)}
+    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
+    return results
+
+def _scrape_sync(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: str,
+                 timeout_s: int = 12, concurrency: int = 12) -> list[dict]:
+    try:
+        import requests
+    except Exception as e:
+        return [{"url": u, "ok": False, "status": 0, "error": f"requests no disponible: {e}"} for u in urls]
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: list[dict] = []
+    headers = {"User-Agent": ua}
+
+    def _one(u: str) -> dict:
+        base = {"url": u, "ok": False, "status": 0, "error": ""}
+        try:
+            rs = requests.get(u, headers=headers, timeout=timeout_s, allow_redirects=True)
+            base["status"] = rs.status_code
+            if rs.status_code >= 400:
+                base["error"] = f"http {rs.status_code}"
+                return base
+            meta = _parse_html_for_meta(rs.text, wants=wants, xpaths=xpaths, joiner=joiner)
+            base.update(meta)
+            base["ok"] = True
+        except Exception as e:
+            base["error"] = str(e)
+        return base
+
+    progress = st.progress(0.0, text="Scrapeando páginas…")
+    done = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_one, u) for u in urls]
+        for f in as_completed(futs):
+            results.append(f.result())
+            done += 1
+            progress.progress(done/len(futs), text=f"Scrapeando páginas… {done}/{len(futs)}")
+    progress.empty()
+    order = {u:i for i,u in enumerate(urls)}
+    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
+    return results
 
 # ======== Resto de análisis (requieren GSC) ========
 
@@ -611,663 +1267,7 @@ def pick_site(sc_service):
 
 site_url = pick_site(sc_service)
 
-# =========================
-# Utilidades comunes
-# =========================
-
-def _iso3_lower(x: str | None) -> str | None:
-    if not x: return None
-    return str(x).strip().lower()
-
-def _device_upper(x: str | None) -> str | None:
-    if not x: return None
-    v = str(x).strip().lower()
-    if v in ("desktop","mobile","tablet"):
-        return v.upper()
-    return None
-
-def _gsc_fetch_top_urls(sc, site: str, start: date, end: date, search_type: str,
-                        country: str | None, device: str | None,
-                        order_by: str, row_limit: int) -> list[dict]:
-    """
-    search_type: "web" (Search) | "discover"
-    order_by: "clicks" | "impressions" | "ctr" | "position"
-    """
-    try:
-        body = {
-            "startDate": str(start),
-            "endDate": str(end),
-            "dimensions": ["page"],
-            "rowLimit": int(row_limit),
-            "startRow": 0,
-            "type": search_type,
-            "orderBy": [{"field": order_by, "descending": True}],
-        }
-        filters = []
-        if country:
-            filters.append({
-                "dimension": "country",
-                "operator": "equals",
-                "expression": _iso3_lower(country)
-            })
-        if device:
-            filters.append({
-                "dimension": "device",
-                "operator": "equals",
-                "expression": _device_upper(device)
-            })
-        if filters:
-            body["dimensionFilterGroups"] = [{"groupType":"and","filters":filters}]
-        resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
-        rows = resp.get("rows", []) or []
-        out = []
-        for r in rows:
-            keys = r.get("keys") or []
-            page = keys[0] if keys else ""
-            out.append({
-                "page": page,
-                "clicks": r.get("clicks", 0),
-                "impressions": r.get("impressions", 0),
-                "ctr": r.get("ctr", 0.0),
-                "position": r.get("position", 0.0),
-            })
-        return out
-    except Exception as e:
-        st.session_state["_fast_error"] = f"GSC query error ({search_type}): {e}"
-        return []
-
-_DROP_PATTERNS = (
-    "/player/", "/tag/", "/tags/", "/etiqueta/", "/categoria/", "/category/",
-    "/author/", "/autores/", "/programas/", "/hd/", "/podcast", "/videos/",
-    "/video/", "/envivo", "/en-vivo", "/en_vivo", "/live", "/player-", "?"
-)
-def _is_article_url(u: str) -> bool:
-    if not u: return False
-    u = u.strip().lower()
-    if u in ("https://", "http://"): return False
-    if u.endswith((".jpg",".jpeg",".png",".gif",".svg",".webp",".mp4",".mp3",".m3u8",".pdf",".webm",".avi",".mov")):
-        return False
-    if u.count("/") <= 3:
-        return False
-    for p in _DROP_PATTERNS:
-        if p in u:
-            return False
-    return True
-
-def _filter_article_urls(urls: list[str]) -> list[str]:
-    return [u for u in urls if _is_article_url(u)]
-
-def _suggest_user_agent(ua: str | None) -> str:
-    if ua and ua.strip():
-        return ua
-    return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0.0.0 Safari/537.36")
-
-# ---------- Carga de spaCy con auto-instalación de modelos ----------
-@st.cache_resource(show_spinner=False)
-def _load_spacy_model(preferred: str | None = None):
-    """
-    Intenta cargar un modelo spaCy. Si falta, intenta:
-      1) instalar wheel oficial desde GitHub (según versión de spaCy)
-      2) spacy.cli.download
-    Devuelve `nlp` o None si no pudo.
-    """
-    try:
-        import sys as _sys, subprocess as _sub
-        import spacy
-        from spacy.util import is_package
-        from spacy.cli import download as spacy_download
-    except Exception:
-        return None
-
-    tried = []
-    names = []
-    if preferred and preferred.strip():
-        names.append(preferred.strip())
-    names += ["es_core_news_sm", "en_core_web_sm", "xx_ent_wiki_sm"]
-    seen = set(); names = [n for n in names if not (n in seen or seen.add(n))]
-
-    def _try_wheel(pkg: str) -> bool:
-        try:
-            sv = spacy.__version__.split(".")
-            model_ver = f"{sv[0]}.{sv[1]}.0"
-            url = f"https://github.com/explosion/spacy-models/releases/download/{pkg}-{model_ver}/{pkg}-{model_ver}-py3-none-any.whl"
-            _sub.check_call([_sys.executable, "-m", "pip", "install", url])
-            return True
-        except Exception as e:
-            tried.append(f"{pkg}: wheel fail ({e})")
-            return False
-
-    for pkg in names:
-        try:
-            if is_package(pkg):
-                return spacy.load(pkg)
-        except Exception:
-            pass
-        if _try_wheel(pkg):
-            try:
-                return spacy.load(pkg)
-            except Exception as e:
-                tried.append(f"{pkg}: post-wheel load fail ({e})")
-        try:
-            spacy_download(pkg, False)
-            return spacy.load(pkg)
-        except Exception as e:
-            tried.append(f"{pkg}: {e}")
-
-    st.warning("No pude cargar un modelo de spaCy. Probé: " + " | ".join(tried))
-    return None
-
-def _spacy_entities_weight(nlp, h1: str, meta_desc: str, first_par: str, article_text: str,
-                           topn: int = 10) -> tuple[list[str], list[tuple[str,int]]]:
-    """
-    Detecta entidades en H1+Meta+Primer párrafo; pondera por ocurrencias en texto del artículo.
-    Devuelve (top_entities, detail_pairs) con topn por frecuencia desc.
-    """
-    if nlp is None:
-        return [], []
-    base_text = " ".join([t for t in [h1 or "", meta_desc or "", first_par or ""] if t]).strip()
-    if not base_text:
-        return [], []
-    try:
-        doc = nlp(base_text)
-    except Exception:
-        return [], []
-    ents = [e.text.strip() for e in doc.ents if e.text and e.text.strip()]
-    if not ents:
-        return [], []
-    # contar en artículo
-    art = (article_text or "")
-    pairs = []
-    for e in dict.fromkeys(ents):  # mantener orden de aparición, sin duplicados
-        try:
-            patt = re.compile(rf"(?<!\\w){re.escape(e)}(?!\\w)", re.IGNORECASE)
-            cnt = len(patt.findall(art))
-        except Exception:
-            # fallback simple
-            cnt = art.lower().count(e.lower()) if art else 0
-        pairs.append((e, int(cnt)))
-    # ordenar por frecuencia (desc), luego por longitud desc (para priorizar entidades más específicas)
-    pairs.sort(key=lambda x: (x[1], len(x[0])), reverse=True)
-    top = [p[0] for p in pairs[:max(1, int(topn))] if p[1] >= 0]
-    return top, pairs[:max(1, int(topn))]
-
-# -------------------------
-# Scraping rápido (async) + fallback sync
-# -------------------------
-def _parse_html_for_meta(html: str, wants: dict, xpaths: dict, joiner: str = " | ") -> dict:
-    """
-    Extrae campos en función de 'wants' (dict de booleans) y 'xpaths' (opcional).
-    Campos soportados:
-      h1, title, meta_description, og_title, og_description, canonical, published_time, lang,
-      first_paragraph,
-      h2_list, h2_count, h3_list, h3_count,
-      bold_count, bold_list,
-      link_count, link_anchor_texts,
-      related_links_count, related_link_anchors,
-      tags_list,
-      article_text (solo si wants['collect_article_text'])
-    *IMPORTANTE*: h2/h3/bold/link(s) se buscan SOLO dentro del contenedor del artículo si se provee
-    `xpaths['article']`. Si no se provee, se usa heurística (//article | //main).
-    """
-    data = {
-        "h1": "", "title": "", "meta_description": "", "og_title": "", "og_description": "",
-        "canonical": "", "published_time": "", "lang": "",
-        "first_paragraph": "",
-        "h2_list": "", "h2_count": 0, "h3_list": "", "h3_count": 0,
-        "bold_count": 0, "bold_list": "",
-        "link_count": 0, "link_anchor_texts": "",
-        "related_links_count": 0, "related_link_anchors": "",
-        "tags_list": "",
-        "article_text": ""
-    }
-
-    # Intentar lxml para XPath
-    doc = None
-    have_lxml = False
-    try:
-        import lxml.html as LH  # type: ignore
-        doc = LH.fromstring(html)
-        have_lxml = True
-    except Exception:
-        have_lxml = False
-
-    # BeautifulSoup para heurísticas
-    soup = None
-    try:
-        from bs4 import BeautifulSoup  # type: ignore
-        try:
-            soup = BeautifulSoup(html, "lxml")
-        except Exception:
-            soup = BeautifulSoup(html, "html.parser")
-    except Exception:
-        soup = None
-
-    def _meta_bs(name=None, prop=None):
-        if not soup: return ""
-        if name:
-            el = soup.find("meta", attrs={"name": name})
-            if el: return (el.get("content") or "").strip()
-        if prop:
-            el = soup.find("meta", attrs={"property": prop})
-            if el: return (el.get("content") or "").strip()
-        return ""
-
-    def _xpath_text_list(_doc_or_node, xp: str) -> list[str]:
-        if not _doc_or_node or not xp: return []
-        try:
-            nodes = _doc_or_node.xpath(xp)
-            out = []
-            for n in nodes:
-                if isinstance(n, str):
-                    txt = n.strip()
-                elif hasattr(n, "text_content"):
-                    txt = n.text_content().strip()
-                else:
-                    txt = str(n).strip()
-                if txt:
-                    out.append(txt)
-            return out
-        except Exception:
-            return []
-
-    # Determinar contenedor del artículo (scope) para h2/h3/bold/links (y primer párrafo)
-    lxml_scope_nodes = []
-    soup_scope = None
-    xp_article = (xpaths.get("article") or "").strip()
-    if have_lxml:
-        try:
-            if xp_article:
-                nodes = doc.xpath(xp_article)
-                lxml_scope_nodes = [n for n in nodes if hasattr(n, "xpath")]
-            if not lxml_scope_nodes:
-                lxml_scope_nodes = [n for n in doc.xpath("//article | //main") if hasattr(n, "xpath")]
-        except Exception:
-            lxml_scope_nodes = []
-    if soup and not lxml_scope_nodes:
-        try:
-            soup_scope = soup.select_one("article") or soup.select_one("main")
-        except Exception:
-            soup_scope = None
-
-    # --- Campos básicos (document-wide) ---
-    if wants.get("title"):
-        if soup and soup.title and soup.title.string:
-            data["title"] = soup.title.string.strip()
-        elif have_lxml:
-            try:
-                t = doc.xpath("string(//title)")
-                data["title"] = (t or "").strip()
-            except Exception:
-                pass
-
-    if wants.get("h1"):
-        if have_lxml:
-            try:
-                t = doc.xpath("string((//h1)[1])")
-                data["h1"] = (t or "").strip()
-            except Exception:
-                pass
-        if not data["h1"] and soup:
-            el = soup.find("h1")
-            if el: data["h1"] = el.get_text(strip=True)
-
-    if wants.get("meta_description"):
-        data["meta_description"] = _meta_bs(name="description") or _meta_bs(prop="description")
-
-    if wants.get("og_title"):
-        data["og_title"] = _meta_bs(prop="og:title")
-
-    if wants.get("og_description"):
-        data["og_description"] = _meta_bs(prop="og:description")
-
-    if wants.get("canonical"):
-        if have_lxml:
-            try:
-                hrefs = doc.xpath("//link[translate(@rel,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')='canonical']/@href")
-                if hrefs: data["canonical"] = hrefs[0].strip()
-            except Exception:
-                pass
-        if not data["canonical"] and soup:
-            try:
-                link = soup.find("link", rel=lambda v: v and ("canonical" in [x.lower() for x in (v if isinstance(v, list) else [v])]))
-                if link: data["canonical"] = (link.get("href") or "").strip()
-            except Exception:
-                pass
-
-    if wants.get("published_time"):
-        val = _meta_bs(prop="article:published_time") or _meta_bs(name="pubdate") or _meta_bs(name="date")
-        if not val and have_lxml:
-            try:
-                val = (doc.xpath("string(//time/@datetime)")) or (doc.xpath("string(//time[1])"))
-            except Exception:
-                pass
-        if not val and soup:
-            try:
-                time_tag = soup.find("time")
-                if time_tag:
-                    val = (time_tag.get("datetime") or "").strip() or time_tag.get_text(strip=True)
-            except Exception:
-                pass
-        data["published_time"] = (val or "").strip()
-
-    if wants.get("lang"):
-        if have_lxml:
-            try:
-                data["lang"] = (doc.xpath("string(//html/@lang)") or "").strip()
-            except Exception:
-                pass
-        if not data["lang"] and soup:
-            try:
-                html_tag = soup.find("html")
-                if html_tag:
-                    data["lang"] = (html_tag.get("lang") or "").strip()
-            except Exception:
-                pass
-
-    # --- Avanzados (dentro del artículo cuando aplique) ---
-    # Primer párrafo
-    if wants.get("first_paragraph"):
-        xp_first = (xpaths.get("first_paragraph") or "").strip()
-        text = ""
-        if xp_first and have_lxml:
-            lst = _xpath_text_list(doc, xp_first)
-            text = next((t for t in lst if t.strip()), "")
-        if not text:
-            if have_lxml and lxml_scope_nodes:
-                for node in lxml_scope_nodes:
-                    try:
-                        t = node.xpath("string(.//p[normalize-space()][1])")
-                        if t and t.strip():
-                            text = t.strip(); break
-                    except Exception:
-                        pass
-            if not text and soup_scope:
-                p = soup_scope.find("p")
-                if p: text = p.get_text(strip=True)
-            if not text and soup:
-                p = soup.find("p")
-                if p: text = p.get_text(strip=True)
-        data["first_paragraph"] = text
-
-    # Helper para juntar textos dentro del scope lxml
-    def _collect_scope_texts(nodeset, xpath_rel: str) -> list[str]:
-        vals: list[str] = []
-        if nodeset:
-            for node in nodeset:
-                try:
-                    parts = node.xpath(xpath_rel)
-                except Exception:
-                    parts = []
-                for p in parts:
-                    if isinstance(p, str):
-                        txt = p.strip()
-                    elif hasattr(p, "text_content"):
-                        txt = p.text_content().strip()
-                    else:
-                        txt = str(p).strip()
-                    if txt:
-                        vals.append(txt)
-        return vals
-
-    # H2
-    if wants.get("h2_list") or wants.get("h2_count"):
-        xp_h2 = (xpaths.get("h2") or "").strip()
-        h2s: list[str] = []
-        if xp_h2 and have_lxml:
-            if lxml_scope_nodes and (xp_h2.startswith(".") or not xp_h2.startswith("/")):
-                h2s = _collect_scope_texts(lxml_scope_nodes, xp_h2 if xp_h2.startswith(".") else ".//" + xp_h2.strip("./"))
-            else:
-                h2s = _xpath_text_list(doc, xp_h2)
-        elif have_lxml and lxml_scope_nodes:
-            h2s = _collect_scope_texts(lxml_scope_nodes, ".//h2")
-        elif soup_scope:
-            h2s = [el.get_text(strip=True) for el in soup_scope.find_all("h2")]
-        h2s = [t for t in (h2s or []) if t]
-        if wants.get("h2_list"):  data["h2_list"]  = (joiner.join(h2s)) if h2s else ""
-        if wants.get("h2_count"): data["h2_count"] = len(h2s)
-
-    # H3
-    if wants.get("h3_list") or wants.get("h3_count"):
-        xp_h3 = (xpaths.get("h3") or "").strip()
-        h3s: list[str] = []
-        if xp_h3 and have_lxml:
-            if lxml_scope_nodes and (xp_h3.startswith(".") or not xp_h3.startswith("/")):
-                h3s = _collect_scope_texts(lxml_scope_nodes, xp_h3 if xp_h3.startswith(".") else ".//" + xp_h3.strip("./"))
-            else:
-                h3s = _xpath_text_list(doc, xp_h3)
-        elif have_lxml and lxml_scope_nodes:
-            h3s = _collect_scope_texts(lxml_scope_nodes, ".//h3")
-        elif soup_scope:
-            h3s = [el.get_text(strip=True) for el in soup_scope.find_all("h3")]
-        h3s = [t for t in (h3s or []) if t]
-        if wants.get("h3_list"):  data["h3_list"]  = (joiner.join(h3s)) if h3s else ""
-        if wants.get("h3_count"): data["h3_count"] = len(h3s)
-
-    # Negritas — count + lista (SOLO dentro del artículo)
-    if wants.get("bold_count") or wants.get("bold_list"):
-        cnt = 0
-        blist: list[str] = []
-        if have_lxml and lxml_scope_nodes:
-            for node in lxml_scope_nodes:
-                try:
-                    bs = node.xpath(".//*[self::b or self::strong]")
-                    cnt += len(bs)
-                    if wants.get("bold_list"):
-                        for b in bs:
-                            try:
-                                t = b.text_content().strip()
-                                if t: blist.append(t)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-        elif soup_scope:
-            try:
-                bs = soup_scope.select("b, strong")
-                cnt = len(bs)
-                if wants.get("bold_list"):
-                    blist = [el.get_text(strip=True) for el in bs if el.get_text(strip=True)]
-            except Exception:
-                cnt = 0
-        data["bold_count"] = int(cnt or 0)
-        if wants.get("bold_list"):
-            data["bold_list"] = joiner.join([t for t in blist if t])
-
-    # Links — count + anchors (SOLO dentro del artículo)
-    if wants.get("link_count") or wants.get("link_anchor_texts"):
-        cnt = 0
-        anchors: list[str] = []
-        if have_lxml and lxml_scope_nodes:
-            for node in lxml_scope_nodes:
-                try:
-                    alist = node.xpath(".//a[@href]")
-                    cnt += len(alist)
-                    if wants.get("link_anchor_texts"):
-                        for a in alist:
-                            try:
-                                t = a.text_content().strip()
-                                if t: anchors.append(t)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-        elif soup_scope:
-            try:
-                alist = soup_scope.find_all("a", href=True)
-                cnt = len(alist)
-                if wants.get("link_anchor_texts"):
-                    anchors = [a.get_text(strip=True) for a in alist if a.get_text(strip=True)]
-            except Exception:
-                cnt = 0
-        data["link_count"] = int(cnt or 0)
-        if wants.get("link_anchor_texts"):
-            data["link_anchor_texts"] = joiner.join([t for t in anchors if t])
-
-    # Caja de noticias relacionadas (xpath al contenedor) → count + anchors
-    if wants.get("related_links_count") or wants.get("related_link_anchors"):
-        xp_rel = (xpaths.get("related_box") or "").strip()
-        rel_cnt = 0
-        rel_anchors: list[str] = []
-        if xp_rel and have_lxml:
-            try:
-                boxes = doc.xpath(xp_rel)
-            except Exception:
-                boxes = []
-            for bx in boxes:
-                try:
-                    alist = bx.xpath(".//a[@href]")
-                except Exception:
-                    alist = []
-                rel_cnt += len(alist)
-                if wants.get("related_link_anchors"):
-                    for a in alist:
-                        try:
-                            t = a.text_content().strip()
-                            if t: rel_anchors.append(t)
-                        except Exception:
-                            pass
-        data["related_links_count"] = int(rel_cnt or 0)
-        if wants.get("related_link_anchors"):
-            data["related_link_anchors"] = joiner.join([t for t in rel_anchors if t])
-
-    # Tags (lista)
-    if wants.get("tags_list"):
-        xp_tags = (xpaths.get("tags") or "").strip()
-        tags = []
-        if xp_tags and have_lxml:
-            if lxml_scope_nodes and (xp_tags.startswith(".") or not xp_tags.startswith("/")):
-                for node in lxml_scope_nodes:
-                    tags += _xpath_text_list(node, xp_tags if xp_tags.startswith(".") else ".//" + xp_tags.strip("./"))
-            else:
-                tags = _xpath_text_list(doc, xp_tags)
-        else:
-            mt = []
-            if have_lxml:
-                try:
-                    mt = [t for t in doc.xpath("//meta[@property='article:tag']/@content") if t and str(t).strip()]
-                except Exception:
-                    mt = []
-            if not mt and soup:
-                try:
-                    mt = [ (m.get("content") or "").strip()
-                           for m in soup.find_all("meta", attrs={"property":"article:tag"}) ]
-                    mt = [t for t in mt if t]
-                except Exception:
-                    mt = []
-            tags = mt
-        tags = [t.strip() for t in (tags or []) if t and str(t).strip()]
-        data["tags_list"] = (joiner.join(tags)) if tags else ""
-
-    # Texto del artículo (para NER ponderado)
-    if wants.get("collect_article_text"):
-        full_text = ""
-        if have_lxml and lxml_scope_nodes:
-            try:
-                parts = []
-                for node in lxml_scope_nodes:
-                    t = node.xpath("string(.)") or ""
-                    if t and t.strip():
-                        parts.append(re.sub(r"\s+", " ", t.strip()))
-                full_text = " ".join(parts)
-            except Exception:
-                full_text = ""
-        if not full_text and soup_scope:
-            try:
-                t = soup_scope.get_text(" ", strip=True)
-                full_text = re.sub(r"\s+", " ", t.strip()) if t else ""
-            except Exception:
-                full_text = ""
-        data["article_text"] = full_text
-
-    return data
-
-async def _fetch_one(session, url: str, ua: str, timeout_s: int, wants: dict, xpaths: dict, joiner: str) -> dict:
-    base = {"url": url, "ok": False, "status": 0, "error": ""}
-    try:
-        async with session.get(url, headers={"User-Agent": ua}, timeout=timeout_s, allow_redirects=True) as resp:
-            base["status"] = resp.status
-            if resp.status >= 400:
-                base["error"] = f"http {resp.status}"
-                return base
-            html = await resp.text(errors="ignore")
-            meta = _parse_html_for_meta(html, wants=wants, xpaths=xpaths, joiner=joiner)
-            base.update(meta)
-            base["ok"] = True
-            return base
-    except Exception as e:
-        base["error"] = str(e)
-        return base
-
-async def _scrape_async(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: str,
-                        timeout_s: int = 12, concurrency: int = 20) -> list[dict]:
-    # aiohttp es opcional
-    try:
-        import aiohttp  # type: ignore
-    except Exception:
-        return _scrape_sync(urls, ua, wants, xpaths, joiner, timeout_s, concurrency)
-
-    connector = aiohttp.TCPConnector(limit=concurrency, ssl=False)
-    timeout = aiohttp.ClientTimeout(total=max(timeout_s+2, timeout_s))
-    results: list[dict] = []
-    sem = asyncio.Semaphore(concurrency)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=True) as session:
-        async def _bound(u):
-            async with sem:
-                return await _fetch_one(session, u, ua, timeout_s, wants, xpaths, joiner)
-        tasks = [_bound(u) for u in urls]
-        done = 0
-        progress = st.progress(0.0, text="Scrapeando páginas…")
-        for coro in asyncio.as_completed(tasks):
-            res = await coro
-            results.append(res)
-            done += 1
-            progress.progress(done/len(tasks), text=f"Scrapeando páginas… {done}/{len(tasks)}")
-        progress.empty()
-    order = {u:i for i,u in enumerate(urls)}
-    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
-    return results
-
-def _scrape_sync(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: str,
-                 timeout_s: int = 12, concurrency: int = 12) -> list[dict]:
-    try:
-        import requests
-    except Exception as e:
-        return [{"url": u, "ok": False, "status": 0, "error": f"requests no disponible: {e}"} for u in urls]
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    results: list[dict] = []
-    headers = {"User-Agent": ua}
-
-    def _one(u: str) -> dict:
-        base = {"url": u, "ok": False, "status": 0, "error": ""}
-        try:
-            rs = requests.get(u, headers=headers, timeout=timeout_s, allow_redirects=True)
-            base["status"] = rs.status_code
-            if rs.status_code >= 400:
-                base["error"] = f"http {rs.status_code}"
-                return base
-            meta = _parse_html_for_meta(rs.text, wants=wants, xpaths=xpaths, joiner=joiner)
-            base.update(meta)
-            base["ok"] = True
-        except Exception as e:
-            base["error"] = str(e)
-        return base
-
-    progress = st.progress(0.0, text="Scrapeando páginas…")
-    done = 0
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futs = [ex.submit(_one, u) for u in urls]
-        for f in as_completed(futs):
-            results.append(f.result())
-            done += 1
-            progress.progress(done/len(futs), text=f"Scrapeando páginas… {done}/{len(futs)}")
-    progress.empty()
-    order = {u:i for i,u in enumerate(urls)}
-    results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
-    return results
-
-# ============== Flujos por análisis (requieren GSC) ==============
+# ============== Modos por análisis ==============
 if analisis == "4":
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
@@ -1294,17 +1294,6 @@ if analisis == "4":
                 sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
             except Exception:
                 sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Core Update",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "core"
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1322,22 +1311,6 @@ elif analisis == "5":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Evergreen",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "evergreen"
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -1355,158 +1328,154 @@ elif analisis == "6":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Auditoría",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "audit"
 
 elif analisis == "9":
-    # ===== NUEVO: Análisis de contenido (repo externo) =====
+    # Modo runner externo (recomendamos el 10 para extracción directa)
     if (run_content_analysis is None) or (params_for_content is None):
-        st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
-                   "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
+        st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo).")
     else:
-        st.info("Este modo utiliza el runner externo. Si preferís algo más simple/rápido, probá el **Extractor rápido** (opción 10).")
-        st.warning("El modo 9 está disponible, pero se recomienda usar el 10 para H1+metadatos directos desde GSC.")
+        st.info("Este modo usa el runner externo. Para H1+metadatos directos usa el **Extractor rápido** (opción 10).")
 
 elif analisis == "10":
-    # ===== EXTRACTOR RÁPIDO: GSC → URLs → H1 (+ metadatos) → Sheets =====
+    # ===== EXTRACTOR RÁPIDO: GSC → URLs → H1 (+ metadatos + NER) → Sheets =====
     st.subheader("Extractor rápido desde Search Console")
-    st.caption("Trae URLs por Search / Discover, filtra por país y dispositivo, scrapea rápido **solo los campos que elijas** y publica en Sheets. Opcional: NER con spaCy ponderado por el texto del artículo.")
+    st.caption("Trae URLs por Search / Discover, filtra (país/dispositivo/umbrales), scrapea **solo los campos que elijas** (dentro del artículo si indicas su XPath) y publica en Sheets. Opcional: NER con spaCy.")
 
-    # --- Fechas & Origen (básico)
-    colA, colB, colC = st.columns([1,1,1])
+    # Fechas y Origen
+    colA, colB, colC = st.columns([1,1,2])
     with colA:
-        start_date = st.date_input("Desde (inclusive)", value=(date.today() - timedelta(days=28)), key="fast_start")
+        # Desde
+        default_end = date.today() - timedelta(days=2)
+        default_start = default_end - timedelta(days=27)
+        start_date = st.date_input("Desde (inclusive)", value=default_start, key="fast_start")
     with colB:
-        end_date_default = date.today() - timedelta(days=2)
-        end_date = st.date_input("Hasta (inclusive)", value=end_date_default, key="fast_end")
+        end_date = st.date_input("Hasta (inclusive)", value=default_end, key="fast_end")
+        if end_date < start_date:
+            st.error("La fecha 'Hasta' debe ser >= 'Desde'.")
+            st.stop()
     with colC:
-        origen = st.radio("Origen", ["Search", "Discover", "Search + Discover"], horizontal=False, key="fast_source")
+        tipo = st.radio("Origen", ["Search", "Discover", "Search + Discover"], horizontal=True, key="fast_source")
 
-    # --- Opciones avanzadas
-    with st.expander("⚙️ Opciones de configuración y filtrado avanzadas"):
-        col1, col2, col3, col4 = st.columns([1,1,1,1])
+    # Panel avanzado
+    with st.expander("⚙️ Opciones avanzadas de configuración y filtrado", expanded=False):
+        col1, col2, col3 = st.columns(3)
         with col1:
-            country = st.text_input("País (ISO-3166-1 alpha-3, ej: ARG, USA, ESP)", value="", key="fast_country").strip().upper()
+            country = st.text_input("País (ISO-3166-1 alpha-3, ej: ARG, USA, ESP) — opcional", value="", key="fast_country").strip().upper()
+            min_clicks = st.number_input("Mínimo de clics", min_value=0, max_value=1000000, value=0, step=10, key="fast_min_clicks")
+            only_articles = st.checkbox("Solo artículos (filtra tags/player/etc.)", value=True, key="fast_only_articles")
         with col2:
-            device = st.selectbox("Dispositivo", ["", "DESKTOP", "MOBILE", "TABLET"], index=0, key="fast_device")
+            device = st.selectbox("Dispositivo (opcional)", ["", "DESKTOP", "MOBILE", "TABLET"], index=0, key="fast_device")
+            min_impr = st.number_input("Mínimo de impresiones", min_value=0, max_value=10000000, value=0, step=100, key="fast_min_impr")
+            excl_patterns_txt = st.text_input("Patrones extra a excluir (separados por coma)", value="", key="excl_patterns",
+                                              help="Ej: /galeria/, ?utm_source=")
         with col3:
             order_by = st.selectbox("Ordenar por", ["clicks","impressions","ctr","position"], index=0, key="fast_order")
-        with col4:
             row_limit = st.number_input("Máximo de URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
 
-        col5, col6, col7 = st.columns([1,1,1])
-        with col5:
-            min_clicks = st.number_input("Mínimo de clics", min_value=0, max_value=1000000, value=0, step=10, key="fast_min_clicks")
-        with col6:
-            min_impr = st.number_input("Mínimo de impresiones", min_value=0, max_value=10000000, value=0, step=100, key="fast_min_impr")
-        with col7:
-            only_articles = st.checkbox("Solo artículos (filtra tags/player/etc.)", value=True, key="fast_only_articles")
-
-        # Concurrencia / timeout / UA / separador
+        st.markdown("---")
         col8, col9, col10 = st.columns([1,1,2])
         with col8:
-            concurrency = st.slider("Concurrencia", 2, 64, 24, step=2, key="fast_conc")
+            concurrency = st.slider("Concurrencia", 2, 64, 24, step=2, key="fast_conc",
+                                    help="Cantidad de páginas descargándose en paralelo.")
         with col9:
-            timeout_s = st.slider("Timeout por página (s)", 5, 30, 12, step=1, key="fast_timeout")
+            timeout_s = st.slider("Timeout por página (s)", 5, 45, 12, step=1, key="fast_timeout")
         with col10:
             ua = st.text_input("User-Agent (opcional)", value="", key="fast_ua")
             if not ua.strip():
                 st.caption("Sugerencia UA (si ves muchos 403):")
                 st.code(_suggest_user_agent(""))
-        joiner = st.text_input("Separador para listas (H2/H3/Tags/Anchors/Negritas)", value=" | ", key="joiner")
+        joiner = st.text_input("Separador para listas (H2/H3/Tags/Anchors/Negritas/Entidades)", value=" | ", key="joiner")
 
-    # --- Campos a extraer (uno debajo del otro)
-    st.markdown("### 🧲 Campos a extraer")
-    w_title = st.checkbox("Title", value=True, key="w_title")
-    w_h1 = st.checkbox("H1", value=True, key="w_h1")
-    w_md = st.checkbox("Meta Description", value=True, key="w_md")
-    w_ogt = st.checkbox("OG:title", value=False, key="w_ogt")
-    w_ogd = st.checkbox("OG:description", value=False, key="w_ogd")
-    w_canon = st.checkbox("Canonical", value=True, key="w_canon")
-    w_pub = st.checkbox("Fecha publicación (meta/time)", value=False, key="w_pub")
-    w_lang = st.checkbox("Lang (html@lang)", value=False, key="w_lang")
+    # === Campos a extraer (lineales)
+    st.markdown("### 🧩 Campos a extraer")
+    colX, colY = st.columns(2)
 
-    w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=True, key="w_firstp")
-    xp_firstp = st.text_input("XPath Primer párrafo", value="", key="xp_firstp",
-                              help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
+    with colX:
+        w_title = st.checkbox("Title", value=True, key="w_title")
+        w_h1 = st.checkbox("H1", value=True, key="w_h1")
+        w_md = st.checkbox("Meta Description", value=True, key="w_md")
+        w_ogt = st.checkbox("OG:title", value=False, key="w_ogt")
+        w_ogd = st.checkbox("OG:description", value=False, key="w_ogd")
+        w_canon = st.checkbox("Canonical", value=True, key="w_canon")
+        w_pub = st.checkbox("Fecha publicación (meta/time)", value=False, key="w_pub")
+        w_upd = st.checkbox("Fecha actualización (meta/time)", value=False, key="w_upd")
+        w_author = st.checkbox("Autor", value=False, key="w_author")
+        w_lang = st.checkbox("Lang (html@lang)", value=False, key="w_lang")
 
-    xp_article = st.text_input(
-        "XPath del contenedor del artículo (recomendado)",
-        value="",
-        key="xp_article",
-        help="Define el scope de h2/h3/negritas/links y el texto del artículo para NER. Ej: //article | //main[@id='content']"
-    )
-    st.caption("Si no lo indicás, usaré heurística (//article | //main).")
+        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=True, key="w_firstp")
+        xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value="", key="xp_firstp",
+                                  help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
 
-    w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=False, key="w_h2_list")
-    w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=False, key="w_h2_count")
-    xp_h2 = st.text_input("XPath H2 (opcional)", value="", key="xp_h2",
-                          help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
+        # XPath del contenedor del artículo
+        xp_article = st.text_input(
+            "XPath del contenedor del artículo (recomendado)",
+            value="",
+            key="xp_article",
+            help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
+        )
+        st.caption("Si no lo indicás, usaré heurística (//article | //main).")
 
-    w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=False, key="w_h3_list")
-    w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=False, key="w_h3_count")
-    xp_h3 = st.text_input("XPath H3 (opcional)", value="", key="xp_h3",
-                          help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
+        # Caja de noticias relacionadas
+        st.markdown("**Caja de noticias relacionadas**")
+        w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", value=False, key="w_rel_count")
+        w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", value=False, key="w_rel_anchors")
+        xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", value="", key="xp_related",
+                                   help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
 
-    w_bold = st.checkbox("Negritas (cantidad, SOLO dentro del artículo)", value=False, key="w_bold")
-    w_bold_list = st.checkbox("Negritas (lista, SOLO dentro del artículo)", value=False, key="w_bold_list")
-    w_links = st.checkbox("Links (cantidad, SOLO dentro del artículo)", value=False, key="w_links")
-    w_link_anchors = st.checkbox("Links (anchors, SOLO dentro del artículo)", value=False, key="w_link_anchors")
+    with colY:
+        w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=False, key="w_h2_list")
+        w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=False, key="w_h2_count")
+        xp_h2 = st.text_input("XPath H2 (opcional)", value="", key="xp_h2",
+                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
+        w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=False, key="w_h3_list")
+        w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=False, key="w_h3_count")
+        xp_h3 = st.text_input("XPath H3 (opcional)", value="", key="xp_h3",
+                              help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
+        w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=False, key="w_bold")
+        w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", value=False, key="w_bold_list")
+        w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=False, key="w_links")
+        w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", value=False, key="w_link_anchors")
+        w_tags = st.checkbox("Tags (lista)", value=False, key="w_tags")
+        xp_tags = st.text_input("XPath Tags (opcional)", value="", key="xp_tags",
+                                help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
 
-    w_tags = st.checkbox("Tags (lista)", value=False, key="w_tags")
-    xp_tags = st.text_input("XPath Tags (opcional)", value="", key="xp_tags",
-                            help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
+        # XPaths opcionales para autor/updated específicos
+        xp_author = st.text_input("XPath Autor (opcional)", value="", key="xp_author",
+                                  help="Ej: //span[@class='author-name']")
+        xp_updated = st.text_input("XPath Fecha actualización (opcional)", value="", key="xp_updated",
+                                   help="Ej: //time[contains(@class,'update')]")
 
-    st.markdown("**Caja de noticias relacionadas**")
-    w_rel_count = st.checkbox("Relacionadas — cantidad de links", value=False, key="w_rel_count")
-    w_rel_anchors = st.checkbox("Relacionadas — anchors (lista)", value=False, key="w_rel_anchors")
-    xp_related = st.text_input("XPath caja de relacionadas (contenedor)", value="", key="xp_related",
-                               help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
-
+    # NER con spaCy
     st.markdown("### 🧠 Entidades (spaCy)")
-    ner_enabled = st.checkbox("Calcular entidades (spaCy) ponderadas por ocurrencias en el artículo", value=False, key="ner_enabled")
-    ner_model = st.text_input("Modelo spaCy preferido", value="es_core_news_sm", key="ner_model")
-    ner_topn = st.number_input("Top N entidades", min_value=3, max_value=50, value=10, step=1, key="ner_topn")
+    c_ner1, c_ner2 = st.columns([1,2])
+    with c_ner1:
+        do_ner = st.checkbox("Extraer entidades (NER) y ponderar por apariciones en el artículo", value=False, key="do_ner")
+    with c_ner2:
+        ner_model = st.text_input("Modelo spaCy (opcional, ej: es_core_news_sm)", value="", key="ner_model",
+                                  help="Si está vacío intento: es_core_news_sm → en_core_web_sm → xx_ent_wiki_sm. Descargo/local si faltan permisos.")
 
-    # === Preflight GSC
+    # === Semillas desde GSC
     st.markdown("### 🔎 Semillas desde GSC")
     seeds = []
     seeds_search = []
     seeds_discover = []
     src_map = {"Search":"web","Discover":"discover","Search + Discover":"both"}
-    src = src_map.get(origen, "both")
+    src = src_map.get(tipo, "both")
 
-    if start_date > end_date:
-        st.error("La fecha **Desde** no puede ser posterior a **Hasta**.")
+    extra_drop = tuple([p.strip() for p in (st.session_state.get("excl_patterns","") or excl_patterns_txt or "").split(",") if p.strip()])
 
     # Search
     if src in ("web","both"):
         seeds_search = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "web",
-            country or None, device or None, order_by if 'order_by' in locals() else "clicks",
-            int(row_limit if 'row_limit' in locals() else 500)
+            country or None, device or None, order_by, int(row_limit)
         )
         st.write(f"**Search (web)**: {len(seeds_search):,} filas")
     # Discover
     if src in ("discover","both"):
         seeds_discover = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "discover",
-            country or None, device or None, order_by if 'order_by' in locals() else "clicks",
-            int(row_limit if 'row_limit' in locals() else 500)
+            country or None, device or None, order_by, int(row_limit)
         )
         st.write(f"**Discover**: {len(seeds_discover):,} filas")
 
@@ -1526,9 +1495,9 @@ elif analisis == "10":
     if not df_seeds.empty:
         # umbrales
         before = len(df_seeds)
-        if 'min_clicks' in locals() and min_clicks > 0:
+        if min_clicks > 0:
             df_seeds = df_seeds[df_seeds["clicks"] >= int(min_clicks)]
-        if 'min_impr' in locals() and min_impr > 0:
+        if min_impr > 0:
             df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
         st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
 
@@ -1538,29 +1507,28 @@ elif analisis == "10":
         df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
 
         urls = df_seeds["url"].dropna().astype(str).tolist()
-        if 'only_articles' in locals() and only_articles:
-            urls = _filter_article_urls(urls)
+        if only_articles:
+            urls = _filter_article_urls(urls, extra_drop=extra_drop)
         st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
         st.code(urls[:20])
 
         # Botón de ejecutar
-        can_run = len(urls) > 0 and start_date <= end_date
+        can_run = len(urls) > 0
         if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
-            ua_final = _suggest_user_agent(ua if 'ua' in locals() else "")
+            ua_final = _suggest_user_agent(ua)
 
             # Armar wants/xpaths según checkboxes
             wants = {
                 "title": w_title, "h1": w_h1, "meta_description": w_md,
                 "og_title": w_ogt, "og_description": w_ogd, "canonical": w_canon,
-                "published_time": w_pub, "lang": w_lang,
+                "published_time": w_pub, "updated_time": w_upd, "author": w_author, "lang": w_lang,
                 "first_paragraph": w_firstp,
                 "h2_list": w_h2_list, "h2_count": w_h2_count,
                 "h3_list": w_h3_list, "h3_count": w_h3_count,
                 "bold_count": w_bold, "bold_list": w_bold_list,
                 "link_count": w_links, "link_anchor_texts": w_link_anchors,
                 "related_links_count": w_rel_count, "related_link_anchors": w_rel_anchors,
-                "tags_list": w_tags,
-                "collect_article_text": bool(ner_enabled)  # para NER ponderado
+                "tags_list": w_tags
             }
             xpaths = {
                 "article": xp_article,
@@ -1568,10 +1536,12 @@ elif analisis == "10":
                 "h2": xp_h2,
                 "h3": xp_h3,
                 "tags": xp_tags,
-                "related_box": xp_related
+                "related_box": xp_related,
+                "author": xp_author,
+                "updated": xp_updated
             }
 
-            if not any({k:v for k,v in wants.items() if k != "collect_article_text"}.values()):
+            if not any(wants.values()):
                 st.error("Seleccioná al menos un campo para extraer."); st.stop()
 
             try:
@@ -1579,101 +1549,146 @@ elif analisis == "10":
                 try:
                     results = asyncio.run(_scrape_async(
                         urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=(timeout_s if 'timeout_s' in locals() else 12),
-                        concurrency=int(concurrency if 'concurrency' in locals() else 24)))
+                        timeout_s=timeout_s, concurrency=int(concurrency)))
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     results = loop.run_until_complete(_scrape_async(
                         urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=(timeout_s if 'timeout_s' in locals() else 12),
-                        concurrency=int(concurrency if 'concurrency' in locals() else 24)))
+                        timeout_s=timeout_s, concurrency=int(concurrency)))
                     loop.close()
 
                 df_scr = pd.DataFrame(results)
 
-                # NER (spaCy)
-                ner_top_col = []
-                ner_det_col = []
-                if ner_enabled:
+                # --- NER (opcional) ---
+                ner_cols = []
+                nlp = None
+                if do_ner:
                     nlp = _load_spacy_model(ner_model)
                     if nlp is None:
                         st.warning("No se pudo cargar spaCy. Las columnas de entidades quedarán vacías.")
-                    for _, row in df_scr.iterrows():
-                        h1_v = str(row.get("h1") or "")
-                        md_v = str(row.get("meta_description") or "")
-                        fp_v = str(row.get("first_paragraph") or "")
-                        art_txt = str(row.get("article_text") or "")
-                        top, detail = _spacy_entities_weight(nlp, h1_v, md_v, fp_v, art_txt, topn=int(ner_topn))
-                        ner_top_col.append(" | ".join(top) if top else "")
-                        ner_det_col.append(" | ".join([f"{t}:{c}" for t,c in detail]) if detail else "")
-                if ner_enabled and len(ner_top_col) != len(df_scr):
-                    ner_top_col = [""] * len(df_scr)
-                    ner_det_col = [""] * len(df_scr)
-
-                if ner_enabled:
-                    df_scr["ner_top"] = ner_top_col
-                    df_scr["ner_detail"] = ner_det_col
+                    else:
+                        # Calcula entidades usando H1 + Meta Description + Primer Párrafo
+                        ents_list = []
+                        ents_scores = []
+                        for _, row in df_scr.iterrows():
+                            h1 = str(row.get("h1","") or "")
+                            md = str(row.get("meta_description","") or "")
+                            fp = str(row.get("first_paragraph","") or "")
+                            base_text = " ".join([t for t in [h1, md, fp] if t]).strip()
+                            article_text = str(row.get("_article_text","") or "")
+                            if not base_text:
+                                ents_list.append("")
+                                ents_scores.append("")
+                                continue
+                            try:
+                                doc = nlp(base_text)
+                                # Conteo base por entidad en los 3 campos
+                                counts = {}
+                                labels_ok = set(["PERSON","ORG","GPE","LOC","PRODUCT","EVENT","WORK_OF_ART","NORP","FAC"])
+                                for ent in doc.ents:
+                                    if ent.label_ in labels_ok:
+                                        k = ent.text.strip()
+                                        if not k: continue
+                                        counts[k] = counts.get(k, 0) + 1
+                                # Ponderar por apariciones en el texto del artículo
+                                if article_text:
+                                    low = article_text.lower()
+                                    for k in list(counts.keys()):
+                                        occ = low.count(k.lower())
+                                        counts[k] = counts.get(k,0) + occ  # base + apariciones en artículo
+                                # Ordenar por score desc y armar strings
+                                pairs = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+                                ents_list.append(joiner.join([p[0] for p in pairs][:20]))
+                                ents_scores.append(joiner.join([f"{p[0]}:{p[1]}" for p in pairs][:20]))
+                            except Exception:
+                                ents_list.append("")
+                                ents_scores.append("")
+                        df_scr["ner_entities"] = ents_list
+                        df_scr["ner_entities_scored"] = ents_scores
+                        ner_cols = ["ner_entities","ner_entities_scored"]
 
                 # Merge con métricas de GSC
                 df_out = pd.merge(
                     df_seeds[["url","source","clicks","impressions","ctr_pct","position"]],
-                    df_scr, on="url", how="left"
+                    df_scr, left_on="url", right_on="url", how="left"
                 )
 
                 # Columnas dinámicas según wants
-                cols_base = [
-                    ("source", "Search / Discover"),
-                    ("url", "URL"),
-                ]
-                cols_fields = []
-                if w_h1: cols_fields.append(("h1","H1"))
-                if w_title: cols_fields.append(("title","Title"))
-                if w_md: cols_fields.append(("meta_description","Meta Description"))
-                if w_ogt: cols_fields.append(("og_title","OG:title"))
-                if w_ogd: cols_fields.append(("og_description","OG:description"))
-                if w_canon: cols_fields.append(("canonical","Canonical"))
-                if w_pub: cols_fields.append(("published_time","Fecha publicación"))
-                if w_lang: cols_fields.append(("lang","Lang"))
-                if w_firstp: cols_fields.append(("first_paragraph","Primer Párrafo"))
-                if w_h2_list: cols_fields.append(("h2_list","H2 (lista)"))
-                if w_h2_count: cols_fields.append(("h2_count","H2 (cantidad)"))
-                if w_h3_list: cols_fields.append(("h3_list","H3 (lista)"))
-                if w_h3_count: cols_fields.append(("h3_count","H3 (cantidad)"))
-                if w_bold: cols_fields.append(("bold_count","Negritas (cantidad)"))
-                if w_bold_list: cols_fields.append(("bold_list","Negritas (lista)"))
-                if w_links: cols_fields.append(("link_count","Links (cantidad)"))
-                if w_link_anchors: cols_fields.append(("link_anchor_texts","Links (anchors)"))
-                if w_rel_count: cols_fields.append(("related_links_count","Relacionadas (cantidad)"))
-                if w_rel_anchors: cols_fields.append(("related_link_anchors","Relacionadas (anchors)"))
-                if w_tags: cols_fields.append(("tags_list","Tags"))
-                if ner_enabled:
-                    cols_fields.append(("ner_top","Entidades (spaCy)"))
-                    cols_fields.append(("ner_detail","Entidades (spaCy) (detalle)"))
+                cols = ["source","url"]
+                # básicos
+                if w_h1: cols.append("h1")
+                if w_title: cols.append("title")
+                if w_md: cols.append("meta_description")
+                if w_ogt: cols.append("og_title")
+                if w_ogd: cols.append("og_description")
+                if w_canon: cols.append("canonical")
+                if w_pub: cols.append("published_time")
+                if w_upd: cols.append("updated_time")
+                if w_author: cols.append("author")
+                if w_lang: cols.append("lang")
+                # avanzados
+                if w_firstp: cols.append("first_paragraph")
+                if w_h2_list: cols.append("h2_list")
+                if w_h2_count: cols.append("h2_count")
+                if w_h3_list: cols.append("h3_list")
+                if w_h3_count: cols.append("h3_count")
+                if w_bold: cols.append("bold_count")
+                if w_bold_list: cols.append("bold_list")
+                if w_links: cols.append("link_count")
+                if w_link_anchors: cols.append("link_anchor_texts")
+                if w_rel_count: cols.append("related_links_count")
+                if w_rel_anchors: cols.append("related_link_anchors")
+                if w_tags: cols.append("tags_list")
+                # NER
+                cols += ner_cols
+                # métricas y estado
+                cols += ["clicks","impressions","ctr_pct","position","status","error"]
 
-                cols_metrics = [
-                    ("clicks","Clics"),
-                    ("impressions","Impresiones"),
-                    ("ctr_pct","CTR"),
-                    ("position","Posición"),
-                    ("status","Status"),
-                    ("error","Error"),
-                ]
-
-                # Asegurar existencia y ordenar
-                for c,_ in cols_base + cols_fields + cols_metrics:
+                for c in cols:
                     if c not in df_out.columns:
                         df_out[c] = "" if c not in ("clicks","impressions","ctr_pct","position","status") else 0
+                df_out = df_out[cols]
 
-                ordered = cols_base + cols_fields + cols_metrics
-                df_out = df_out[[c for c,_ in ordered]]
-
-                # Renombrar a headers bonitos
-                rename_map = {c:n for c,n in ordered}
+                # Renombrados finales para el Google Sheet
+                rename_map = {
+                    "source": "Search / Discover",
+                    "url": "URL",
+                    "h1": "H1",
+                    "title": "Title",
+                    "meta_description": "Meta Description",
+                    "og_title": "OG:title",
+                    "og_description": "OG:description",
+                    "canonical": "Canonical",
+                    "published_time": "Fecha Publicación",
+                    "updated_time": "Fecha Actualización",
+                    "author": "Autor",
+                    "lang": "Lang",
+                    "first_paragraph": "Primer Párrafo",
+                    "h2_list": "H2 (Lista)",
+                    "h2_count": "H2 (Cantidad)",
+                    "h3_list": "H3 (Lista)",
+                    "h3_count": "H3 (Cantidad)",
+                    "bold_count": "Negritas (Cantidad)",
+                    "bold_list": "Negritas (Lista)",
+                    "link_count": "Links (Cantidad)",
+                    "link_anchor_texts": "Links (Anchors)",
+                    "related_links_count": "Relacionadas (Cantidad)",
+                    "related_link_anchors": "Relacionadas (Anchors)",
+                    "tags_list": "Tags",
+                    "ner_entities": "Entidades (NER)",
+                    "ner_entities_scored": "Entidades + Score (NER)",
+                    "clicks": "Clics",
+                    "impressions": "Impresiones",
+                    "ctr_pct": "CTR",
+                    "position": "Posición",
+                    "status": "Status",
+                    "error": "Error",
+                }
                 df_out = df_out.rename(columns=rename_map)
 
                 # Crear Sheet en Drive
-                name = f"H1/meta ({start_date} a {end_date}) - {site_url.replace('https://','').replace('http://','').strip('/')}"
+                name = f"Extractor H1/meta/NER ({start_date} a {end_date}) - {site_url.replace('https://','').replace('http://','').strip('/')}"
                 meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet"}
                 parents = st.session_state.get("dest_folder_id")
                 if parents:
@@ -1694,14 +1709,15 @@ elif analisis == "10":
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
 
+                # Log actividad
                 activity_log_append(
                     drive_service, gs_client,
                     user_email=( _me or {}).get("emailAddress") or "",
                     event="analysis", site_url=site_url,
-                    analysis_kind="Extractor rápido H1 (+metadatos)",
+                    analysis_kind="Extractor rápido H1 (+metadatos+NER)",
                     sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
                     gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"win={start_date}->{end_date}, src={origen}, urls={len(urls)}"
+                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}, ner={bool(do_ner)}"
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "fast_h1"
