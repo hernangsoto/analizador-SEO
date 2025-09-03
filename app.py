@@ -286,7 +286,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
-        "2. Análisis de tráfico general (🚧 próximamente)",
+        "2. Reporte de resultados ✅",                 # <-- renombrado
         "3. Análisis de secciones (🚧 próximamente)",
         "4. Análisis de impacto de Core Update ✅",
         "5. Análisis de tráfico evergreen ✅",
@@ -299,10 +299,10 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
         opciones.append("8. Análisis en base a Discover Snoop ✅")
     if include_content:
         opciones.append("9. Análisis de contenido (repo externo) ✅")
-    # Estructura de contenidos
     opciones.append("10. Análisis de estructura de contenidos ✅")
 
-    key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
+    key = st.radio("Tipos disponibles:", opciones, index=1, key="analysis_choice")
+    if key.startswith("2."): return "2"
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
