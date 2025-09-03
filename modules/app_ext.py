@@ -7,7 +7,9 @@ Exporta:
 - USING_EXT, EXT_PACKAGE
 - run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 - run_discover_snoop, run_content_analysis
-- run_content_structure  <-- NUEVO
+- run_content_structure
+- run_sections_analysis  <-- NUEVO
+- run_report_results
 
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
@@ -27,7 +29,8 @@ run_traffic_audit      = getattr(_ext, "run_traffic_audit", None) if _ext else N
 run_names_analysis     = getattr(_ext, "run_names_analysis", None) if _ext else None
 run_discover_snoop     = getattr(_ext, "run_discover_snoop", None) if _ext else None
 run_content_analysis   = getattr(_ext, "run_content_analysis", None) if _ext else None
-run_content_structure  = getattr(_ext, "run_content_structure", None) if _ext else None  # <- NUEVO
+run_content_structure  = getattr(_ext, "run_content_structure", None) if _ext else None
+run_sections_analysis  = getattr(_ext, "run_sections_analysis", None) if _ext else None  # <- NUEVO
 
 # ============================= Fallbacks locales =================================
 
@@ -96,7 +99,7 @@ if run_content_analysis is None:
                 _rca = None
     run_content_analysis = _rca
 
-# Content Structure (nuevo)
+# Content Structure
 if run_content_structure is None:
     _rcs = None
     try:
@@ -112,6 +115,20 @@ if run_content_structure is None:
             except Exception:
                 _rcs = None
     run_content_structure = _rcs
+
+# Sections Analysis (nuevo)
+if run_sections_analysis is None:
+    _rsa = None
+    try:
+        from seo_analisis_ext.sections_analysis import run_sections_analysis as _rsa  # type: ignore
+    except Exception:
+        try:
+            # Fallback local opcional si existiera:
+            # from modules.sections_analysis import run_sections_analysis as _rsa  # type: ignore
+            _rsa = None
+        except Exception:
+            _rsa = None
+    run_sections_analysis = _rsa
 
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
@@ -254,13 +271,7 @@ if run_content_analysis is not None:
     run_content_analysis = _rca_wrapper
 
 # =============================================================================
-# Shim de normalización para run_content_structure (nuevo)
-# Espera un dict con:
-#  - date_from, date_to (date o str ISO)
-#  - source: 'search' | 'discover' | 'both'
-#  - row_limit, country, device, order_by, only_articles, min_clicks, min_impressions
-#  - concurrency, timeout_s, ua, joiner, entities, sheet_title_prefix
-#  - wants: {...}, xpaths: {...}
+# Shim de normalización para run_content_structure
 # =============================================================================
 def _cs_normalize_params(p: dict) -> dict:
     if not isinstance(p, dict):
@@ -449,11 +460,12 @@ for _candidate in [
     "seo_analisis_ext.discover_snoop",
     "seo_analisis_ext.content_analysis",
     "seo_analisis_ext.analysis_content",
-    "seo_analisis_ext.content_structure",   # <- NUEVO
+    "seo_analisis_ext.content_structure",
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
 
+# --- Reporte de resultados (runner externo)
 try:
     run_report_results = getattr(_ext, "run_report_results", None) if _ext else None
 except Exception:
@@ -476,5 +488,7 @@ __all__ = [
     "run_names_analysis",
     "run_discover_snoop",
     "run_content_analysis",
-    "run_report_results",   # <-- añade esta exportación
+    "run_content_structure",
+    "run_sections_analysis",   # <- NUEVO
+    "run_report_results",
 ]
