@@ -51,7 +51,11 @@ try:
     from modules.app_params import params_for_content
 except Exception:
     params_for_content = None
-
+try:
+    from modules.app_ext import run_sections_analysis
+except Exception:
+    run_sections_analysis = None
+    
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
@@ -286,23 +290,24 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     st.subheader("¿Qué tipo de análisis quieres realizar?")
     opciones = [
         "1. Análisis de entidades (🚧 próximamente)",
-        "2. Reporte de resultados ✅",                 # <-- renombrado
-        "3. Análisis de secciones (🚧 próximamente)",
-        "4. Análisis de impacto de Core Update ✅",
-        "5. Análisis de tráfico evergreen ✅",
+        "2. Reporte de resultados",
+        "3. Análisis de secciones",          # <- antes decía (🚧 próximamente)
+        "4. Análisis de impacto de Core Update",
+        "5. Análisis de tráfico evergreen",
     ]
     if include_auditoria:
-        opciones.append("6. Auditoría de tráfico ✅")
+        opciones.append("6. Auditoría de tráfico")
     if include_names:
-        opciones.append("7. Análisis de Nombres (KG + Wikipedia) ✅")
+        opciones.append("7. Análisis de Nombres (KG + Wikipedia)")
     if include_discover:
-        opciones.append("8. Análisis en base a Discover Snoop ✅")
+        opciones.append("8. Análisis en base a Discover Snoop")
     if include_content:
-        opciones.append("9. Análisis de contenido (repo externo) ✅")
-    opciones.append("10. Análisis de estructura de contenidos ✅")
+        opciones.append("9. Análisis de contenido (repo externo)")
+    opciones.append("10. Análisis de estructura de contenidos")
 
     key = st.radio("Tipos disponibles:", opciones, index=1, key="analysis_choice")
     if key.startswith("2."): return "2"
+    if key.startswith("3."): return "3"   # <- NUEVO mapping
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
