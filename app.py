@@ -1469,6 +1469,17 @@ elif analisis == "2":
         disable_pos = (origin == "discover")
         m_pos = st.checkbox("Posición (solo Search)", value=True and not disable_pos, key="rep_m_pos", disabled=disable_pos)
 
+    # ---------- Top de notas (nuevo) ----------
+    tc1, tc2 = st.columns([1, 2])
+    with tc1:
+        top_n = st.number_input(
+            "Top de notas más vistas",
+            min_value=0, max_value=500, value=20, step=5, key="rep_top_n"
+        )
+    with tc2:
+        st.caption("0 = no crear hojas de Top. Se ordena por *Clics* en GSC. "
+                   "Si elegís países, se crea una hoja Top por cada país y otra Global.")
+
     can_run = (start_date <= end_date)
     if st.button("📈 Generar Reporte de resultados", type="primary", disabled=not can_run, key="rep_run"):
         params = {
@@ -1485,6 +1496,7 @@ elif analisis == "2":
             },
             "lag_days": int(lag),
             "sheet_title_prefix": "Reporte de resultados",
+            "top_n": int(top_n),  # <-- NUEVO
         }
         try:
             sid = run_with_indicator(
@@ -1511,7 +1523,7 @@ elif analisis == "2":
                     analysis_kind="Reporte de resultados",
                     sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
                     gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}"
+                    notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}, top_n={int(top_n)}"
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "report_results"
