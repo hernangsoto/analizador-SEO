@@ -303,8 +303,8 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
         opciones.append("8. Análisis en base a Discover Snoop ✅")
     if include_content:
         opciones.append("9. Análisis de contenido (repo externo) ✅")
-    # EXTRACTOR rápido
-    opciones.append("10. Extractor rápido GSC → H1 (+ metadatos + NER) ✅")
+    # Renombrado
+    opciones.append("10. Análisis de estructura de contenidos ✅")
 
     key = st.radio("Tipos disponibles:", opciones, index=len(opciones)-1, key="analysis_choice")
     if key.startswith("4."): return "4"
@@ -1289,11 +1289,6 @@ if analisis == "4":
             st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
             with st.expander("Compartir acceso al documento (opcional)"):
                 share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1334,15 +1329,15 @@ elif analisis == "9":
     if (run_content_analysis is None) or (params_for_content is None):
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo).")
     else:
-        st.info("Este modo usa el runner externo. Para H1+metadatos directos usa el **Extractor rápido** (opción 10).")
+        st.info("Este modo usa el runner externo. Para H1+metadatos directos usa el **Análisis de estructura de contenidos** (opción 10).")
 
 elif analisis == "10":
-    # ===== EXTRACTOR RÁPIDO: GSC → URLs → H1 (+ metadatos + NER) → Sheets =====
-    st.subheader("Extractor rápido desde Search Console")
-    st.caption("Trae URLs por Search / Discover, filtra (país/dispositivo/umbrales), scrapea **solo los campos que elijas** (dentro del artículo si indicas su XPath) y publica en Sheets. Opcional: NER con spaCy.")
+    # ===== Análisis de estructura de contenidos =====
+    st.subheader("Análisis de estructura de contenidos")
+    st.caption("Trae URLs por Search / Discover, aplica filtros, extrae solo los campos que elijas (acotados al artículo si provees su XPath) y publica en Sheets. Opcional: NER con spaCy.")
 
-    # Fechas y Origen
-    colA, colB, colC = st.columns([1,1,2])
+    # Fechas / Origen / Máximo URLs (fuera del panel avanzado)
+    colA, colB, colC, colD = st.columns([1,1,2,1])
     with colA:
         # Desde
         default_end = date.today() - timedelta(days=2)
@@ -1355,6 +1350,8 @@ elif analisis == "10":
             st.stop()
     with colC:
         tipo = st.radio("Origen", ["Search", "Discover", "Search + Discover"], horizontal=True, key="fast_source")
+    with colD:
+        row_limit = st.number_input("Máximo de URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
 
     # Panel avanzado
     with st.expander("⚙️ Opciones avanzadas de configuración y filtrado", expanded=False):
@@ -1370,7 +1367,6 @@ elif analisis == "10":
                                               help="Ej: /galeria/, ?utm_source=")
         with col3:
             order_by = st.selectbox("Ordenar por", ["clicks","impressions","ctr","position"], index=0, key="fast_order")
-            row_limit = st.number_input("Máximo de URLs por origen", min_value=10, max_value=5000, value=500, step=10, key="fast_row_lim")
 
         st.markdown("---")
         col8, col9, col10 = st.columns([1,1,2])
@@ -1386,30 +1382,48 @@ elif analisis == "10":
                 st.code(_suggest_user_agent(""))
         joiner = st.text_input("Separador para listas (H2/H3/Tags/Anchors/Negritas/Entidades)", value=" | ", key="joiner")
 
-    # === Campos a extraer (lineales)
+    # === Botones Seleccionar / Deseleccionar todo ===
     st.markdown("### 🧩 Campos a extraer")
+    field_keys = [
+        "w_title","w_h1","w_md","w_ogt","w_ogd","w_canon","w_pub","w_upd","w_author","w_lang",
+        "w_firstp","w_h2_list","w_h2_count","w_h3_list","w_h3_count","w_bold","w_bold_list",
+        "w_links","w_link_anchors","w_rel_count","w_rel_anchors","w_tags"
+    ]
+    b1, b2, _sp = st.columns([1,1,6])
+    with b1:
+        if st.button("Seleccionar todo", key="btn_sel_all"):
+            for k in field_keys:
+                st.session_state[k] = True
+            st.rerun()
+    with b2:
+        if st.button("Deseleccionar todo", key="btn_unsel_all"):
+            for k in field_keys:
+                st.session_state[k] = False
+            st.rerun()
+
+    # === Campos (lineales)
     colX, colY = st.columns(2)
 
     with colX:
-        w_title = st.checkbox("Title", value=True, key="w_title")
-        w_h1 = st.checkbox("H1", value=True, key="w_h1")
-        w_md = st.checkbox("Meta Description", value=True, key="w_md")
-        w_ogt = st.checkbox("OG:title", value=False, key="w_ogt")
-        w_ogd = st.checkbox("OG:description", value=False, key="w_ogd")
-        w_canon = st.checkbox("Canonical", value=True, key="w_canon")
-        w_pub = st.checkbox("Fecha publicación (meta/time)", value=False, key="w_pub")
-        w_upd = st.checkbox("Fecha actualización (meta/time)", value=False, key="w_upd")
-        w_author = st.checkbox("Autor", value=False, key="w_author")
-        w_lang = st.checkbox("Lang (html@lang)", value=False, key="w_lang")
+        w_title = st.checkbox("Title", value=st.session_state.get("w_title", True), key="w_title")
+        w_h1 = st.checkbox("H1", value=st.session_state.get("w_h1", True), key="w_h1")
+        w_md = st.checkbox("Meta Description", value=st.session_state.get("w_md", True), key="w_md")
+        w_ogt = st.checkbox("OG:title", value=st.session_state.get("w_ogt", False), key="w_ogt")
+        w_ogd = st.checkbox("OG:description", value=st.session_state.get("w_ogd", False), key="w_ogd")
+        w_canon = st.checkbox("Canonical", value=st.session_state.get("w_canon", True), key="w_canon")
+        w_pub = st.checkbox("Fecha publicación (meta/time)", value=st.session_state.get("w_pub", False), key="w_pub")
+        w_upd = st.checkbox("Fecha actualización (meta/time)", value=st.session_state.get("w_upd", False), key="w_upd")
+        w_author = st.checkbox("Autor", value=st.session_state.get("w_author", False), key="w_author")
+        w_lang = st.checkbox("Lang (html@lang)", value=st.session_state.get("w_lang", False), key="w_lang")
 
-        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=True, key="w_firstp")
-        xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value="", key="xp_firstp",
+        w_firstp = st.checkbox("Primer párrafo (XPath opcional)", value=st.session_state.get("w_firstp", True), key="w_firstp")
+        xp_firstp = st.text_input("XPath Primer párrafo (opcional)", value=st.session_state.get("xp_firstp",""), key="xp_firstp",
                                   help="Ej: //article//p[normalize-space()][1]  |  relativo al contenedor si empieza con .//")
 
         # XPath del contenedor del artículo
         xp_article = st.text_input(
             "XPath del contenedor del artículo (recomendado)",
-            value="",
+            value=st.session_state.get("xp_article",""),
             key="xp_article",
             help="Define el scope de h2/h3/negritas/links. Ej: //article | //main[@id='content'] | .//div[@data-type='article-body']"
         )
@@ -1417,105 +1431,114 @@ elif analisis == "10":
 
         # Caja de noticias relacionadas
         st.markdown("**Caja de noticias relacionadas**")
-        w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", value=False, key="w_rel_count")
-        w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", value=False, key="w_rel_anchors")
-        xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", value="", key="xp_related",
+        w_rel_count = st.checkbox("Cantidad de links en caja de relacionadas", value=st.session_state.get("w_rel_count", False), key="w_rel_count")
+        w_rel_anchors = st.checkbox("Anchor text de relacionadas (lista)", value=st.session_state.get("w_rel_anchors", False), key="w_rel_anchors")
+        xp_related = st.text_input("XPath de la caja de relacionadas (contenedor)", value=st.session_state.get("xp_related",""), key="xp_related",
                                    help="Ej: //aside[contains(@class,'related')] | //section[@id='relacionadas']")
 
     with colY:
-        w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=False, key="w_h2_list")
-        w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=False, key="w_h2_count")
-        xp_h2 = st.text_input("XPath H2 (opcional)", value="", key="xp_h2",
+        w_h2_list = st.checkbox("H2 (lista, SOLO dentro del artículo)", value=st.session_state.get("w_h2_list", False), key="w_h2_list")
+        w_h2_count = st.checkbox("H2 (cantidad, SOLO dentro del artículo)", value=st.session_state.get("w_h2_count", False), key="w_h2_count")
+        xp_h2 = st.text_input("XPath H2 (opcional)", value=st.session_state.get("xp_h2",""), key="xp_h2",
                               help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h2 por defecto.")
-        w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=False, key="w_h3_list")
-        w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=False, key="w_h3_count")
-        xp_h3 = st.text_input("XPath H3 (opcional)", value="", key="xp_h3",
+        w_h3_list = st.checkbox("H3 (lista, SOLO dentro del artículo)", value=st.session_state.get("w_h3_list", False), key="w_h3_list")
+        w_h3_count = st.checkbox("H3 (cantidad, SOLO dentro del artículo)", value=st.session_state.get("w_h3_count", False), key="w_h3_count")
+        xp_h3 = st.text_input("XPath H3 (opcional)", value=st.session_state.get("xp_h3",""), key="xp_h3",
                               help="Si empieza con .// se aplica respecto del contenedor; si no, se usa .//h3 por defecto.")
-        w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=False, key="w_bold")
-        w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", value=False, key="w_bold_list")
-        w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=False, key="w_links")
-        w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", value=False, key="w_link_anchors")
-        w_tags = st.checkbox("Tags (lista)", value=False, key="w_tags")
-        xp_tags = st.text_input("XPath Tags (opcional)", value="", key="xp_tags",
+        w_bold = st.checkbox("Cantidad de negritas (SOLO dentro del artículo)", value=st.session_state.get("w_bold", False), key="w_bold")
+        w_bold_list = st.checkbox("Lista de negritas (SOLO dentro del artículo)", value=st.session_state.get("w_bold_list", False), key="w_bold_list")
+        w_links = st.checkbox("Cantidad de links (SOLO dentro del artículo)", value=st.session_state.get("w_links", False), key="w_links")
+        w_link_anchors = st.checkbox("Anchor text de links del artículo (lista)", value=st.session_state.get("w_link_anchors", False), key="w_link_anchors")
+        w_tags = st.checkbox("Tags (lista)", value=st.session_state.get("w_tags", False), key="w_tags")
+        xp_tags = st.text_input("XPath Tags (opcional)", value=st.session_state.get("xp_tags",""), key="xp_tags",
                                 help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
 
         # XPaths opcionales para autor/updated específicos
-        xp_author = st.text_input("XPath Autor (opcional)", value="", key="xp_author",
+        xp_author = st.text_input("XPath Autor (opcional)", value=st.session_state.get("xp_author",""), key="xp_author",
                                   help="Ej: //span[@class='author-name']")
-        xp_updated = st.text_input("XPath Fecha actualización (opcional)", value="", key="xp_updated",
+        xp_updated = st.text_input("XPath Fecha actualización (opcional)", value=st.session_state.get("xp_updated",""), key="xp_updated",
                                    help="Ej: //time[contains(@class,'update')]")
 
     # NER con spaCy
     st.markdown("### 🧠 Entidades (spaCy)")
     c_ner1, c_ner2 = st.columns([1,2])
     with c_ner1:
-        do_ner = st.checkbox("Extraer entidades (NER) y ponderar por apariciones en el artículo", value=False, key="do_ner")
+        do_ner = st.checkbox("Extraer entidades (NER) y ponderar por apariciones en el artículo", value=st.session_state.get("do_ner", False), key="do_ner")
     with c_ner2:
-        ner_model = st.text_input("Modelo spaCy (opcional, ej: es_core_news_sm)", value="", key="ner_model",
+        ner_model = st.text_input("Modelo spaCy (opcional, ej: es_core_news_sm)", value=st.session_state.get("ner_model",""), key="ner_model",
                                   help="Si está vacío intento: es_core_news_sm → en_core_web_sm → xx_ent_wiki_sm. Descargo/local si faltan permisos.")
 
-    # === Semillas desde GSC
-    st.markdown("### 🔎 Semillas desde GSC")
+    # === Semillas desde GSC (SIEMPRE calculadas; SOLO visibles en debug)
     seeds = []
     seeds_search = []
     seeds_discover = []
     src_map = {"Search":"web","Discover":"discover","Search + Discover":"both"}
     src = src_map.get(tipo, "both")
 
-    extra_drop = tuple([p.strip() for p in (st.session_state.get("excl_patterns","") or excl_patterns_txt or "").split(",") if p.strip()])
+    extra_drop = tuple([p.strip() for p in (st.session_state.get("excl_patterns","") or "").split(",") if p.strip()])
 
-    # Search
+    # Obtener desde GSC
     if src in ("web","both"):
         seeds_search = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "web",
-            country or None, device or None, order_by, int(row_limit)
+            st.session_state.get("fast_country","") or None,
+            st.session_state.get("fast_device","") or None,
+            st.session_state.get("fast_order","clicks"),
+            int(row_limit)
         )
-        st.write(f"**Search (web)**: {len(seeds_search):,} filas")
-    # Discover
+        for r in seeds_search: r["source"] = "Search"
+        seeds.extend(seeds_search)
     if src in ("discover","both"):
         seeds_discover = _gsc_fetch_top_urls(
             sc_service, site_url, start_date, end_date, "discover",
-            country or None, device or None, order_by, int(row_limit)
+            st.session_state.get("fast_country","") or None,
+            st.session_state.get("fast_device","") or None,
+            st.session_state.get("fast_order","clicks"),
+            int(row_limit)
         )
-        st.write(f"**Discover**: {len(seeds_discover):,} filas")
-
-    if seeds_search:
-        for r in seeds_search:
-            r["source"] = "Search"
-        seeds.extend(seeds_search)
-    if seeds_discover:
-        for r in seeds_discover:
-            r["source"] = "Discover"
+        for r in seeds_discover: r["source"] = "Discover"
         seeds.extend(seeds_discover)
 
-    if "_fast_error" in st.session_state:
+    if "_fast_error" in st.session_state and st.session_state.get("DEBUG"):
         st.error(st.session_state["_fast_error"])
+
+    # Mostrar la sección SOLO en debug
+    if st.session_state.get("DEBUG"):
+        st.markdown("### 🔎 Semillas desde GSC")
+        st.write(f"**Search (web)**: {len(seeds_search):,} filas")
+        st.write(f"**Discover**: {len(seeds_discover):,} filas")
 
     df_seeds = pd.DataFrame(seeds)
     if not df_seeds.empty:
         # umbrales
         before = len(df_seeds)
+        min_clicks = int(st.session_state.get("fast_min_clicks", 0))
+        min_impr = int(st.session_state.get("fast_min_impr", 0))
         if min_clicks > 0:
-            df_seeds = df_seeds[df_seeds["clicks"] >= int(min_clicks)]
+            df_seeds = df_seeds[df_seeds["clicks"] >= min_clicks]
         if min_impr > 0:
-            df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
-        st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
+            df_seeds = df_seeds[df_seeds["impressions"] >= min_impr]
 
-        # columnas útiles + CTR%
+        if st.session_state.get("DEBUG"):
+            st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
+
+        # preparar URLs
         df_seeds["ctr_pct"] = (df_seeds["ctr"].fillna(0) * 100).round(2)
         df_seeds = df_seeds.rename(columns={"page":"url"})
         df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
 
         urls = df_seeds["url"].dropna().astype(str).tolist()
-        if only_articles:
+        if st.session_state.get("fast_only_articles", True):
             urls = _filter_article_urls(urls, extra_drop=extra_drop)
-        st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
-        st.code(urls[:20])
+
+        if st.session_state.get("DEBUG"):
+            st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
+            st.code(urls[:20])
 
         # Botón de ejecutar
         can_run = len(urls) > 0
         if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
-            ua_final = _suggest_user_agent(ua)
+            ua_final = _suggest_user_agent(st.session_state.get("fast_ua",""))
 
             # Armar wants/xpaths según checkboxes
             wants = {
@@ -1548,14 +1571,14 @@ elif analisis == "10":
                 # Scraping (async si hay aiohttp)
                 try:
                     results = asyncio.run(_scrape_async(
-                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=timeout_s, concurrency=int(concurrency)))
+                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
+                        timeout_s=st.session_state.get("fast_timeout",12), concurrency=int(st.session_state.get("fast_conc",24))))
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     results = loop.run_until_complete(_scrape_async(
-                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=joiner,
-                        timeout_s=timeout_s, concurrency=int(concurrency)))
+                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
+                        timeout_s=st.session_state.get("fast_timeout",12), concurrency=int(st.session_state.get("fast_conc",24))))
                     loop.close()
 
                 df_scr = pd.DataFrame(results)
@@ -1563,12 +1586,11 @@ elif analisis == "10":
                 # --- NER (opcional) ---
                 ner_cols = []
                 nlp = None
-                if do_ner:
-                    nlp = _load_spacy_model(ner_model)
+                if st.session_state.get("do_ner"):
+                    nlp = _load_spacy_model(st.session_state.get("ner_model",""))
                     if nlp is None:
                         st.warning("No se pudo cargar spaCy. Las columnas de entidades quedarán vacías.")
                     else:
-                        # Calcula entidades usando H1 + Meta Description + Primer Párrafo
                         ents_list = []
                         ents_scores = []
                         for _, row in df_scr.iterrows():
@@ -1583,7 +1605,6 @@ elif analisis == "10":
                                 continue
                             try:
                                 doc = nlp(base_text)
-                                # Conteo base por entidad en los 3 campos
                                 counts = {}
                                 labels_ok = set(["PERSON","ORG","GPE","LOC","PRODUCT","EVENT","WORK_OF_ART","NORP","FAC"])
                                 for ent in doc.ents:
@@ -1591,14 +1612,13 @@ elif analisis == "10":
                                         k = ent.text.strip()
                                         if not k: continue
                                         counts[k] = counts.get(k, 0) + 1
-                                # Ponderar por apariciones en el texto del artículo
                                 if article_text:
                                     low = article_text.lower()
                                     for k in list(counts.keys()):
                                         occ = low.count(k.lower())
-                                        counts[k] = counts.get(k,0) + occ  # base + apariciones en artículo
-                                # Ordenar por score desc y armar strings
+                                        counts[k] = counts.get(k,0) + occ
                                 pairs = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+                                joiner = st.session_state.get("joiner"," | ")
                                 ents_list.append(joiner.join([p[0] for p in pairs][:20]))
                                 ents_scores.append(joiner.join([f"{p[0]}:{p[1]}" for p in pairs][:20]))
                             except Exception:
@@ -1616,7 +1636,6 @@ elif analisis == "10":
 
                 # Columnas dinámicas según wants
                 cols = ["source","url"]
-                # básicos
                 if w_h1: cols.append("h1")
                 if w_title: cols.append("title")
                 if w_md: cols.append("meta_description")
@@ -1627,7 +1646,6 @@ elif analisis == "10":
                 if w_upd: cols.append("updated_time")
                 if w_author: cols.append("author")
                 if w_lang: cols.append("lang")
-                # avanzados
                 if w_firstp: cols.append("first_paragraph")
                 if w_h2_list: cols.append("h2_list")
                 if w_h2_count: cols.append("h2_count")
@@ -1640,9 +1658,7 @@ elif analisis == "10":
                 if w_rel_count: cols.append("related_links_count")
                 if w_rel_anchors: cols.append("related_link_anchors")
                 if w_tags: cols.append("tags_list")
-                # NER
                 cols += ner_cols
-                # métricas y estado
                 cols += ["clicks","impressions","ctr_pct","position","status","error"]
 
                 for c in cols:
@@ -1688,7 +1704,7 @@ elif analisis == "10":
                 df_out = df_out.rename(columns=rename_map)
 
                 # Crear Sheet en Drive
-                name = f"Extractor H1/meta/NER ({start_date} a {end_date}) - {site_url.replace('https://','').replace('http://','').strip('/')}"
+                name = f"Estructura de contenidos ({start_date} a {end_date}) - {site_url.replace('https://','').replace('http://','').strip('/')}"
                 meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet"}
                 parents = st.session_state.get("dest_folder_id")
                 if parents:
@@ -1714,10 +1730,10 @@ elif analisis == "10":
                     drive_service, gs_client,
                     user_email=( _me or {}).get("emailAddress") or "",
                     event="analysis", site_url=site_url,
-                    analysis_kind="Extractor rápido H1 (+metadatos+NER)",
+                    analysis_kind="Análisis de estructura de contenidos",
                     sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
                     gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}, ner={bool(do_ner)}"
+                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}, ner={bool(st.session_state.get('do_ner'))}"
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "fast_h1"
