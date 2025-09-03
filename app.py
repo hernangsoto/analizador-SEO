@@ -1410,10 +1410,19 @@ elif analisis == "2":
         start_dt = date(y, 1, 1)
         end_dt = date(y, 12, 31)
     elif period_choice == "Últimos 16 meses":
-        # de mes completo a mes completo: 16 meses hasta el mes anterior al anchor
-        end_month_last_day = last_day_of_month(first_day_of_month(anchor) - timedelta(days=1))
-        start_month_first_day = first_day_of_month(add_months(end_month_last_day, -15))
-        start_dt, end_dt = start_month_first_day, end_month_last_day
+    # Meses completos en ambos extremos, usando el día de corte (= anchor.day).
+    # 1) Último mes completo = el mes anterior al anchor.
+    last_full_end = last_day_of_month(first_day_of_month(anchor) - timedelta(days=1))
+
+    # 2) Punto de corte inicial: (primer día del mes del anchor - 16 meses) + (anchor.day - 1).
+    #    Ej.: si anchor es 3/sep, el corte es 3/may; el primer mes CALENDARIO completo que
+    #    empieza >= ese corte es JUNIO (no mayo).
+    cut = add_months(first_day_of_month(anchor), -16) + timedelta(days=anchor.day - 1)
+
+    # 3) Si el corte cae el día 1, arrancamos ese mismo mes; si no, arrancamos el mes siguiente.
+    start_month = first_day_of_month(cut) if cut.day == 1 else first_day_of_month(add_months(cut, 1))
+
+    start_dt, end_dt = start_month, last_full_end
     else:
         # Personalizado
         end_dt = anchor
