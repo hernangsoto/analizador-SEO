@@ -454,6 +454,11 @@ for _candidate in [
 ]:
     _patch_write_ws_if_present(_candidate)
 
+try:
+    run_report_results = getattr(_ext, "run_report_results", None) if _ext else None
+except Exception:
+    run_report_results = None
+
 __all__ = [
     "USING_EXT",
     "EXT_PACKAGE",
@@ -463,5 +468,5 @@ __all__ = [
     "run_names_analysis",
     "run_discover_snoop",
     "run_content_analysis",
-    "run_content_structure",   # <- NUEVO
+    "run_report_results",   # <-- añade esta exportación
 ]
