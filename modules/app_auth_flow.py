@@ -15,6 +15,7 @@ SCOPES_PERSONAL_FULL = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/analytics.readonly",
 ]
 
 # ---- helpers de query params
