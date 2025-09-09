@@ -10,6 +10,7 @@ google-api-python-client>=2.126
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
+google-analytics-data>=0.18.0
 
 gspread>=6.0
 gspread-dataframe>=3.3
