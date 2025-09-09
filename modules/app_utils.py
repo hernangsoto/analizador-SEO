@@ -41,6 +41,16 @@ def has_gsc_scope(scopes: list[str] | None) -> bool:
     needed = set(SCOPES_GSC + ["https://www.googleapis.com/auth/webmasters"])
     return any(s in needed for s in scopes)
 
+def has_ga4_scope(scopes: list[str] | None) -> bool:
+    """Verifica si las credenciales incluyen permisos de Google Analytics 4."""
+    if not scopes:
+        return False
+    needed = set(SCOPES_GA4 + [
+        "https://www.googleapis.com/auth/analytics.readonly",
+        "https://www.googleapis.com/auth/analytics.edit",
+    ])
+    return any(s in needed for s in scopes)
+
 def norm(s: str | None) -> str:
     """Normaliza strings para comparar etiquetas de cuentas."""
     if not s:
