@@ -93,6 +93,10 @@ header[data-testid="stHeader"] { z-index: 1500 !important; }
   header[data-testid="stHeader"]::before { left: 100px !important; }
 /* Fallback */
 :root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before { left: 16px !important; }
+.success-inline {
+  background:#e7f6ee;border:1px solid #c5ead7;color:#174d2a;border-radius:8px;
+  padding:8px 12px;margin:8px 0;font-size:0.95rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -307,7 +311,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
 
     key = st.radio("Tipos disponibles:", opciones, index=1, key="analysis_choice")
     if key.startswith("2."): return "2"
-    if key.startswith("3."): return "3"   # <- NUEVO mapping
+    if key.startswith("3."): return "3"
     if key.startswith("4."): return "4"
     if key.startswith("5."): return "5"
     if key.startswith("6."): return "6"
@@ -590,9 +594,9 @@ else:
             st.error(f"No pude inicializar el cliente de Search Console: {e}")
             st.stop()
 
-# --- PASO: elegir sitio ---
-def pick_site(sc_service):
-    st.subheader("Elige el sitio a analizar")
+# --- PASO: elegir sitio(s) ---
+def pick_sites(sc_service) -> list[str]:
+    st.subheader("Elige el/los sitios a analizar")
     try:
         site_list = sc_service.sites().list().execute()
         sites = site_list.get("siteEntry", [])
@@ -602,13 +606,23 @@ def pick_site(sc_service):
     verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
     if not verified:
         st.error("No se encontraron sitios verificados en esta cuenta."); st.stop()
-    options = sorted({s["siteUrl"] for s in verified})
-    prev = st.session_state.get("site_url_choice")
-    index = options.index(prev) if prev in options else 0
-    site_url = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
-    return site_url
 
-site_url = pick_site(sc_service)
+    options = sorted({s["siteUrl"] for s in verified})
+    multi = st.toggle("Analizar múltiples sitios", value=False, key="multi_sites")
+
+    if multi:
+        prev_multi = st.session_state.get("site_urls_choice", [])
+        defaults = prev_multi or ([st.session_state.get("site_url_choice")] if st.session_state.get("site_url_choice") in options else [])
+        selected = st.multiselect("Sitios verificados:", options, default=[x for x in defaults if x in options], key="site_urls_choice")
+        return selected
+    else:
+        prev = st.session_state.get("site_url_choice")
+        index = options.index(prev) if prev in options else 0
+        site = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
+        return [site]
+
+site_urls = pick_sites(sc_service)
+site_url = site_urls[0] if site_urls else None  # compat con código existente
 
 # =========================
 # Utilidades comunes
@@ -702,6 +716,23 @@ def _suggest_user_agent(ua: str | None) -> str:
     return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/126.0.0.0 Safari/537.36")
+
+# === Helper multi-sitio para runners GSC
+def run_for_sites(titulo: str, fn, sc_service, drive_service, gs_client, site_urls: list[str], params: dict, dest_folder_id: str | None):
+    created: list[tuple[str, str]] = []
+    n = len(site_urls)
+    prog = st.progress(0.0)
+    for i, s in enumerate(site_urls, 1):
+        sid = run_with_indicator(f"{titulo} — {s}", fn, sc_service, drive_service, gs_client, s, params, dest_folder_id)
+        if sid:
+            try:
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, s)
+            except Exception:
+                pass
+            created.append((s, sid))
+        prog.progress(i / n)
+    prog.empty()
+    return created
 
 # ===== spaCy bootstrap (modelo autoinstalable sin permisos en site-packages) =====
 @st.cache_resource(show_spinner=False)
@@ -1259,32 +1290,53 @@ if analisis == "4":
                 os.environ["SEO_ADVANCED_FILTERS"] = json.dumps(adv_payload, ensure_ascii=False)
             else:
                 os.environ.pop("SEO_ADVANCED_FILTERS", None)
-            sid = run_with_indicator(
-                "Procesando Core Update",
-                run_core_update, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Core Update",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "core"
+
+            if len(site_urls) <= 1:
+                sid = run_with_indicator(
+                    "Procesando Core Update",
+                    run_core_update, sc_service, drive_service, gs_client, site_url, params,
+                    st.session_state.get("dest_folder_id")
+                )
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Core Update",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"params={params!r}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "core"
+            else:
+                results = run_for_sites("Procesando Core Update", run_core_update,
+                                        sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
+                st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+                for s, sid in results:
+                    st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                    activity_log_append(
+                        drive_service, gs_client,
+                        user_email=( _me or {}).get("emailAddress") or "",
+                        event="analysis", site_url=s,
+                        analysis_kind="Core Update",
+                        sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                        gsc_account=st.session_state.get("src_account_label") or "",
+                        notes=f"params={params!r}"
+                    )
+                if results:
+                    st.session_state["last_file_id"] = results[-1][1]
+                    st.session_state["last_file_kind"] = "core"
+
 elif analisis == "3":
     if run_sections_analysis is None:
         st.warning("Este despliegue no incluye `run_sections_analysis` (agregá `seo_analisis_ext/sections_analysis.py`).")
@@ -1350,33 +1402,52 @@ elif analisis == "3":
 
     can_run = (mode != "custom") or (custom_start and custom_end and custom_start <= custom_end)
     if st.button("🧭 Ejecutar Análisis de secciones", type="primary", disabled=not can_run, key="sec_run"):
-        sid = run_with_indicator(
-            "Procesando Secciones",
-            run_sections_analysis, sc_service, drive_service, gs_client, site_url, params,
-            st.session_state.get("dest_folder_id")
-        )
-        maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-        st.success("¡Listo! Tu documento está creado.")
-        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-        with st.expander("Compartir acceso al documento (opcional)"):
-            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-        try:
-            meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-            sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-        except Exception:
-            sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+        if len(site_urls) <= 1:
+            sid = run_with_indicator(
+                "Procesando Secciones",
+                run_sections_analysis, sc_service, drive_service, gs_client, site_url, params,
+                st.session_state.get("dest_folder_id")
+            )
+            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+            st.success("¡Listo! Tu documento está creado.")
+            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+            with st.expander("Compartir acceso al documento (opcional)"):
+                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+            try:
+                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+            except Exception:
+                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
 
-        activity_log_append(
-            drive_service, gs_client,
-            user_email=( _me or {}).get("emailAddress") or "",
-            event="analysis", site_url=site_url,
-            analysis_kind="Secciones",
-            sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-            gsc_account=st.session_state.get("src_account_label") or "",
-            notes=f"mode={mode}, n_prev={int(n_prev)}, lag={int(lag)}, origin={origin}, path={path or 'site'}, country={country or 'GLOBAL'}"
-        )
-        st.session_state["last_file_id"] = sid
-        st.session_state["last_file_kind"] = "sections"
+            activity_log_append(
+                drive_service, gs_client,
+                user_email=( _me or {}).get("emailAddress") or "",
+                event="analysis", site_url=site_url,
+                analysis_kind="Secciones",
+                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                gsc_account=st.session_state.get("src_account_label") or "",
+                notes=f"mode={mode}, n_prev={int(n_prev)}, lag={int(lag)}, origin={origin}, path={path or 'site'}, country={country or 'GLOBAL'}"
+            )
+            st.session_state["last_file_id"] = sid
+            st.session_state["last_file_kind"] = "sections"
+        else:
+            results = run_for_sites("Procesando Secciones", run_sections_analysis,
+                                    sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
+            st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+            for s, sid in results:
+                st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=s,
+                    analysis_kind="Secciones",
+                    sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"mode={mode}, n_prev={int(n_prev)}, lag={int(lag)}, origin={origin}, path={path or 'site'}, country={country or 'GLOBAL'}"
+                )
+            if results:
+                st.session_state["last_file_id"] = results[-1][1]
+                st.session_state["last_file_kind"] = "sections"
 
 elif analisis == "5":
     if run_evergreen is None:
@@ -1384,32 +1455,51 @@ elif analisis == "5":
     else:
         params = params_for_evergreen()
         if st.button("🌲 Ejecutar análisis Evergreen", type="primary", key="btn_ev_run"):
-            sid = run_with_indicator(
-                "Procesando Evergreen",
-                run_evergreen, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Evergreen",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "evergreen"
+            if len(site_urls) <= 1:
+                sid = run_with_indicator(
+                    "Procesando Evergreen",
+                    run_evergreen, sc_service, drive_service, gs_client, site_url, params,
+                    st.session_state.get("dest_folder_id")
+                )
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Evergreen",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"params={params!r}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "evergreen"
+            else:
+                results = run_for_sites("Procesando Evergreen", run_evergreen,
+                                        sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
+                st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+                for s, sid in results:
+                    st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                    activity_log_append(
+                        drive_service, gs_client,
+                        user_email=( _me or {}).get("emailAddress") or "",
+                        event="analysis", site_url=s,
+                        analysis_kind="Evergreen",
+                        sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                        gsc_account=st.session_state.get("src_account_label") or "",
+                        notes=f"params={params!r}"
+                    )
+                if results:
+                    st.session_state["last_file_id"] = results[-1][1]
+                    st.session_state["last_file_kind"] = "evergreen"
 
 elif analisis == "6":
     if run_traffic_audit is None:
@@ -1417,32 +1507,51 @@ elif analisis == "6":
     else:
         params = params_for_auditoria()
         if st.button("🧮 Ejecutar Auditoría de tráfico", type="primary", key="btn_aud_run"):
-            sid = run_with_indicator(
-                "Procesando Auditoría de tráfico",
-                run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
-                st.session_state.get("dest_folder_id")
-            )
-            maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-            st.success("¡Listo! Tu documento está creado.")
-            st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-            with st.expander("Compartir acceso al documento (opcional)"):
-                share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-            try:
-                meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-            except Exception:
-                sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-            activity_log_append(
-                drive_service, gs_client,
-                user_email=( _me or {}).get("emailAddress") or "",
-                event="analysis", site_url=site_url,
-                analysis_kind="Auditoría",
-                sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                gsc_account=st.session_state.get("src_account_label") or "",
-                notes=f"params={params!r}"
-            )
-            st.session_state["last_file_id"] = sid
-            st.session_state["last_file_kind"] = "audit"
+            if len(site_urls) <= 1:
+                sid = run_with_indicator(
+                    "Procesando Auditoría de tráfico",
+                    run_traffic_audit, sc_service, drive_service, gs_client, site_url, params,
+                    st.session_state.get("dest_folder_id")
+                )
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url=site_url,
+                    analysis_kind="Auditoría",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=st.session_state.get("src_account_label") or "",
+                    notes=f"params={params!r}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "audit"
+            else:
+                results = run_for_sites("Procesando Auditoría", run_traffic_audit,
+                                        sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
+                st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+                for s, sid in results:
+                    st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                    activity_log_append(
+                        drive_service, gs_client,
+                        user_email=( _me or {}).get("emailAddress") or "",
+                        event="analysis", site_url=s,
+                        analysis_kind="Auditoría",
+                        sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                        gsc_account=st.session_state.get("src_account_label") or "",
+                        notes=f"params={params!r}"
+                    )
+                if results:
+                    st.session_state["last_file_id"] = results[-1][1]
+                    st.session_state["last_file_kind"] = "audit"
 
 elif analisis == "2":
     from modules.app_ext import run_report_results
@@ -1566,7 +1675,7 @@ elif analisis == "2":
         disable_pos = (origin == "discover")
         m_pos = st.checkbox("Posición (solo Search)", value=True and not disable_pos, key="rep_m_pos", disabled=disable_pos)
 
-    # ---------- Top de notas (nuevo) ----------
+    # ---------- Top de notas ----------
     tc1, tc2 = st.columns([1, 2])
     with tc1:
         top_n = st.number_input(
@@ -1593,37 +1702,57 @@ elif analisis == "2":
             },
             "lag_days": int(lag),
             "sheet_title_prefix": "Reporte de resultados",
-            "top_n": int(top_n),  # <-- NUEVO
+            "top_n": int(top_n),
         }
         try:
-            sid = run_with_indicator(
-                "Generando Reporte de resultados",
-                run_report_results,  # runner externo
-                sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id")
-            )
-            if sid:
-                st.success("¡Listo! Tu documento está creado.")
-                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-                with st.expander("Compartir acceso al documento (opcional)"):
-                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=( _me or {}).get("emailAddress") or "",
-                    event="analysis", site_url=site_url,
-                    analysis_kind="Reporte de resultados",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}, top_n={int(top_n)}"
+            if len(site_urls) <= 1:
+                sid = run_with_indicator(
+                    "Generando Reporte de resultados",
+                    run_report_results,  # runner externo
+                    sc_service, drive_service, gs_client, site_url, params, st.session_state.get("dest_folder_id")
                 )
-                st.session_state["last_file_id"] = sid
-                st.session_state["last_file_kind"] = "report_results"
+                if sid:
+                    maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                    st.success("¡Listo! Tu documento está creado.")
+                    st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                    with st.expander("Compartir acceso al documento (opcional)"):
+                        share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+                    try:
+                        meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                        sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                    except Exception:
+                        sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+                    activity_log_append(
+                        drive_service, gs_client,
+                        user_email=( _me or {}).get("emailAddress") or "",
+                        event="analysis", site_url=site_url,
+                        analysis_kind="Reporte de resultados",
+                        sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                        gsc_account=st.session_state.get("src_account_label") or "",
+                        notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}, top_n={int(top_n)}"
+                    )
+                    st.session_state["last_file_id"] = sid
+                    st.session_state["last_file_kind"] = "report_results"
+            else:
+                results = run_for_sites("Generando Reporte de resultados", run_report_results,
+                                        sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
+                st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+                for s, sid in results:
+                    st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                    activity_log_append(
+                        drive_service, gs_client,
+                        user_email=( _me or {}).get("emailAddress") or "",
+                        event="analysis", site_url=s,
+                        analysis_kind="Reporte de resultados",
+                        sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                        gsc_account=st.session_state.get("src_account_label") or "",
+                        notes=f"periodo={start_date}->{end_date}, origin={origin}, path={path or 'site'}, countries={countries}, top_n={int(top_n)}"
+                    )
+                if results:
+                    st.session_state["last_file_id"] = results[-1][1]
+                    st.session_state["last_file_kind"] = "report_results"
         except Exception as e:
             st.error(f"Falló la generación del reporte: {e}")
 
@@ -1639,6 +1768,8 @@ elif analisis == "10":
     # ===== ANÁLISIS DE ESTRUCTURA DE CONTENIDOS =====
     st.subheader("Análisis de estructura de contenidos")
     st.caption("Trae URLs por Search / Discover, filtra y scrapea **solo los campos que elijas** (en el scope del artículo si indicas su XPath) y publica en Sheets. Incluye extracción de entidades con spaCy.")
+    if len(site_urls) > 1:
+        st.info("🔁 Seleccionaste múltiples sitios. El *preview* y conteos se muestran para el **primer** sitio seleccionado; al ejecutar, se procesarán **todos** y se creará un Sheet por cada uno.")
 
     # ========== Config básica: fechas + origen + límite ==========
     colA, colB, colC = st.columns([1,1,2])
@@ -1782,24 +1913,25 @@ elif analisis == "10":
         xp_tags = st.text_input("XPath Tags (opcional)", value=st.session_state.get("xp_tags",""), key="xp_tags",
                                 help="Ej: .//ul[@class='tags']//a | //meta[@property='article:tag']/@content")
 
-    # ========== Preflight GSC (oculto salvo debug) ==========
+    # ========== Preflight/preview con el PRIMER sitio ==========
+    preview_site = site_url
     seeds = []
     seeds_search = []
     seeds_discover = []
     src_map = {"Search":"web","Discover":"discover","Search + Discover":"both"}
     src = src_map.get(tipo, "both")
 
-    # Traer semillas
+    # Traer semillas (solo preview)
     if src in ("web","both"):
         seeds_search = _gsc_fetch_top_urls(
-            sc_service, site_url, start_date, end_date, "web",
+            sc_service, preview_site, start_date, end_date, "web",
             country or (None if country == "(TODOS)" else None),
             device if device and device != "(Todos)" else None,
             order_by, int(row_limit)
         )
     if src in ("discover","both"):
         seeds_discover = _gsc_fetch_top_urls(
-            sc_service, site_url, start_date, end_date, "discover",
+            sc_service, preview_site, start_date, end_date, "discover",
             country or (None if country == "(TODOS)" else None),
             device if device and device != "(Todos)" else None,
             order_by, int(row_limit)
@@ -1822,15 +1954,63 @@ elif analisis == "10":
         st.code([r.get("page","") for r in (seeds_search[:10] if seeds_search else [])])
         st.code([r.get("page","") for r in (seeds_discover[:10] if seeds_discover else [])])
 
-    df_seeds = pd.DataFrame(seeds)
-    if not df_seeds.empty:
+    df_seeds_preview = pd.DataFrame(seeds)
+    if not df_seeds_preview.empty:
+        before = len(df_seeds_preview)
+        if min_clicks > 0:
+            df_seeds_preview = df_seeds_preview[df_seeds_preview["clicks"] >= int(min_clicks)]
+        if min_impr > 0:
+            df_seeds_preview = df_seeds_preview[df_seeds_preview["impressions"] >= int(min_impr)]
+        if st.session_state.get("DEBUG"):
+            st.caption(f"Tras umbrales (preview {preview_site}): {len(df_seeds_preview):,} (antes {before:,})")
+        df_seeds_preview["ctr_pct"] = (df_seeds_preview["ctr"].fillna(0) * 100).round(2)
+        df_seeds_preview = df_seeds_preview.rename(columns={"page":"url"})
+        df_seeds_preview = df_seeds_preview.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
+        urls_preview = df_seeds_preview["url"].dropna().astype(str).tolist()
+        if only_articles:
+            urls_preview = _filter_article_urls(urls_preview)
+        st.write(f"URLs candidatas a scraping (preview: **{preview_site}**): **{len(urls_preview):,}**")
+    else:
+        st.info("No se obtuvieron semillas para el preview. Aun así podés ejecutar (se procesarán todos los sitios seleccionados).")
+
+    # ========== Ejecutar ==========
+    def _run_structure_for_site(one_site: str):
+        # Traer semillas reales para este sitio
+        seeds_s, seeds_d = [], []
+        if src in ("web","both"):
+            seeds_s = _gsc_fetch_top_urls(
+                sc_service, one_site, start_date, end_date, "web",
+                country or (None if country == "(TODOS)" else None),
+                device if device and device != "(Todos)" else None,
+                order_by, int(row_limit)
+            )
+        if src in ("discover","both"):
+            seeds_d = _gsc_fetch_top_urls(
+                sc_service, one_site, start_date, end_date, "discover",
+                country or (None if country == "(TODOS)" else None),
+                device if device and device != "(Todos)" else None,
+                order_by, int(row_limit)
+            )
+        lst = []
+        if seeds_s:
+            for r in seeds_s:
+                r["source"] = "Search"
+            lst.extend(seeds_s)
+        if seeds_d:
+            for r in seeds_d:
+                r["source"] = "Discover"
+            lst.extend(seeds_d)
+
+        df_seeds = pd.DataFrame(lst)
+        if df_seeds.empty:
+            st.warning(f"({one_site}) No hay semillas en el rango/filtros. Se omite.")
+            return None
+
         before = len(df_seeds)
         if min_clicks > 0:
             df_seeds = df_seeds[df_seeds["clicks"] >= int(min_clicks)]
         if min_impr > 0:
             df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
-        if st.session_state.get("DEBUG"):
-            st.caption(f"Tras umbrales: {len(df_seeds):,} (antes {before:,})")
 
         df_seeds["ctr_pct"] = (df_seeds["ctr"].fillna(0) * 100).round(2)
         df_seeds = df_seeds.rename(columns={"page":"url"})
@@ -1839,231 +2019,244 @@ elif analisis == "10":
         urls = df_seeds["url"].dropna().astype(str).tolist()
         if only_articles:
             urls = _filter_article_urls(urls)
-        st.write(f"URLs candidatas a scraping: **{len(urls):,}**")
+        if not urls:
+            st.warning(f"({one_site}) No hay URLs para scrapear tras filtros. Se omite.")
+            return None
 
-        # ========== Ejecutar ==========
-        can_run = len(urls) > 0
-        if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
-            ua_final = _suggest_user_agent(st.session_state.get("fast_ua",""))
+        ua_final = _suggest_user_agent(st.session_state.get("fast_ua",""))
 
-            # Armar wants/xpaths según checkboxes
-            wants = {
-                "title": w_title, "h1": w_h1, "meta_description": w_md,
-                "og_title": w_ogt, "og_description": w_ogd, "canonical": w_canon,
-                "published_time": w_pub, "lang": w_lang,
-                "first_paragraph": w_firstp, "article_text": w_article_text,
-                "h2_list": w_h2_list, "h2_count": w_h2_count,
-                "h3_list": w_h3_list, "h3_count": w_h3_count,
-                "bold_count": w_bold, "bold_list": w_bold_list,
-                "link_count": w_links, "link_anchor_texts": w_link_anchors,
-                "related_links_count": w_rel_count, "related_link_anchors": w_rel_anchors,
-                "tags_list": w_tags
-            }
-            xpaths = {
-                "article": st.session_state.get("xp_article",""),
-                "first_paragraph": st.session_state.get("xp_firstp",""),
-                "h2": st.session_state.get("xp_h2",""),
-                "h3": st.session_state.get("xp_h3",""),
-                "tags": st.session_state.get("xp_tags",""),
-                "related_box": st.session_state.get("xp_related",""),
-            }
+        # Armar wants/xpaths según checkboxes
+        wants = {
+            "title": st.session_state["w_title"], "h1": st.session_state["w_h1"], "meta_description": st.session_state["w_md"],
+            "og_title": st.session_state["w_ogt"], "og_description": st.session_state["w_ogd"], "canonical": st.session_state["w_canon"],
+            "published_time": st.session_state["w_pub"], "lang": st.session_state["w_lang"],
+            "first_paragraph": st.session_state["w_firstp"], "article_text": st.session_state["w_article_text"],
+            "h2_list": st.session_state["w_h2_list"], "h2_count": st.session_state["w_h2_count"],
+            "h3_list": st.session_state["w_h3_list"], "h3_count": st.session_state["w_h3_count"],
+            "bold_count": st.session_state["w_bold"], "bold_list": st.session_state["w_bold_list"],
+            "link_count": st.session_state["w_links"], "link_anchor_texts": st.session_state["w_link_anchors"],
+            "related_links_count": st.session_state["w_rel_count"], "related_link_anchors": st.session_state["w_rel_anchors"],
+            "tags_list": st.session_state["w_tags"]
+        }
+        xpaths = {
+            "article": st.session_state.get("xp_article",""),
+            "first_paragraph": st.session_state.get("xp_firstp",""),
+            "h2": st.session_state.get("xp_h2",""),
+            "h3": st.session_state.get("xp_h3",""),
+            "tags": st.session_state.get("xp_tags",""),
+            "related_box": st.session_state.get("xp_related",""),
+        }
 
-            if not any(wants.values()):
-                st.error("Seleccioná al menos un campo para extraer."); st.stop()
+        if not any(wants.values()):
+            st.error("Seleccioná al menos un campo para extraer."); return None
 
+        # Scraping (async si hay aiohttp)
+        try:
+            results = asyncio.run(_scrape_async(
+                urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
+                timeout_s=int(timeout_s), concurrency=int(concurrency)))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            results = loop.run_until_complete(_scrape_async(
+                urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
+                timeout_s=int(timeout_s), concurrency=int(concurrency)))
+            loop.close()
+
+        df_scr = pd.DataFrame(results)
+
+        # ===== ENTIDADES con spaCy =====
+        entities_enabled = st.session_state.get("fast_entities", True)
+        if entities_enabled:
+            # Asegurar columnas base
+            for col in ["h1","meta_description","first_paragraph","article_text"]:
+                if col not in df_scr.columns:
+                    df_scr[col] = ""
+
+            ents_top = []
+            ents_all = []
             try:
-                # Scraping (async si hay aiohttp)
-                try:
-                    results = asyncio.run(_scrape_async(
-                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
-                        timeout_s=timeout_s, concurrency=int(concurrency)))
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    results = loop.run_until_complete(_scrape_async(
-                        urls, ua_final, wants=wants, xpaths=xpaths, joiner=st.session_state.get("joiner"," | "),
-                        timeout_s=timeout_s, concurrency=int(concurrency)))
-                    loop.close()
+                nlp, model_id, how = ensure_spacy()
+                from collections import Counter
+                for _, r in df_scr.iterrows():
+                    h1v = str(r.get("h1","")) or ""
+                    mdv = str(r.get("meta_description","")) or ""
+                    fpv = str(r.get("first_paragraph","")) or ""
+                    art = str(r.get("article_text","")) or ""
 
-                df_scr = pd.DataFrame(results)
+                    text_combo = " ".join([h1v, mdv, fpv]).strip()
+                    if not text_combo:
+                        ents_top.append("")
+                        ents_all.append("")
+                        continue
 
-                # ===== ENTIDADES con spaCy =====
-                entities_enabled = st.session_state.get("fast_entities", True)
-                if entities_enabled:
-                    # Asegurar columnas base
-                    for col in ["h1","meta_description","first_paragraph","article_text"]:
-                        if col not in df_scr.columns:
-                            df_scr[col] = ""
+                    doc = nlp(text_combo)
+                    items = [e.text.strip() for e in doc.ents if e.text and e.text.strip()]
+                    if not items:
+                        ents_top.append("")
+                        ents_all.append("")
+                        continue
 
-                    ents_top = []
-                    ents_all = []
-                    try:
-                        nlp, model_id, how = ensure_spacy()
-                        st.caption(f"spaCy listo ({model_id}, vía {how}).")
+                    c = Counter()
+                    art_lower = art.lower()
+                    for it in items:
+                        w = 1
+                        if it and art_lower.count(it.lower()):
+                            w += 2
+                        if h1v.lower().count(it.lower()):
+                            w += 2
+                        if fpv.lower().count(it.lower()):
+                            w += 1
+                        c[it] += w
 
-                        from collections import Counter
-                        for _, r in df_scr.iterrows():
-                            h1v = str(r.get("h1","")) or ""
-                            mdv = str(r.get("meta_description","")) or ""
-                            fpv = str(r.get("first_paragraph","")) or ""
-                            art = str(r.get("article_text","")) or ""
+                    top10 = [t for t, _ in c.most_common(10)]
+                    ents_top.append(st.session_state.get("joiner"," | ").join(top10))
+                    ents_all.append(st.session_state.get("joiner"," | ").join(sorted(c.keys(), key=lambda x: (-c[x], x.lower()))))
 
-                            text_combo = " ".join([h1v, mdv, fpv]).strip()
-                            if not text_combo:
-                                ents_top.append("")
-                                ents_all.append("")
-                                continue
+            except Exception as e:
+                st.warning(f"No pude preparar spaCy: {e}")
+                ents_top = ["" for _ in range(len(df_scr))]
+                ents_all = ["" for _ in range(len(df_scr))]
 
-                            doc = nlp(text_combo)
-                            items = [e.text.strip() for e in doc.ents if e.text and e.text.strip()]
-                            if not items:
-                                ents_top.append("")
-                                ents_all.append("")
-                                continue
+            df_scr["entities_top"] = ents_top
+            df_scr["entities_all"] = ents_all
+        else:
+            df_scr["entities_top"] = ""
+            df_scr["entities_all"] = ""
 
-                            c = Counter()
-                            art_lower = art.lower()
-                            for it in items:
-                                w = 1
-                                if it and art_lower.count(it.lower()):
-                                    w += 2
-                                if h1v.lower().count(it.lower()):
-                                    w += 2
-                                if fpv.lower().count(it.lower()):
-                                    w += 1
-                                c[it] += w
+        # Merge con métricas de GSC
+        df_seeds = df_seeds.rename(columns={"url":"url"})
+        df_out = pd.merge(
+            df_seeds[["url","source","clicks","impressions","ctr_pct","position"]],
+            df_scr, on="url", how="left"
+        )
 
-                            top10 = [t for t, _ in c.most_common(10)]
-                            ents_top.append(st.session_state.get("joiner"," | ").join(top10))
-                            ents_all.append(st.session_state.get("joiner"," | ").join(sorted(c.keys(), key=lambda x: (-c[x], x.lower()))))
+        # Columnas dinámicas según wants
+        cols = ["source","url"]
+        if st.session_state["w_h1"]: cols.append("h1")
+        if st.session_state["w_title"]: cols.append("title")
+        if st.session_state["w_md"]: cols.append("meta_description")
+        if st.session_state["w_ogt"]: cols.append("og_title")
+        if st.session_state["w_ogd"]: cols.append("og_description")
+        if st.session_state["w_canon"]: cols.append("canonical")
+        if st.session_state["w_pub"]: cols.append("published_time")
+        if st.session_state["w_lang"]: cols.append("lang")
+        if st.session_state["w_firstp"]: cols.append("first_paragraph")
+        if st.session_state["w_article_text"]: cols.append("article_text")
+        if st.session_state["w_h2_list"]: cols.append("h2_list")
+        if st.session_state["w_h2_count"]: cols.append("h2_count")
+        if st.session_state["w_h3_list"]: cols.append("h3_list")
+        if st.session_state["w_h3_count"]: cols.append("h3_count")
+        if st.session_state["w_bold"]: cols.append("bold_count")
+        if st.session_state["w_bold_list"]: cols.append("bold_list")
+        if st.session_state["w_links"]: cols.append("link_count")
+        if st.session_state["w_link_anchors"]: cols.append("link_anchor_texts")
+        if st.session_state["w_rel_count"]: cols.append("related_links_count")
+        if st.session_state["w_rel_anchors"]: cols.append("related_link_anchors")
+        if st.session_state["w_tags"]: cols.append("tags_list")
+        # entidades
+        cols += ["entities_top","entities_all"]
+        # métricas
+        cols += ["clicks","impressions","ctr_pct","position","status","error"]
 
-                    except Exception as e:
-                        st.warning(f"No pude preparar spaCy: {e}")
-                        ents_top = ["" for _ in range(len(df_scr))]
-                        ents_all = ["" for _ in range(len(df_scr))]
+        # Asegurar columnas
+        for c in cols:
+            if c not in df_out.columns:
+                df_out[c] = "" if c not in ("clicks","impressions","ctr_pct","position","status") else 0
+        df_out = df_out[cols]
 
-                    df_scr["entities_top"] = ents_top
-                    df_scr["entities_all"] = ents_all
-                else:
-                    df_scr["entities_top"] = ""
-                    df_scr["entities_all"] = ""
+        # Renombrado final de columnas (pedido)
+        rename_map = {
+            "source": "Search / Discover",
+            "url": "URL",
+            "h1": "H1",
+            "title": "Title",
+            "meta_description": "Meta Description",
+            "og_title": "OG Title",
+            "og_description": "OG Description",
+            "canonical": "Canonical",
+            "first_paragraph": "Primer Párrafo",
+            "article_text": "Texto del Artículo",
+            "h2_list": "H2 (lista)",
+            "h2_count": "H2 (cantidad)",
+            "h3_list": "H3 (lista)",
+            "h3_count": "H3 (cantidad)",
+            "bold_count": "Negritas (cantidad)",
+            "bold_list": "Negritas (lista)",
+            "link_count": "Links (cantidad)",
+            "link_anchor_texts": "Links (anchors)",
+            "related_links_count": "Relacionadas (links)",
+            "related_link_anchors": "Relacionadas (anchors)",
+            "tags_list": "Tags",
+            "entities_top": "Entidades (Top 10)",
+            "entities_all": "Entidades (Todas)",
+            "clicks": "Clics",
+            "impressions": "Impresiones",
+            "ctr_pct": "CTR",
+            "position": "Posición",
+            "status": "Status",
+            "error": "Error"
+        }
+        df_out = df_out.rename(columns=rename_map)
 
-                # Merge con métricas de GSC
-                df_seeds = df_seeds.rename(columns={"url":"url"})
-                df_out = pd.merge(
-                    df_seeds[["url","source","clicks","impressions","ctr_pct","position"]],
-                    df_scr, on="url", how="left"
-                )
+        # Crear Sheet en Drive
+        name = f"Estructura ({start_date} a {end_date}) - {one_site.replace('https://','').replace('http://','').strip('/')}"
+        meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet"}
+        parents = st.session_state.get("dest_folder_id")
+        if parents:
+            meta["parents"] = [parents]
+        newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
+        sid = newfile["id"]
 
-                # Columnas dinámicas según wants
-                cols = ["source","url"]
-                if w_h1: cols.append("h1")
-                if w_title: cols.append("title")
-                if w_md: cols.append("meta_description")
-                if w_ogt: cols.append("og_title")
-                if w_ogd: cols.append("og_description")
-                if w_canon: cols.append("canonical")
-                if w_pub: cols.append("published_time")
-                if w_lang: cols.append("lang")
-                if w_firstp: cols.append("first_paragraph")
-                if w_article_text: cols.append("article_text")
-                if w_h2_list: cols.append("h2_list")
-                if w_h2_count: cols.append("h2_count")
-                if w_h3_list: cols.append("h3_list")
-                if w_h3_count: cols.append("h3_count")
-                if w_bold: cols.append("bold_count")
-                if w_bold_list: cols.append("bold_list")
-                if w_links: cols.append("link_count")
-                if w_link_anchors: cols.append("link_anchor_texts")
-                if w_rel_count: cols.append("related_links_count")
-                if w_rel_anchors: cols.append("related_link_anchors")
-                if w_tags: cols.append("tags_list")
-                # entidades
-                cols += ["entities_top","entities_all"]
-                # métricas
-                cols += ["clicks","impressions","ctr_pct","position","status","error"]
+        # Escribir datos (gspread)
+        sh = gs_client.open_by_key(sid)
+        ws = sh.sheet1
+        ws.resize(1)  # limpiar
+        ws.update([df_out.columns.tolist()] + df_out.fillna("").astype(str).values.tolist())
 
-                # Asegurar columnas
-                for c in cols:
-                    if c not in df_out.columns:
-                        df_out[c] = "" if c not in ("clicks","impressions","ctr_pct","position","status") else 0
-                df_out = df_out[cols]
+        maybe_prefix_sheet_name_with_medio(drive_service, sid, one_site)
 
-                # Renombrado final de columnas (pedido)
-                rename_map = {
-                    "source": "Search / Discover",
-                    "url": "URL",
-                    "h1": "H1",
-                    "title": "Title",
-                    "meta_description": "Meta Description",
-                    "og_title": "OG Title",
-                    "og_description": "OG Description",
-                    "canonical": "Canonical",
-                    "first_paragraph": "Primer Párrafo",
-                    "article_text": "Texto del Artículo",
-                    "h2_list": "H2 (lista)",
-                    "h2_count": "H2 (cantidad)",
-                    "h3_list": "H3 (lista)",
-                    "h3_count": "H3 (cantidad)",
-                    "bold_count": "Negritas (cantidad)",
-                    "bold_list": "Negritas (lista)",
-                    "link_count": "Links (cantidad)",
-                    "link_anchor_texts": "Links (anchors)",
-                    "related_links_count": "Relacionadas (links)",
-                    "related_link_anchors": "Relacionadas (anchors)",
-                    "tags_list": "Tags",
-                    "entities_top": "Entidades (Top 10)",
-                    "entities_all": "Entidades (Todas)",
-                    "clicks": "Clics",
-                    "impressions": "Impresiones",
-                    "ctr_pct": "CTR",
-                    "position": "Posición",
-                    "status": "Status",
-                    "error": "Error"
-                }
-                df_out = df_out.rename(columns=rename_map)
+        activity_log_append(
+            drive_service, gs_client,
+            user_email=( _me or {}).get("emailAddress") or "",
+            event="analysis", site_url=one_site,
+            analysis_kind="Estructura de contenidos",
+            sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+            gsc_account=st.session_state.get("src_account_label") or "",
+            notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}"
+        )
+        return sid, df_out
 
-                # Crear Sheet en Drive
-                name = f"Estructura ({start_date} a {end_date}) - {site_url.replace('https://','').replace('http://','').strip('/')}"
-                meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet"}
-                parents = st.session_state.get("dest_folder_id")
-                if parents:
-                    meta["parents"] = [parents]
-                newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
-                sid = newfile["id"]
-
-                # Escribir datos (gspread)
-                sh = gs_client.open_by_key(sid)
-                ws = sh.sheet1
-                ws.resize(1)  # limpiar
-                ws.update([df_out.columns.tolist()] + df_out.fillna("").astype(str).values.tolist())
-
-                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
-
+    can_run = True  # se valida arriba rango de fechas
+    if st.button("⚡ Ejecutar scraping + exportar a Sheets", type="primary", disabled=not can_run, key="fast_run"):
+        results_cs: list[tuple[str,str]] = []
+        if len(site_urls) <= 1:
+            out = _run_structure_for_site(site_url)
+            if out:
+                sid, df_out = out
                 st.success("¡Listo! Tu documento está creado.")
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=( _me or {}).get("emailAddress") or "",
-                    event="analysis", site_url=site_url,
-                    analysis_kind="Estructura de contenidos",
-                    sheet_id=sid, sheet_name=name, sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
-                    gsc_account=st.session_state.get("src_account_label") or "",
-                    notes=f"win={start_date}->{end_date}, src={tipo}, urls={len(urls)}"
-                )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "content_structure"
-
                 with st.expander("Vista previa (primeras 20 filas)"):
                     st.dataframe(df_out.head(20), use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Falló el scraping o el volcado a Sheets: {e}")
-    else:
-        st.info("Ajustá la ventana o filtros para obtener semillas desde GSC.")
+        else:
+            prog = st.progress(0.0)
+            for i, s in enumerate(site_urls, 1):
+                out = _run_structure_for_site(s)
+                if out:
+                    sid, _df = out
+                    results_cs.append((s, sid))
+                prog.progress(i/len(site_urls))
+            prog.empty()
+            if results_cs:
+                st.success(f"¡Listo! Se generaron {len(results_cs)} documentos.")
+                for s, sid in results_cs:
+                    st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                st.session_state["last_file_id"] = results_cs[-1][1]
+                st.session_state["last_file_kind"] = "content_structure"
 
 else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
