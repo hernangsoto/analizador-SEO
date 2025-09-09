@@ -1,58 +1,79 @@
 # modules/app_utils.py
 from __future__ import annotations
+import unicodedata
+from typing import Dict, List, Iterable, Any
 
 import streamlit as st
 
-# Intentamos importar desde la raíz; si no existe, usamos un fallback seguro.
-try:
-    from app_constants import SCOPES_GSC  # type: ignore
-except Exception:
-    SCOPES_GSC = ["https://www.googleapis.com/auth/webmasters.readonly"]
+# Scopes usados por la app
+GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
+GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 
-# Scope(s) de Google Analytics 4 (GA4)
-try:
-    from app_constants import SCOPES_GA4  # type: ignore
-except Exception:
-    SCOPES_GA4 = ["https://www.googleapis.com/auth/analytics.readonly"]
 
-def get_qp() -> dict:
-    """Obtiene los query params de forma compatible con distintas versiones de Streamlit."""
+def get_qp() -> Dict[str, List[str]]:
+    """
+    Devuelve los query params como dict[str, list[str]].
+    Soporta Streamlit nuevo (st.query_params) y versiones previas (experimental_*).
+    """
+    # Streamlit >= 1.30: st.query_params es un Mapping "vivo"
     try:
-        return dict(st.query_params)
+        qp = st.query_params  # type: ignore[attr-defined]
+        out: Dict[str, List[str]] = {}
+        for k, v in qp.items():
+            out[k] = v if isinstance(v, list) else [v]
+        return out
     except Exception:
-        return st.experimental_get_query_params()
+        pass
+
+    # Fallback: APIs experimentales antiguas
+    try:
+        return st.experimental_get_query_params()  # type: ignore[attr-defined]
+    except Exception:
+        return {}
+
 
 def clear_qp() -> None:
-    """Limpia los query params de forma compatible con distintas versiones de Streamlit."""
+    """Limpia los query params, con compatibilidad hacia atrás."""
+    # Streamlit >= 1.30
     try:
-        st.query_params.clear()
+        st.query_params.clear()  # type: ignore[attr-defined]
+        return
     except Exception:
-        st.experimental_set_query_params()
+        pass
 
-@st.cache_resource
-def oauth_flow_store() -> dict:
-    """Almacén en memoria para objetos Flow (sobrevive a reruns y pestañas)."""
-    return {}
+    # Fallback antiguo
+    try:
+        st.experimental_set_query_params()  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
-def has_gsc_scope(scopes: list[str] | None) -> bool:
-    """Verifica si las credenciales incluyen permisos de Search Console."""
+
+def has_gsc_scope(scopes: Iterable[str] | None) -> bool:
+    """Chequea si el token tiene scope de Search Console (lectura)."""
     if not scopes:
         return False
-    needed = set(SCOPES_GSC + ["https://www.googleapis.com/auth/webmasters"])
-    return any(s in needed for s in scopes)
+    base = GSC_SCOPE.split("?")[0]
+    return any(str(s or "").startswith(base) for s in scopes)
 
-def has_ga4_scope(scopes: list[str] | None) -> bool:
-    """Verifica si las credenciales incluyen permisos de Google Analytics 4."""
+
+def has_ga4_scope(scopes: Iterable[str] | None) -> bool:
+    """Chequea si el token tiene scope de GA4 (lectura)."""
     if not scopes:
         return False
-    needed = set(SCOPES_GA4 + [
-        "https://www.googleapis.com/auth/analytics.readonly",
-        "https://www.googleapis.com/auth/analytics.edit",
-    ])
-    return any(s in needed for s in scopes)
+    base = GA4_SCOPE.split("?")[0]
+    return any(str(s or "").startswith(base) for s in scopes)
 
-def norm(s: str | None) -> str:
-    """Normaliza strings para comparar etiquetas de cuentas."""
-    if not s:
+
+def norm(s: Any) -> str:
+    """
+    Normaliza para comparaciones "suaves":
+    - str(), trim, lower
+    - quita acentos/diacríticos
+    - colapsa espacios internos
+    """
+    if s is None:
         return ""
-    return "".join(ch for ch in s.lower() if ch.isalnum())
+    txt = str(s).strip().lower()
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    return " ".join(txt.split())
