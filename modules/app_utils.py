@@ -9,6 +9,12 @@ try:
 except Exception:
     SCOPES_GSC = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
+# Scope(s) de Google Analytics 4 (GA4)
+try:
+    from app_constants import SCOPES_GA4  # type: ignore
+except Exception:
+    SCOPES_GA4 = ["https://www.googleapis.com/auth/analytics.readonly"]
+
 def get_qp() -> dict:
     """Obtiene los query params de forma compatible con distintas versiones de Streamlit."""
     try:
