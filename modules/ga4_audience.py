@@ -1,203 +1,254 @@
+# modules/ga4_audience.py
 from __future__ import annotations
-from datetime import date, timedelta
-import math
+
+"""
+Reporte de audiencia (GA4)
+- Crea un Google Sheet y publica dos pestañas:
+  1) Audiencia por país + device (activeUsers, newUsers, sessions)
+  2) Serie diaria (activeUsers, sessions)
+- Defensas:
+  * Corrige si drive_service y gs_client llegan invertidos.
+  * Normaliza fechas (date/datetime/str).
+  * Si GA4 falla, deja el error documentado en la hoja.
+"""
+
+from typing import Any, Tuple
+from datetime import date, datetime, timedelta
 import pandas as pd
 
-# Compatibilidad v1 / v1beta
-try:
-    from google.analytics.data_v1 import AnalyticsDataClient as _ADC
-    from google.analytics.data_v1.types import (
-        RunReportRequest, DateRange, Dimension, Metric, OrderBy,
-        FilterExpression, Filter, FilterExpressionList
-    )
-except Exception:
-    from google.analytics.data_v1beta import BetaAnalyticsDataClient as _ADC
-    from google.analytics.data_v1beta.types import (
-        RunReportRequest, DateRange, Dimension, Metric, OrderBy,
-        FilterExpression, Filter, FilterExpressionList
-    )
 
-def _daterange(a: date, b: date):
-    return DateRange(start_date=str(a), end_date=str(b))
+# ----------------------------
+# Utilidades
+# ----------------------------
+def _ensure_drive_and_gspread(
+    drive_service: Any,
+    gs_client: Any
+) -> Tuple[Any, Any]:
+    """
+    Asegura (drive_service, gs_client) en el orden correcto.
+    drive_service debe tener .files(); gs_client debe tener .open_by_key.
+    """
+    has_files_a = hasattr(drive_service, "files")
+    has_files_b = hasattr(gs_client, "files")
+    has_open_a = hasattr(drive_service, "open_by_key")
+    has_open_b = hasattr(gs_client, "open_by_key")
 
-def _to_df(resp) -> pd.DataFrame:
-    if not hasattr(resp, "rows") or not resp.rows:
-        return pd.DataFrame()
-    cols = [h.name for h in resp.dimension_headers] + [h.name for h in resp.metric_headers]
-    out = []
-    for r in resp.rows:
-        row = [dv.value for dv in r.dimension_values] + [mv.value for mv in r.metric_values]
-        out.append(row)
-    df = pd.DataFrame(out, columns=cols)
-    # convertir métricas a numéricas
-    for c in [h.name for h in resp.metric_headers]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Caso correcto
+    if has_files_a and has_open_b:
+        return drive_service, gs_client
+    # Invertidos
+    if has_files_b and has_open_a:
+        return gs_client, drive_service
+    # Heurísticas extra
+    if has_files_b:
+        return gs_client, drive_service
+    if has_open_a:
+        return gs_client, drive_service
+    return drive_service, gs_client
+
+
+def _as_date(d: Any) -> date:
+    """Convierte date/datetime/str(YYYY-MM-DD) → date."""
+    if isinstance(d, date) and not isinstance(d, datetime):
+        return d
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, str):
+        s = d.strip()
+        # ISO estándar primero
+        try:
+            return datetime.fromisoformat(s).date()
+        except Exception:
+            pass
+        # Fallback muy permisivo
+        try:
+            y = int(s[0:4]); m = int(s[5:7]); dd = int(s[8:10])
+            return date(y, m, dd)
+        except Exception:
+            raise ValueError(f"Fecha inválida: {d!r}. Formato esperado YYYY-MM-DD.")
+    raise ValueError(f"No puedo interpretar la fecha: {d!r}")
+
+
+def _pick_win(params: dict) -> Tuple[date, date, int]:
+    """Obtiene (start, end, lag_days) desde params con defaults sensatos."""
+    lag = int(params.get("lag_days", 3))
+    # diversas llaves compatibles
+    start = params.get("start") or params.get("start_date") or (params.get("window") or {}).get("start")
+    end   = params.get("end")   or params.get("end_date")   or (params.get("window") or {}).get("end")
+
+    if not (start and end):
+        # fallback: últimos 28 días cerrados por lag
+        end_dt = date.today() - timedelta(days=lag)
+        start_dt = end_dt - timedelta(days=27)
+        return start_dt, end_dt, lag
+
+    return _as_date(start), _as_date(end), lag
+
+
+def _ga4_run_report(ga4_client: Any, property_id: str,
+                    dimensions: list[str], metrics: list[str],
+                    start: date, end: date, limit: int = 250000) -> pd.DataFrame:
+    """
+    Ejecuta run_report y devuelve DataFrame.
+    Usa dict request para evitar dependencia de clases protobuf explícitas.
+    """
+    req = {
+        "property": f"properties/{property_id}",
+        "date_ranges": [{"start_date": str(start), "end_date": str(end)}],
+        "dimensions": [{"name": d} for d in dimensions],
+        "metrics": [{"name": m} for m in metrics],
+        "limit": limit
+    }
+    # La lib oficial acepta dict como request mapeable.
+    resp = ga4_client.run_report(request=req)
+
+    dim_names = [d.name for d in resp.dimension_headers] if getattr(resp, "dimension_headers", None) else []
+    met_names = [m.name for m in resp.metric_headers] if getattr(resp, "metric_headers", None) else []
+
+    rows = []
+    for r in (resp.rows or []):
+        dvals = [dv.value for dv in r.dimension_values] if getattr(r, "dimension_values", None) else []
+        mvals = [mv.value for mv in r.metric_values] if getattr(r, "metric_values", None) else []
+        rec = {k: v for k, v in zip(dim_names, dvals)}
+        for k, v in zip(met_names, mvals):
+            # valores métricos vienen como str → intentar numeric
+            try:
+                if v is None:
+                    rec[k] = 0
+                elif "." in v or "e" in v.lower():
+                    rec[k] = float(v)
+                else:
+                    rec[k] = int(v)
+            except Exception:
+                rec[k] = v
+        rows.append(rec)
+
+    df = pd.DataFrame(rows)
     return df
 
-def _order_by_metric(metric: str, desc: bool = True):
-    return [OrderBy(metric=OrderBy.MetricOrderBy(metric_name=metric), desc=desc)]
 
-def _order_by_dimension(dim: str, desc: bool = False):
-    return [OrderBy(dimension=OrderBy.DimensionOrderBy(dimension_name=dim), desc=desc)]
-
-def _run(client: _ADC, pid: str, start: date, end: date,
-         dims: list[str], mets: list[str], limit: int = 10000,
-         order_bys=None, dfilter: FilterExpression | None = None):
-    req = RunReportRequest(
-        property=f"properties/{pid}",
-        date_ranges=[_daterange(start, end)],
-        dimensions=[Dimension(name=d) for d in dims],
-        metrics=[Metric(name=m) for m in mets],
-        limit=limit
-    )
-    if order_bys:
-        req.order_bys.extend(order_bys)
-    if dfilter:
-        req.dimension_filter = dfilter
-    return client.run_report(req)
-
-def _safe_report(client, pid, start, end, dims, mets, **kw) -> pd.DataFrame:
-    try:
-        return _to_df(_run(client, pid, start, end, dims, mets, **kw))
-    except Exception:
-        return pd.DataFrame()
-
-def _total_row(df: pd.DataFrame, metric_cols: list[str]) -> dict:
-    if df.empty:
-        return {m: 0 for m in metric_cols}
-    s = df[metric_cols].sum(numeric_only=True)
-    return {m: float(s.get(m, 0)) for m in metric_cols}
-
-def _delta_pct(cur: float, base: float) -> float:
-    if base in (0, None) or math.isnan(base):
-        return float("nan")
-    return (cur - base) / base
-
-def _write_df(sh, title: str, df: pd.DataFrame):
-    if "Sheet1" in [w.title for w in sh.worksheets()]:
-        ws = sh.sheet1
-        try:
-            ws.update_title(title)
-        except Exception:
-            pass
+def _gspread_write_df(ws, df: pd.DataFrame) -> None:
+    """Escribe DataFrame en una worksheet (borra y pega)."""
+    if df is None or df.empty:
         ws.clear()
-    else:
-        ws = sh.add_worksheet(title=title, rows="1", cols="1")
-    if df is None:
-        df = pd.DataFrame()
-    ws.update([df.columns.tolist()] + df.fillna("").astype(str).values.tolist())
+        ws.update([["(sin datos)"]])
+        return
+    ws.clear()
+    values = [df.columns.tolist()] + df.astype(str).fillna("").values.tolist()
+    ws.update(values)
 
-def run_ga4_audience_report(ga4_data_client: _ADC, property_id: str,
-                            drive_service, gs_client, params: dict,
-                            dest_folder_id: str | None):
-    start: date = params["start"]
-    end: date   = params["end"]
-    inc = params.get("include", {})
-    top_n = int(params.get("top_n", 25))
-    compare_prev = bool(params.get("compare_prev", True))
-    compare_yoy  = bool(params.get("compare_yoy", True))
 
-    # Períodos de comparación
-    span = (end - start).days + 1
-    prev_end = start - timedelta(days=1)
-    prev_start = prev_end - timedelta(days=span - 1)
-    yoy_start = start.replace(year=start.year - 1)
-    yoy_end   = end.replace(year=end.year - 1)
+# ----------------------------
+# Runner principal
+# ----------------------------
+def run_ga4_audience_report(
+    ga4_data,           # GA4 Data API client
+    drive_service,      # Google Drive API service (tiene .files())
+    gs_client,          # gspread client (tiene .open_by_key)
+    property_id: str,
+    params: dict,
+    dest_folder_id: str | None = None,
+) -> str | None:
+    """
+    Genera un Sheet con 2 pestañas:
+      - 'Audiencia país+device'
+      - 'Serie diaria'
+    Devuelve el Spreadsheet ID o None si falla antes de crear el archivo.
+    """
+    # 1) Normalizaciones y defensas
+    drive_service, gs_client = _ensure_drive_and_gspread(drive_service, gs_client)
+    start, end, lag = _pick_win(params or {})
+    span_days = (end - start).days + 1
+    if span_days <= 0:
+        raise ValueError(f"Rango inválido: {start} → {end}")
 
-    mets_core = ["activeUsers","newUsers","sessions","engagedSessions","engagementRate",
-                 "averageSessionDuration","screenPageViews","bounceRate"]
+    prop_label = params.get("property_label") or params.get("property_name") or str(property_id)
+    sheet_name = f"GA4 Audiencia ({start} a {end}) - {prop_label}"
 
-    # ===== Datos base =====
-    cur_tot = _safe_report(ga4_data_client, property_id, start, end, [], mets_core)
-    prev_tot = _safe_report(ga4_data_client, property_id, prev_start, prev_end, [], mets_core) if compare_prev else pd.DataFrame()
-    yoy_tot  = _safe_report(ga4_data_client, property_id, yoy_start, yoy_end, [], mets_core) if compare_yoy else pd.DataFrame()
-
-    cur = _total_row(cur_tot, mets_core)
-    prv = _total_row(prev_tot, mets_core) if compare_prev else {m: float("nan") for m in mets_core}
-    yoy = _total_row(yoy_tot,  mets_core) if compare_yoy  else {m: float("nan") for m in mets_core}
-
-    # Overview
-    rows = []
-    nice = {
-        "activeUsers":"Usuarios",
-        "newUsers":"Usuarios nuevos",
-        "sessions":"Sesiones",
-        "engagedSessions":"Sesiones con interacción",
-        "engagementRate":"Tasa de interacción",
-        "averageSessionDuration":"Duración media (s)",
-        "screenPageViews":"Vistas",
-        "bounceRate":"Tasa de rebote",
-    }
-    for m in mets_core:
-        rows.append([
-            nice[m],
-            cur[m],
-            prv[m] if compare_prev else "",
-            _delta_pct(cur[m], prv[m]) if compare_prev else "",
-            yoy[m] if compare_yoy else "",
-            _delta_pct(cur[m], yoy[m]) if compare_yoy else "",
-        ])
-    df_overview = pd.DataFrame(rows, columns=[
-        "Métrica","Actual","Previo","Δ vs. Previo","YoY","Δ vs. YoY"
-    ])
-
-    # Crear Sheet
-    title = f"GA4 Audiencia {start}→{end}"
-    meta = {"name": title, "mimeType": "application/vnd.google-apps.spreadsheet"}
+    # 2) Crear el Spreadsheet ANTES de llamar a GA4 (así siempre retornamos un ID)
+    meta = {"name": sheet_name, "mimeType": "application/vnd.google-apps.spreadsheet"}
     if dest_folder_id:
         meta["parents"] = [dest_folder_id]
-    newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
-    sid = newfile["id"]
-    sh = gs_client.open_by_key(sid)
 
-    _write_df(sh, "Overview", df_overview)
+    try:
+        newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
+        sid = newfile["id"]
+    except Exception as e:
+        # Si esto falla, no hay ID para devolver
+        raise RuntimeError(f"No pude crear el Sheet en Drive: {e}")
 
-    # Time series
-    if inc.get("timeseries", True):
-        df_ts = _safe_report(ga4_data_client, property_id, start, end,
-                             ["date"], ["activeUsers","sessions","engagedSessions"],
-                             order_bys=_order_by_dimension("date"), limit=5000)
-        _write_df(sh, "Serie diaria", df_ts)
-
-    # Cortes (helper)
-    def _top_sheet(name: str, dims: list[str], mets: list[str] = None, order_metric="activeUsers"):
-        ms = mets or ["activeUsers","sessions","engagedSessions"]
-        df = _safe_report(ga4_data_client, property_id, start, end,
-                          dims, ms, order_bys=_order_by_metric(order_metric, True), limit=top_n)
-        if not df.empty:
-            # participación %
-            total = df[order_metric].sum()
-            if total and total > 0:
-                df["share_"+order_metric] = (df[order_metric] / total).round(4)
-        _write_df(sh, name, df)
-
-    if inc.get("geo", True):
-        _top_sheet("País", ["country"])
-    if inc.get("language", True):
-        _top_sheet("Idioma", ["language"])
-    if inc.get("channels", True):
-        _top_sheet("Canal (Default)", ["sessionDefaultChannelGroup"])
-    if inc.get("device", True):
-        _top_sheet("Dispositivo", ["deviceCategory"])
-    if inc.get("os", True):
-        _top_sheet("SO", ["operatingSystem"])
-    if inc.get("browser", True):
-        _top_sheet("Navegador", ["browser"])
-    if inc.get("new_vs_returning", True):
-        _top_sheet("Nuevo vs Recurrente", ["newVsReturning"])
-    if inc.get("hour", True):
-        df_hour = _safe_report(ga4_data_client, property_id, start, end,
-                               ["hour"], ["activeUsers","sessions","engagedSessions"],
-                               order_bys=_order_by_dimension("hour"), limit=24)
-        _write_df(sh, "Hora del día", df_hour)
-    if inc.get("demographics", True):
-        # Se intenta y, si no hay señales / permisos, se omite silenciosamente
+    # Abrir con gspread
+    try:
+        sh = gs_client.open_by_key(sid)
+        ws_main = sh.sheet1
+        ws_main.update_title("Audiencia país+device")
+        # Precrear segunda pestaña
         try:
-            _top_sheet("Edad", ["age"])
+            ws_series = sh.worksheet("Serie diaria")
+        except Exception:
+            ws_series = sh.add_worksheet(title="Serie diaria", rows=100, cols=20)
+    except Exception as e:
+        # Tuvimos ID pero no pudimos abrir con gspread → devolver ID igual
+        # para que al menos el usuario tenga el archivo vacío.
+        try:
+            # Dejar mensaje en título
+            drive_service.files().update(fileId=sid, body={"name": sheet_name + " (sin contenido)"}).execute()
         except Exception:
             pass
+        return sid
+
+    # 3) Traer datos GA4
+    error_text = None
+    try:
+        # Pestaña 1: país + device
+        dims_1 = ["country", "deviceCategory"]
+        mets_1 = ["activeUsers", "newUsers", "sessions"]
+        df1 = _ga4_run_report(ga4_data, property_id, dims_1, mets_1, start, end)
+        if not df1.empty:
+            df1 = df1.groupby(dims_1, as_index=False).agg(
+                activeUsers=("activeUsers", "sum"),
+                newUsers=("newUsers", "sum"),
+                sessions=("sessions", "sum"),
+            ).sort_values(["activeUsers"], ascending=False)
+        _gspread_write_df(ws_main, df1)
+
+        # Pestaña 2: serie por día
+        dims_2 = ["date"]
+        mets_2 = ["activeUsers", "sessions"]
+        df2 = _ga4_run_report(ga4_data, property_id, dims_2, mets_2, start, end)
+        if not df2.empty:
+            # Normalizar 'date' a YYYY-MM-DD si llega como '20240910'
+            if "date" in df2.columns:
+                def _fmt(dv: str) -> str:
+                    s = str(dv)
+                    if len(s) == 8 and s.isdigit():
+                        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+                    return s
+                df2["date"] = df2["date"].map(_fmt)
+            df2 = df2.sort_values("date")
+        _gspread_write_df(ws_series, df2)
+
+        # Info meta en una pestaña opcional
         try:
-            _top_sheet("Género", ["gender"])
+            ws_meta = None
+            try:
+                ws_meta = sh.worksheet("Meta")
+            except Exception:
+                ws_meta = sh.add_worksheet(title="Meta", rows=50, cols=6)
+            info = pd.DataFrame({
+                "campo": ["property_id", "property_label", "start", "end", "lag_days", "span_days"],
+                "valor": [property_id, prop_label, str(start), str(end), lag, span_days],
+            })
+            _gspread_write_df(ws_meta, info)
+        except Exception:
+            pass
+
+    except Exception as e:
+        # Escribir el error visible en la primera hoja
+        error_text = f"❌ Error al consultar GA4: {e}"
+        try:
+            ws_main.clear()
+            ws_main.update([["Error"], [error_text]])
         except Exception:
             pass
 
