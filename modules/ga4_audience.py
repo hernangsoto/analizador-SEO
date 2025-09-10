@@ -3,16 +3,24 @@ from __future__ import annotations
 
 """
 Reporte de audiencia (GA4)
-- Crea un Google Sheet y publica dos pestañas:
+- Crea un Google Sheet y publica:
   1) Audiencia por país + device (activeUsers, newUsers, sessions)
   2) Serie diaria (activeUsers, sessions)
+  3) URLs (Top) — landingPage o pagePath + métricas (N configurable)
+  4) URL × País+Device — desglose para las Top N URLs
+  5) Serie diaria por URL (Top N) — long-form
 - Defensas:
   * Corrige si drive_service y gs_client llegan invertidos.
   * Normaliza fechas (date/datetime/str).
   * Si GA4 falla, deja el error documentado en la hoja.
+- Params opcionales para desgloses por URL:
+  * urls_top_n: int = 20
+  * url_dimension: str = "landingPagePlusQueryString"  # o "pagePathPlusQueryString"
+  * include_url_series: bool = True
+  * include_url_country_device: bool = True
 """
 
-from typing import Any, Tuple, Optional
+from typing import Any, Tuple, Optional, Iterable, List, Dict
 from datetime import date, datetime, timedelta
 import pandas as pd
 
@@ -85,21 +93,36 @@ def _pick_win(params: dict) -> Tuple[date, date, int]:
     return _as_date(start), _as_date(end), lag
 
 
-def _ga4_run_report(ga4_client: Any, property_id: str,
-                    dimensions: list[str], metrics: list[str],
-                    start: date, end: date, limit: int = 250000) -> pd.DataFrame:
+def _ga4_run_report(
+    ga4_client: Any,
+    property_id: str,
+    dimensions: List[str],
+    metrics: List[str],
+    start: date,
+    end: date,
+    limit: int = 250000,
+    dimension_filter: Optional[Dict[str, Any]] = None,
+    order_bys: Optional[List[Dict[str, Any]]] = None,
+) -> pd.DataFrame:
     """
     Ejecuta run_report y devuelve DataFrame.
-    Usa dict request para evitar dependencia de clases protobuf explícitas.
+    Permite dimension_filter y order_bys usando el mapeo dict de la API.
     """
-    req = {
+    req: Dict[str, Any] = {
         "property": f"properties/{property_id}",
         "date_ranges": [{"start_date": str(start), "end_date": str(end)}],
         "dimensions": [{"name": d} for d in dimensions],
         "metrics": [{"name": m} for m in metrics],
         "limit": limit
     }
-    # La lib oficial acepta dict como request mapeable.
+    if dimension_filter:
+        # Estructura esperada: DimensionFilterExpression
+        # Ej: {"filter":{"field_name": "landingPagePlusQueryString","in_list_filter":{"values": [...]}}}
+        req["dimension_filter"] = dimension_filter
+    if order_bys:
+        # Ej: [{"metric": {"metric_name": "sessions"}, "desc": True}]
+        req["order_bys"] = order_bys
+
     resp = ga4_client.run_report(request=req)
 
     dim_names = [d.name for d in resp.dimension_headers] if getattr(resp, "dimension_headers", None) else []
@@ -115,7 +138,7 @@ def _ga4_run_report(ga4_client: Any, property_id: str,
             try:
                 if v is None:
                     rec[k] = 0
-                elif "." in v or "e" in v.lower():
+                elif isinstance(v, str) and (("." in v) or ("e" in v.lower())):
                     rec[k] = float(v)
                 else:
                     rec[k] = int(v)
@@ -150,9 +173,12 @@ def run_ga4_audience_report(
     dest_folder_id: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Genera un Sheet con 2 pestañas:
+    Genera un Sheet con 5 pestañas:
       - 'Audiencia país+device'
       - 'Serie diaria'
+      - 'URLs (Top)'
+      - 'URL × País+Device'
+      - 'Serie diaria por URL (Top N)'
     Devuelve el Spreadsheet ID o None si falla antes de crear el archivo.
     """
     # 1) Normalizaciones y defensas
@@ -164,6 +190,12 @@ def run_ga4_audience_report(
 
     prop_label = params.get("property_label") or params.get("property_name") or str(property_id)
     sheet_name = f"GA4 Audiencia ({start} a {end}) - {prop_label}"
+
+    # Parámetros para desgloses de URL
+    urls_top_n = int(params.get("urls_top_n", 20))
+    url_dimension = str(params.get("url_dimension", "landingPagePlusQueryString")).strip() or "landingPagePlusQueryString"
+    include_url_series = bool(params.get("include_url_series", True))
+    include_url_country_device = bool(params.get("include_url_country_device", True))
 
     # 2) Crear el Spreadsheet ANTES de llamar a GA4 (así siempre retornamos un ID)
     meta = {"name": sheet_name, "mimeType": "application/vnd.google-apps.spreadsheet"}
@@ -182,22 +214,25 @@ def run_ga4_audience_report(
         sh = gs_client.open_by_key(sid)
         ws_main = sh.sheet1
         ws_main.update_title("Audiencia país+device")
-        # Precrear segunda pestaña
-        try:
-            ws_series = sh.worksheet("Serie diaria")
-        except Exception:
-            ws_series = sh.add_worksheet(title="Serie diaria", rows=100, cols=20)
+        # Precrear otras pestañas por si fallan más adelante
+        def _ensure_ws(title: str):
+            try:
+                return sh.worksheet(title)
+            except Exception:
+                return sh.add_worksheet(title=title, rows=100, cols=26)
+        ws_series = _ensure_ws("Serie diaria")
+        ws_urls   = _ensure_ws("URLs (Top)")
+        ws_ud     = _ensure_ws("URL × País+Device")
+        ws_us     = _ensure_ws("Serie diaria por URL (Top N)")
     except Exception:
         # Tuvimos ID pero no pudimos abrir con gspread → devolver ID igual
         try:
-            # Dejar mensaje en título
             drive_service.files().update(fileId=sid, body={"name": sheet_name + " (sin contenido)"}).execute()
         except Exception:
             pass
         return sid
 
     # 3) Traer datos GA4
-    error_text = None
     try:
         # Pestaña 1: país + device
         dims_1 = ["country", "deviceCategory"]
@@ -227,16 +262,101 @@ def run_ga4_audience_report(
             df2 = df2.sort_values("date")
         _gspread_write_df(ws_series, df2)
 
+        # ---------- Desgloses por URL ----------
+        # (a) URLs (Top)
+        dims_u = [url_dimension]
+        mets_u = ["activeUsers", "newUsers", "sessions"]
+        # Ordenar por sesiones descendente desde la API cuando sea posible
+        order_bys = [{"metric": {"metric_name": "sessions"}, "desc": True}]
+        df_urls_all = _ga4_run_report(
+            ga4_data, property_id, dims_u, mets_u, start, end,
+            order_bys=order_bys
+        )
+        if not df_urls_all.empty:
+            df_urls_top = (
+                df_urls_all.groupby(dims_u, as_index=False)
+                .agg(activeUsers=("activeUsers", "sum"),
+                     newUsers=("newUsers", "sum"),
+                     sessions=("sessions", "sum"))
+                .sort_values("sessions", ascending=False)
+            )
+            if urls_top_n > 0:
+                df_urls_top = df_urls_top.head(urls_top_n)
+        else:
+            df_urls_top = pd.DataFrame(columns=[url_dimension] + mets_u)
+        _gspread_write_df(ws_urls, df_urls_top)
+
+        # Lista de URLs top para filtros siguientes
+        top_values: List[str] = df_urls_top[url_dimension].astype(str).tolist() if not df_urls_top.empty else []
+
+        # (b) URL × País+Device (si se pide y hay top_values)
+        if include_url_country_device and top_values:
+            dim_filter = {
+                "filter": {
+                    "field_name": url_dimension,
+                    "in_list_filter": {"values": top_values}
+                }
+            }
+            dims_ud = [url_dimension, "country", "deviceCategory"]
+            mets_ud = ["activeUsers", "newUsers", "sessions"]
+            df_ud = _ga4_run_report(
+                ga4_data, property_id, dims_ud, mets_ud, start, end,
+                dimension_filter=dim_filter
+            )
+            if not df_ud.empty:
+                df_ud = df_ud.groupby(dims_ud, as_index=False).agg(
+                    activeUsers=("activeUsers", "sum"),
+                    newUsers=("newUsers", "sum"),
+                    sessions=("sessions", "sum"),
+                ).sort_values([url_dimension, "sessions"], ascending=[True, False])
+            _gspread_write_df(ws_ud, df_ud)
+        else:
+            _gspread_write_df(ws_ud, pd.DataFrame())
+
+        # (c) Serie diaria por URL (Top N) (si se pide y hay top_values)
+        if include_url_series and top_values:
+            dim_filter = {
+                "filter": {
+                    "field_name": url_dimension,
+                    "in_list_filter": {"values": top_values}
+                }
+            }
+            dims_us = ["date", url_dimension]
+            mets_us = ["activeUsers", "sessions"]
+            df_us = _ga4_run_report(
+                ga4_data, property_id, dims_us, mets_us, start, end,
+                dimension_filter=dim_filter
+            )
+            if not df_us.empty:
+                # normalizar fecha
+                if "date" in df_us.columns:
+                    def _fmt2(dv: str) -> str:
+                        s = str(dv)
+                        if len(s) == 8 and s.isdigit():
+                            return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+                        return s
+                    df_us["date"] = df_us["date"].map(_fmt2)
+                df_us = df_us.sort_values(["date", url_dimension])
+            _gspread_write_df(ws_us, df_us)
+        else:
+            _gspread_write_df(ws_us, pd.DataFrame())
+
         # Info meta en una pestaña opcional
         try:
             ws_meta = None
             try:
                 ws_meta = sh.worksheet("Meta")
             except Exception:
-                ws_meta = sh.add_worksheet(title="Meta", rows=50, cols=6)
+                ws_meta = sh.add_worksheet(title="Meta", rows=100, cols=8)
             info = pd.DataFrame({
-                "campo": ["property_id", "property_label", "start", "end", "lag_days", "span_days"],
-                "valor": [property_id, prop_label, str(start), str(end), lag, span_days],
+                "campo": [
+                    "property_id", "property_label", "start", "end", "lag_days", "span_days",
+                    "url_dimension", "urls_top_n", "include_url_series", "include_url_country_device"
+                ],
+                "valor": [
+                    property_id, prop_label, str(start), str(end), lag, span_days,
+                    url_dimension, urls_top_n, include_url_series, include_url_country_device
+                ],
             })
             _gspread_write_df(ws_meta, info)
         except Exception:
@@ -244,7 +364,7 @@ def run_ga4_audience_report(
 
     except Exception as e:
         # Escribir el error visible en la primera hoja
-        error_text = f"❌ Error al consultar GA4: {e}"
+        error_text = f"❌ Error al consultar/armar GA4: {e}"
         try:
             ws_main.clear()
             ws_main.update([["Error"], [error_text]])
