@@ -2078,16 +2078,16 @@ elif analisis == "11":
     }
 
     params = {
-        "start": str(start_date),
-        "end": str(end_date),
-        "compare": compare_mode,          # "none" | "previous_period" | "yoy"
-        "granularity": granularity,       # "date" | "week" | "month"
-        "metrics": metrics,               # dict de métricas booleanas
-        "breakdowns": breakdowns,         # lista de dimensiones para TOPs
-        "top_n": int(top_n),
-        "filters": filters,
-        "sheet_title_prefix": "GA4 Audiencia",
-        "lag_days": int(lag),
+    "start": start_date,
+    "end": end_date,
+    "compare": compare_mode,
+    "granularity": granularity,
+    "metrics": metrics,
+    "breakdowns": breakdowns,
+    "top_n": int(top_n),
+    "filters": filters,
+    "sheet_title_prefix": "GA4 Audiencia",
+    "lag_days": int(lag),
     }
 
     pid = st.session_state.get("ga4_property_id")
