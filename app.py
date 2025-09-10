@@ -2100,8 +2100,9 @@ elif analisis == "11":
                 "Generando Reporte de audiencia (GA4)",
                 run_ga4_audience_report,   # runner externo/local
                 ga4_data,                  # cliente GA4 Data API
-                drive_service, gs_client,  # servicios Google
-                str(pid),                  # property_id (string)
+                drive_service, 
+                gs_client,  # servicios Google
+                st.session_state["ga4_property_id"],
                 params,                    # parámetros
                 st.session_state.get("dest_folder_id")
             )
