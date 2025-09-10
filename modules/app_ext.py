@@ -8,8 +8,9 @@ Exporta:
 - run_core_update, run_evergreen, run_traffic_audit, run_names_analysis
 - run_discover_snoop, run_content_analysis
 - run_content_structure
-- run_sections_analysis  <-- NUEVO
+- run_sections_analysis
 - run_report_results
+- run_ga4_audience_report  <-- NUEVO
 
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
@@ -30,10 +31,13 @@ run_names_analysis     = getattr(_ext, "run_names_analysis", None) if _ext else 
 run_discover_snoop     = getattr(_ext, "run_discover_snoop", None) if _ext else None
 run_content_analysis   = getattr(_ext, "run_content_analysis", None) if _ext else None
 run_content_structure  = getattr(_ext, "run_content_structure", None) if _ext else None
-run_sections_analysis  = getattr(_ext, "run_sections_analysis", None) if _ext else None  # <- NUEVO
+run_sections_analysis  = getattr(_ext, "run_sections_analysis", None) if _ext else None
+run_report_results     = getattr(_ext, "run_report_results", None) if _ext else None
+run_ga4_audience_report = getattr(_ext, "run_ga4_audience_report", None) if _ext else None  # <-- NUEVO
 
-# ============================= Fallbacks locales =================================
+# ============================= Fallbacks ========================================
 
+# Core / Evergreen (local)
 if (run_core_update is None) or (run_evergreen is None):
     try:
         from modules.analysis import run_core_update as _rcu, run_evergreen as _rev  # type: ignore
@@ -42,6 +46,7 @@ if (run_core_update is None) or (run_evergreen is None):
     except Exception:
         pass
 
+# Auditoría de tráfico (local)
 if run_traffic_audit is None:
     try:
         from modules.analysis import run_traffic_audit as _rta  # type: ignore
@@ -49,6 +54,7 @@ if run_traffic_audit is None:
     except Exception:
         pass
 
+# Nombres (ext → local)
 if run_names_analysis is None:
     try:
         from seo_analisis_ext.analysis_names import run_names_analysis as _rna  # type: ignore
@@ -60,7 +66,7 @@ if run_names_analysis is None:
         except Exception:
             run_names_analysis = None
 
-# Discover Snoop
+# Discover Snoop (ext → local opcional)
 if run_discover_snoop is None:
     _rds = None
     try:
@@ -74,10 +80,9 @@ if run_discover_snoop is None:
             _rds = None
     run_discover_snoop = _rds
 
-# Content Analysis
+# Content Analysis (ext rutas alternas → local)
 if run_content_analysis is None:
     _rca = None
-    # Probar rutas alternativas dentro del paquete externo
     try:
         from seo_analisis_ext.content_analysis import run_content_analysis as _rca  # type: ignore
     except Exception:
@@ -88,7 +93,6 @@ if run_content_analysis is None:
                 from seo_analisis_ext.content import run_content_analysis as _rca  # type: ignore
             except Exception:
                 _rca = None
-    # Fallbacks locales (si existieran)
     if _rca is None:
         try:
             from modules.content_analysis import run_content_analysis as _rca  # type: ignore
@@ -99,7 +103,7 @@ if run_content_analysis is None:
                 _rca = None
     run_content_analysis = _rca
 
-# Content Structure
+# Content Structure (ext rutas alternas → local opcional)
 if run_content_structure is None:
     _rcs = None
     try:
@@ -109,26 +113,50 @@ if run_content_structure is None:
             from seo_analisis_ext.analysis_structure import run_content_structure as _rcs  # type: ignore
         except Exception:
             try:
-                # Fallbacks locales opcionales, si los hubiera:
+                # Fallbacks locales opcionales:
                 # from modules.content_structure import run_content_structure as _rcs  # type: ignore
                 _rcs = None
             except Exception:
                 _rcs = None
     run_content_structure = _rcs
 
-# Sections Analysis (nuevo)
+# Sections Analysis (ext → local opcional)
 if run_sections_analysis is None:
     _rsa = None
     try:
         from seo_analisis_ext.sections_analysis import run_sections_analysis as _rsa  # type: ignore
     except Exception:
         try:
-            # Fallback local opcional si existiera:
+            # Fallback local opcional:
             # from modules.sections_analysis import run_sections_analysis as _rsa  # type: ignore
             _rsa = None
         except Exception:
             _rsa = None
     run_sections_analysis = _rsa
+
+# Reporte de resultados (si no está expuesto en __init__, buscar submódulo)
+if run_report_results is None:
+    try:
+        from seo_analisis_ext.report_results import run_report_results as _rrr  # type: ignore
+        run_report_results = _rrr
+    except Exception:
+        run_report_results = None
+
+# GA4 Audiencia (ext → submódulo → local)  <-- NUEVO
+if run_ga4_audience_report is None:
+    _ga4aud = None
+    # Intentar submódulo del paquete externo (aunque no esté exportado en __init__)
+    try:
+        from seo_analisis_ext.ga4_audience import run_ga4_audience_report as _ga4aud  # type: ignore
+    except Exception:
+        pass
+    # Fallback local
+    if _ga4aud is None:
+        try:
+            from modules.ga4_audience import run_ga4_audience_report as _ga4aud  # type: ignore
+        except Exception:
+            _ga4aud = None
+    run_ga4_audience_report = _ga4aud
 
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
@@ -465,20 +493,6 @@ for _candidate in [
 ]:
     _patch_write_ws_if_present(_candidate)
 
-# --- Reporte de resultados (runner externo)
-try:
-    run_report_results = getattr(_ext, "run_report_results", None) if _ext else None
-except Exception:
-    run_report_results = None
-
-# Fallback: traerla desde el submódulo si no está expuesta en __init__.py
-if run_report_results is None:
-    try:
-        from seo_analisis_ext.report_results import run_report_results as _rrr  # type: ignore
-        run_report_results = _rrr
-    except Exception:
-        run_report_results = None
-
 __all__ = [
     "USING_EXT",
     "EXT_PACKAGE",
@@ -489,6 +503,7 @@ __all__ = [
     "run_discover_snoop",
     "run_content_analysis",
     "run_content_structure",
-    "run_sections_analysis",   # <- NUEVO
+    "run_sections_analysis",
     "run_report_results",
+    "run_ga4_audience_report",  # <-- NUEVO
 ]
