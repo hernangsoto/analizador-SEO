@@ -2027,6 +2027,21 @@ elif analisis == "11":
         m_views     = st.checkbox("Vistas (screenPageViews)", False, key="ga4aud_m_views")
         inc_video = st.checkbox("Incluir métricas de video (starts/completes)", value=False, key="ga4_inc_video")
 
+# --- Eventos personalizados (sumar eventCount por nombre) ---
+    with st.expander("Eventos personalizados (sumar eventCount por nombre de evento)"):
+        raw_events = st.text_input(
+            "Nombres de eventos separados por coma",
+            value=st.session_state.get("ga4aud_custom_events_raw",""),
+            key="ga4aud_custom_events_raw",
+            help="Coinciden EXACTAMENTE con 'eventName' en GA4 (respetar mayúsculas/minúsculas). Ej: Start, adStarted, adComplete, Pause"
+        )
+        custom_events = [e.strip() for e in raw_events.split(",") if e.strip()]
+        if custom_events:
+            st.caption("Se crearán columnas por evento: ev_<nombre>. Ej: ev_Start, ev_adStarted, ev_adComplete…")
+        else:
+            st.caption("Dejalo vacío si no querés sumar eventos personalizados.")
+
+
     # ---------- Desgloses (tablas TOP) ----------
     st.markdown("**Desgloses (se crean tablas TOP por cada uno que elijas)**")
     d1, d2, d3, d4 = st.columns(4)
@@ -2086,6 +2101,7 @@ elif analisis == "11":
     "metrics": metrics,
     "breakdowns": breakdowns,
     "include_video_metrics": bool(inc_video),
+    "custom_event_names": custom_events,
     "top_n": int(top_n),
     "filters": filters,
     "sheet_title_prefix": "GA4 Audiencia",
