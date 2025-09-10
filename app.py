@@ -2025,6 +2025,7 @@ elif analisis == "11":
     with mc4:
         m_events    = st.checkbox("Eventos (eventCount)", False, key="ga4aud_m_events")
         m_views     = st.checkbox("Vistas (screenPageViews)", False, key="ga4aud_m_views")
+        inc_video = st.checkbox("Incluir métricas de video (starts/completes)", value=False, key="ga4_inc_video")
 
     # ---------- Desgloses (tablas TOP) ----------
     st.markdown("**Desgloses (se crean tablas TOP por cada uno que elijas)**")
@@ -2084,6 +2085,7 @@ elif analisis == "11":
     "granularity": granularity,
     "metrics": metrics,
     "breakdowns": breakdowns,
+    "include_video_metrics": bool(inc_video),
     "top_n": int(top_n),
     "filters": filters,
     "sheet_title_prefix": "GA4 Audiencia",
