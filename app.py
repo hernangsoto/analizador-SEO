@@ -52,10 +52,15 @@ try:
 except Exception:
     params_for_content = None
 try:
-    from modules.app_ext import run_sections_analysis
+    # AÑADIDO: importar también el runner de GA4 audiencia si existe
+    from modules.app_ext import run_sections_analysis, run_ga4_audience_report
 except Exception:
-    run_sections_analysis = None
-    
+    try:
+        from modules.app_ext import run_sections_analysis
+    except Exception:
+        run_sections_analysis = None
+    run_ga4_audience_report = None
+
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
@@ -326,6 +331,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if include_content:
         opciones.append("9. Análisis de contenido (repo externo)")
     opciones.append("10. Análisis de estructura de contenidos")
+    opciones.append("11. Reporte de audiencia (GA4)")  # <-- NUEVO
 
     key = st.radio("Tipos disponibles:", opciones, index=1, key="analysis_choice")
     if key.startswith("2."): return "2"
@@ -337,6 +343,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if key.startswith("8."): return "8"
     if key.startswith("9."): return "9"
     if key.startswith("10."): return "10"
+    if key.startswith("11."): return "11"   # <-- NUEVO
     return "0"
 
 analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True, include_content=True)
@@ -362,6 +369,8 @@ def _defaults_for_analysis(a: str) -> tuple[bool, bool, bool]:
         return False, False, True
     if a == "10":  # Estructura de contenidos → suele usar SC
         return True, False, False
+    if a == "11":  # Reporte de audiencia (GA4)
+        return False, True, False
     # Futuro/otros
     return False, False, True
 
@@ -1441,6 +1450,16 @@ def _require_sc_or_stop():
     if not site_urls:
         st.error("No hay sitios seleccionados de Search Console."); st.stop()
 
+# Guardrail para GA4
+def _require_ga_or_stop():
+    if "ga" not in (st.session_state.get("selected_sources") or set()):
+        st.warning("Este análisis requiere datos de **Google Analytics 4**. Marcá *Usar Google Analytics 4* arriba.")
+        st.stop()
+    if not ga4_data:
+        st.error("El cliente de GA4 (Data API) no está inicializado."); st.stop()
+    if not st.session_state.get("ga4_property_id"):
+        st.error("No hay una **propiedad GA4** seleccionada."); st.stop()
+
 if analisis == "4":
     _require_sc_or_stop()
     if run_core_update is None:
@@ -1926,6 +1945,191 @@ elif analisis == "2":
                     st.session_state["last_file_kind"] = "report_results"
         except Exception as e:
             st.error(f"Falló la generación del reporte: {e}")
+
+elif analisis == "11":
+    # ===== NUEVO: Reporte de audiencia (GA4) =====
+    _require_ga_or_stop()
+    if run_ga4_audience_report is None:
+        st.warning("Este despliegue no incluye `run_ga4_audience_report` (agregá el módulo en el repo externo o `modules/ga4_audience.py`).")
+        st.stop()
+
+    st.subheader("Reporte de audiencia (GA4)")
+    st.caption("Usuarios, sesiones y engagement por período, con series temporales y desgloses (canal, dispositivo, país, etc.).")
+
+    # ---------- Período ----------
+    today = date.today()
+    lag = st.number_input("Lag de días (evitar datos incompletos del día actual)", 0, 3, 0, 1, key="ga4aud_lag")
+
+    period_choice = st.radio(
+        "Periodo",
+        ["Últimos 28 días", "Último mes completo", "Últimos 90 días", "Personalizado"],
+        index=0, horizontal=True, key="ga4aud_period"
+    )
+
+    def first_day_of_month(d: date) -> date: return d.replace(day=1)
+    def last_day_of_month(d: date) -> date:
+        nd = (d.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return nd
+
+    anchor = today - timedelta(days=int(lag))
+    if period_choice == "Últimos 28 días":
+        end_dt = anchor
+        start_dt = end_dt - timedelta(days=27)
+    elif period_choice == "Último mes completo":
+        last_full_end = first_day_of_month(anchor) - timedelta(days=1)
+        start_dt = first_day_of_month(last_full_end)
+        end_dt = last_full_end
+    elif period_choice == "Últimos 90 días":
+        end_dt = anchor
+        start_dt = end_dt - timedelta(days=89)
+    else:
+        end_dt = anchor
+        start_dt = anchor - timedelta(days=27)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("Fecha inicio", value=start_dt, key="ga4aud_start")
+    with c2:
+        end_date = st.date_input("Fecha fin (inclusive)", value=end_dt, key="ga4aud_end")
+
+    # ---------- Comparación ----------
+    compare_label = st.radio(
+        "Comparar contra",
+        ["Sin comparación", "Período anterior", "Mismo período del año anterior"],
+        index=1, horizontal=True, key="ga4aud_compare"
+    )
+    compare_map = {
+        "Sin comparación": "none",
+        "Período anterior": "previous_period",
+        "Mismo período del año anterior": "yoy",
+    }
+    compare_mode = compare_map[compare_label]
+
+    # ---------- Series temporales ----------
+    gran = st.radio("Granularidad de la serie", ["Diaria","Semanal","Mensual"], index=0, horizontal=True, key="ga4aud_gran")
+    gran_map = {"Diaria":"date","Semanal":"week","Mensual":"month"}
+    granularity = gran_map[gran]
+
+    # ---------- Métricas ----------
+    st.markdown("**Métricas**")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        m_users = st.checkbox("Usuarios (totalUsers)", True, key="ga4aud_m_users")
+        m_new   = st.checkbox("Usuarios nuevos (newUsers)", True, key="ga4aud_m_new")
+    with mc2:
+        m_sessions  = st.checkbox("Sesiones (sessions)", True, key="ga4aud_m_sessions")
+        m_eng_sess  = st.checkbox("Sesiones con engagement (engagedSessions)", True, key="ga4aud_m_eng")
+    with mc3:
+        m_eng_rate  = st.checkbox("Engagement rate (engagementRate)", True, key="ga4aud_m_rate")
+        m_avg_eng   = st.checkbox("Tiempo medio de engagement (averageEngagementTime)", True, key="ga4aud_m_avg")
+    with mc4:
+        m_events    = st.checkbox("Eventos (eventCount)", False, key="ga4aud_m_events")
+        m_views     = st.checkbox("Vistas (screenPageViews)", False, key="ga4aud_m_views")
+
+    # ---------- Desgloses (tablas TOP) ----------
+    st.markdown("**Desgloses (se crean tablas TOP por cada uno que elijas)**")
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        b_ch   = st.checkbox("Canal (defaultChannelGroup)", True, key="ga4aud_b_ch")
+        b_srcm = st.checkbox("Source / Medium", True, key="ga4aud_b_srcm")
+    with d2:
+        b_dev  = st.checkbox("Dispositivo (deviceCategory)", True, key="ga4aud_b_dev")
+        b_ctry = st.checkbox("País (country)", True, key="ga4aud_b_ctry")
+    with d3:
+        b_city = st.checkbox("Ciudad (city)", False, key="ga4aud_b_city")
+        b_lang = st.checkbox("Idioma (language)", False, key="ga4aud_b_lang")
+    with d4:
+        b_age  = st.checkbox("Edad (age)", False, key="ga4aud_b_age")
+        b_gen  = st.checkbox("Género (gender)", False, key="ga4aud_b_gen")
+
+    top_n = st.number_input("Filas por tabla TOP", min_value=5, max_value=1000, value=25, step=5, key="ga4aud_topn")
+
+    # ---------- Filtros opcionales ----------
+    with st.expander("Filtros opcionales"):
+        f_dev  = st.selectbox("Filtrar por dispositivo", ["(Todos)","desktop","mobile","tablet"], index=0, key="ga4aud_f_dev")
+        f_ch   = st.selectbox("Filtrar por canal", ["(Todos)","Organic Search","Direct","Paid Search","Display","Referral","Email","Social","(Other)"], index=0, key="ga4aud_f_ch")
+        f_ctry = st.text_input("Filtrar por países (ISO-2 o nombre, separados por coma)", value="", key="ga4aud_f_ctry")
+
+    # ---------- Ensamble de parámetros ----------
+    metrics = {
+        "totalUsers": m_users,
+        "newUsers": m_new,
+        "sessions": m_sessions,
+        "engagedSessions": m_eng_sess,
+        "engagementRate": m_eng_rate,
+        "averageEngagementTime": m_avg_eng,
+        "eventCount": m_events,
+        "screenPageViews": m_views,
+    }
+    breakdowns = []
+    if b_ch:   breakdowns.append("defaultChannelGroup")
+    if b_srcm: breakdowns.append("sourceMedium")
+    if b_dev:  breakdowns.append("deviceCategory")
+    if b_ctry: breakdowns.append("country")
+    if b_city: breakdowns.append("city")
+    if b_lang: breakdowns.append("language")
+    if b_age:  breakdowns.append("age")
+    if b_gen:  breakdowns.append("gender")
+
+    filters = {
+        "deviceCategory": None if f_dev == "(Todos)" else f_dev,
+        "defaultChannelGroup": None if f_ch == "(Todos)" else f_ch,
+        "countries": [c.strip() for c in f_ctry.split(",") if c.strip()] if f_ctry.strip() else [],
+    }
+
+    params = {
+        "start": str(start_date),
+        "end": str(end_date),
+        "compare": compare_mode,          # "none" | "previous_period" | "yoy"
+        "granularity": granularity,       # "date" | "week" | "month"
+        "metrics": metrics,               # dict de métricas booleanas
+        "breakdowns": breakdowns,         # lista de dimensiones para TOPs
+        "top_n": int(top_n),
+        "filters": filters,
+        "sheet_title_prefix": "GA4 Audiencia",
+        "lag_days": int(lag),
+    }
+
+    pid = st.session_state.get("ga4_property_id")
+    pname = st.session_state.get("ga4_property_name", f"Propiedad {pid}") if pid else "—"
+
+    can_run = start_date <= end_date
+    if st.button("👥 Generar Reporte de audiencia (GA4)", type="primary", disabled=not can_run, key="ga4aud_run"):
+        try:
+            sid = run_with_indicator(
+                "Generando Reporte de audiencia (GA4)",
+                run_ga4_audience_report,   # runner externo/local
+                ga4_data,                  # cliente GA4 Data API
+                drive_service, gs_client,  # servicios Google
+                str(pid),                  # property_id (string)
+                params,                    # parámetros
+                st.session_state.get("dest_folder_id")
+            )
+            if sid:
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url="",
+                    analysis_kind="GA4 Audiencia",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account=(st.session_state.get("src_account_label") or "") + f" / {pname}",
+                    notes=f"win={start_date}->{end_date}, compare={compare_mode}, gran={granularity}, top_n={int(top_n)}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "ga4_audience"
+        except Exception as e:
+            st.error(f"Falló la generación del reporte de audiencia: {e}")
 
 elif analisis == "9":
     # ===== NUEVO: Análisis de contenido (repo externo) =====
