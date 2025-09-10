@@ -626,3 +626,33 @@ def params_for_content() -> dict:
         },
     }
     return params
+
+# --- al final del archivo, agregar:
+from datetime import date, timedelta
+
+def params_for_ga4_audience():
+    today = date.today()
+    # lag corto para datos de GA4 que pueden tardar en estabilizar
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=29)
+
+    return {
+        "start": start,
+        "end": end,
+        "compare_prev": True,
+        "compare_yoy": True,
+        "top_n": 25,
+        "include": {
+            "overview": True,
+            "timeseries": True,
+            "geo": True,
+            "language": True,
+            "channels": True,
+            "device": True,
+            "os": True,
+            "browser": True,
+            "new_vs_returning": True,
+            "hour": True,
+            "demographics": True,  # intentará edad/género y seguirá si falla
+        }
+    }
