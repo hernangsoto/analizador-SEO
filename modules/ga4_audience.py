@@ -12,7 +12,7 @@ Reporte de audiencia (GA4)
   * Si GA4 falla, deja el error documentado en la hoja.
 """
 
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 from datetime import date, datetime, timedelta
 import pandas as pd
 
@@ -147,8 +147,8 @@ def run_ga4_audience_report(
     gs_client,          # gspread client (tiene .open_by_key)
     property_id: str,
     params: dict,
-    dest_folder_id: str | None = None,
-) -> str | None:
+    dest_folder_id: Optional[str] = None,
+) -> Optional[str]:
     """
     Genera un Sheet con 2 pestañas:
       - 'Audiencia país+device'
@@ -187,9 +187,8 @@ def run_ga4_audience_report(
             ws_series = sh.worksheet("Serie diaria")
         except Exception:
             ws_series = sh.add_worksheet(title="Serie diaria", rows=100, cols=20)
-    except Exception as e:
+    except Exception:
         # Tuvimos ID pero no pudimos abrir con gspread → devolver ID igual
-        # para que al menos el usuario tenga el archivo vacío.
         try:
             # Dejar mensaje en título
             drive_service.files().update(fileId=sid, body={"name": sheet_name + " (sin contenido)"}).execute()
