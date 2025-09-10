@@ -70,12 +70,17 @@ from modules.gsc import ensure_sc_client
 
 # ====== Módulos GA4 (opcionales, con fallback limpio) ======
 try:
-    from modules.ga4_admin import ensure_admin_client, list_account_property_summaries
-    from modules.ga4 import ensure_data_client
+    from modules.ga4_admin import build_admin_client, list_account_property_summaries
+    from modules.ga4_data import build_data_client
 except Exception:
-    ensure_admin_client = None
-    ensure_data_client = None
+    build_admin_client = None
+    build_data_client = None
     def list_account_property_summaries(_): return []
+# PermissionDenied puede no estar disponible si no está instalado google-api-core
+try:
+    from google.api_core.exceptions import PermissionDenied
+except Exception:
+    class PermissionDenied(Exception): pass
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
@@ -207,7 +212,7 @@ elif _action == "change_src":
         pass
     clear_qp(); st.rerun()
 elif _action == "change_ga4":
-    for k in ("creds_ga4","ga4_step_done","ga4_account_label","ga4_property_choice","ga4_property_id","ga4_property_label"):
+    for k in ("creds_ga4","ga4_step_done","ga4_account_label","ga4_property_choice","ga4_property_id","ga4_property_label","ga4_property_name"):
         st.session_state.pop(k, None)
     clear_qp(); st.rerun()
 
@@ -336,113 +341,50 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
 
 analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True, include_content=True)
 
-# ---------- Rama especial: Nombres (no usa GSC) ----------
-if analisis == "7":
-    if run_names_analysis is None:
-        st.warning("Este despliegue no incluye `run_names_analysis`.")
-    else:
-        params_names = params_for_names()
-        total = len(params_names.get("items") or [])
-        if total == 0:
-            st.info("Cargá un CSV o pegá al menos un nombre para habilitar la ejecución.")
-        else:
-            if st.button("🔎 Ejecutar Análisis de Nombres (KG + Wikipedia)", type="primary", key="btn_names_run"):
-                sid = run_with_indicator(
-                    "Procesando Análisis de Nombres (KG + Wikipedia)",
-                    run_names_analysis, drive_service, gs_client,
-                    params_names, st.session_state.get("dest_folder_id")
-                )
-                st.success("¡Listo! Tu documento está creado.")
-                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-                with st.expander("Compartir acceso al documento (opcional)"):
-                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=( _me or {}).get("emailAddress") or "",
-                    event="analysis", site_url="",
-                    analysis_kind="Nombres (KG+Wikipedia)",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account="", notes=f"lang={params_names.get('lang')}, n={total}"
-                )
-                st.session_state["last_file_id"] = sid
-                st.session_state["last_file_kind"] = "names"
-    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
-        st.divider(); st.subheader("📄 Resumen del análisis")
-        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
-        gemini_summary(gs_client, st.session_state["last_file_id"],
-                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
-    st.stop()
+# ===== Selector de FUENTES de datos (SC / GA4 / Sin datos) =====
+SC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
+GA_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 
-# ---------- Rama especial: Discover Snoop (no usa GSC) ----------
-if analisis == "8":
-    if run_discover_snoop is None:
-        st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
-    else:
-        st.subheader("Subí el CSV exportado de Discover Snoop")
-        up = st.file_uploader("Archivo CSV", type=["csv"], key="ds_file")
-        params_ds = params_for_discover_snoop()
+def _defaults_for_analysis(a: str) -> tuple[bool, bool, bool]:
+    """
+    Devuelve (def_SC, def_GA, def_NONE) según el tipo de análisis.
+    """
+    # a es "2", "3", ..., "10"
+    if a == "2":   # Reporte de resultados → ideal ambos, pero sirve con uno (por ahora requiere SC para este build)
+        return True, True, False
+    if a in ("3","4","5"):  # Secciones/Core/Evergreen → típicamente SC
+        return True, False, False
+    if a == "6":   # Auditoría de tráfico → GA + SC (este build usa SC)
+        return True, True, False
+    if a == "7":   # Nombres → sin datos (opcional GA)
+        return False, False, True
+    if a == "8":   # Discover Snoop → normalmente sin datos (opcional SC)
+        return False, False, True
+    if a == "10":  # Estructura de contenidos → suele usar SC
+        return True, False, False
+    # Futuro/otros
+    return False, False, True
 
-        with st.expander("Formato esperado (campos mínimos)"):
-            st.markdown("""
-            Debe contener **publisher, title, url, category, firstviewed, lastviewed**.  
-            `entities` es opcional pero recomendado.
-            """)
+st.subheader("Fuentes de datos para este análisis")
+def_sc, def_ga, def_none = _defaults_for_analysis(analisis)
+use_sc = st.checkbox("Usar Search Console", value=def_sc, key=f"ds_sc_{analisis}")
+use_ga = st.checkbox("Usar Google Analytics 4", value=def_ga, key=f"ds_ga_{analisis}")
+use_none = st.checkbox("Sin datos del cliente", value=def_none, key=f"ds_none_{analisis}")
 
-        df = None
-        if up is not None:
-            try:
-                df = pd.read_csv(up)
-            except Exception:
-                up.seek(0)
-                df = pd.read_csv(up, encoding="latin-1")
-            st.success(f"CSV cargado: {len(df):,} filas")
+# Normalizar selección (si no marcó nada, forzamos 'Sin datos')
+if not any([use_sc, use_ga, use_none]):
+    st.info("Seleccioná al menos una fuente (SC, GA4 o 'Sin datos del cliente').")
+    use_none = True
 
-        if df is None:
-            st.info("Cargá el CSV para habilitar la ejecución.")
-        else:
-            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_ds_run"):
-                sid = run_with_indicator(
-                    "Procesando Discover Snoop",
-                    run_discover_snoop,  # función del paquete externo
-                    drive_service, gs_client,  # servicios Google
-                    df, params_ds,            # datos + parámetros
-                    st.session_state.get("dest_folder_id")
-                )
-                st.success("¡Listo! Tu documento está creado.")
-                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
-                with st.expander("Compartir acceso al documento (opcional)"):
-                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                try:
-                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
-                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
-                except Exception:
-                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
-                activity_log_append(
-                    drive_service, gs_client,
-                    user_email=( _me or {}).get("emailAddress") or "",
-                    event="analysis", site_url="",
-                    analysis_kind="Discover Snoop",
-                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
-                    gsc_account="", notes=f"params={params_ds!r}"
-                )
-                st.session_state["last_file_id"] = sid
-                st.session_state["last_file_kind"] = "discover"
+selected_sources = {s for s, v in (("sc", use_sc), ("ga", use_ga), ("none", use_none)) if v}
+st.session_state["selected_sources"] = selected_sources
 
-    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
-        st.divider(); st.subheader("📄 Resumen del análisis")
-        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
-        gemini_summary(gs_client, st.session_state["last_file_id"],
-                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
-    st.stop()
+# ===== Cuenta de acceso única (se usa para SC y/o GA4 según lo marcado) =====
+need_auth = any(s in selected_sources for s in ("sc", "ga"))
+sc_service = None
+ga4_admin = None
+ga4_data = None
 
-# ======== Resto de análisis (requieren GSC) ========
-
-# --- Builder local para flujo 'installed' (SC cuentas ACCESO / ACCESO_MEDIOS)
 def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
     from google_auth_oauthlib.flow import Flow
     acc = (st.secrets.get("accounts") or {}).get(account_key) or {}
@@ -463,196 +405,16 @@ def _build_flow_installed_or_local(account_key: str, scopes: list[str]):
     flow.redirect_uri = "http://localhost"
     return flow
 
-GSC_SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
-GA4_SCOPES = ["https://www.googleapis.com/auth/analytics.readonly"]
-
-# --- Selección de cuenta para Google Analytics 4 (igual que SC) ---
-st.subheader("Selecciona la cuenta con acceso a Google Analytics 4")
-ga4_account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
-_default_ga4_label = st.session_state.get("ga4_account_choice", "Acceso en cuenta personal de Nomadic")
-ga4_default_idx = ga4_account_options.index(_default_ga4_label) if _default_ga4_label in ga4_account_options else 2
-
-ga4_choice = st.selectbox(
-    "Elegí la cuenta para consultar datos de Google Analytics (GA4)",
-    ga4_account_options, index=ga4_default_idx, key="ga4_account_choice"
-)
-
-def _ga4_choice_to_key(label: str) -> str | None:
-    if norm(label) == norm("Acceso"): return "ACCESO"
-    if norm(label) == norm("Acceso Medios"): return "ACCESO_MEDIOS"
-    return None  # personal usa creds_dest
-
-ga4_admin = None
-ga4_data  = None
-
-if ga4_choice == "Acceso en cuenta personal de Nomadic":
-    # Reusar credenciales del Paso 0
-    ga4_creds_dict = st.session_state.get("creds_dest") or token_store.load("creds_dest")
-    if not ga4_creds_dict:
-        st.error("No encuentro la sesión personal. Volvé a iniciar sesión en el Paso 0."); st.stop()
-
-    if not has_ga4_scope(ga4_creds_dict.get("scopes")):
-        st.warning("Tu cuenta personal no tiene permisos de Google Analytics todavía.")
-        st.caption("Volvé a realizar el Paso 0 solicitando también el permiso de Analytics.")
-        st.stop()
-
-    try:
-        if ensure_admin_client is None or ensure_data_client is None:
-            raise RuntimeError("Módulos GA4 no disponibles. Agregá `modules/ga4_admin.py`, `modules/ga4.py` y paquetes `google-analytics-*` a requirements.")
-        creds = Credentials(**ga4_creds_dict)
-        ga4_admin = ensure_admin_client(creds)
-        ga4_data  = ensure_data_client(creds)
-        st.session_state["creds_ga4"] = ga4_creds_dict
-        st.session_state["ga4_account_label"] = "Acceso en cuenta personal de Nomadic"
-        st.markdown(
-            f'''
-            <div class="success-inline">
-                Cuenta de acceso (GA4): <strong>Acceso en cuenta personal de Nomadic</strong>
-                <a href="{APP_HOME}?action=change_ga4" target="_self" rel="nofollow">(Cambiar cuenta GA4)</a>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-    except Exception as e:
-        st.error(f"No pude inicializar Analytics con la cuenta personal: {e}")
-        st.stop()
-
-else:
-    # Installed app flow (igual que SC) pero con scopes de GA4
-    wanted_key = _ga4_choice_to_key(ga4_choice)  # "ACCESO" o "ACCESO_MEDIOS"
-    need_new_auth = (
-        not st.session_state.get("ga4_step_done") or
-        (st.session_state.get("ga4_account_label") != ga4_choice)
-    )
-    if need_new_auth:
-        flow = _build_flow_installed_or_local(wanted_key, GA4_SCOPES)
-        auth_url, state = flow.authorization_url(prompt="consent select_account", access_type="offline")
-        st.markdown(f"🔗 **Autorizar acceso a Google Analytics** → {auth_url}")
-        with st.expander("Ver/copiar URL de autorización (GA4)"):
-            st.code(auth_url)
-
-        url = st.text_input(
-            "Pegá la URL de redirección (http://localhost/?code=...&state=...)",
-            key=f"auth_response_url_ga4_{wanted_key}",
-            placeholder="http://localhost/?code=...&state=...",
-        )
-
-        c1, c2 = st.columns([1,1])
-        with c1:
-            if st.button("Conectar Google Analytics", key=f"btn_connect_ga4_{wanted_key}", type="secondary"):
-                if not url.strip():
-                    st.error("Pegá la URL completa de redirección (incluye code y state)."); st.stop()
-                from urllib.parse import urlsplit, parse_qs
-                try:
-                    qs = parse_qs(urlsplit(url.strip()).query)
-                    returned_state = (qs.get("state") or [""])[0]
-                except Exception:
-                    returned_state = ""
-                if not returned_state or returned_state != state:
-                    st.error("CSRF Warning: el 'state' devuelto no coincide con el generado."); st.stop()
-                try:
-                    flow.fetch_token(authorization_response=url.strip())
-                    creds = flow.credentials
-                    ga4_creds_dict = {
-                        "token": creds.token,
-                        "refresh_token": getattr(creds, "refresh_token", None),
-                        "token_uri": getattr(creds, "token_uri", "https://oauth2.googleapis.com/token"),
-                        "client_id": getattr(creds, "client_id", None),
-                        "client_secret": getattr(creds, "client_secret", None),
-                        "scopes": list(getattr(creds, "scopes", GA4_SCOPES)),
-                    }
-                    st.session_state["creds_ga4"] = ga4_creds_dict
-                    st.session_state["ga4_account_label"] = ga4_choice
-                    st.session_state["ga4_step_done"] = True
-                    token_store.save("creds_ga4", ga4_creds_dict)  # opcional
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo conectar Google Analytics. Reintentá la autorización.")
-                    st.caption(f"Detalle técnico: {e}")
-        with c2:
-            if st.button("Reiniciar conexión (GA4)", key=f"btn_reset_ga4_{wanted_key}"):
-                for k in ("creds_ga4","ga4_step_done","ga4_account_label","ga4_property_choice","ga4_property_id","ga4_property_label"):
-                    st.session_state.pop(k, None)
-                clear_qp(); st.rerun()
-
-    # Si ya tenemos tokens guardados en sesión, instanciamos clientes
-    if st.session_state.get("creds_ga4"):
-        try:
-            if ensure_admin_client is None or ensure_data_client is None:
-                raise RuntimeError("Módulos GA4 no disponibles. Agregá `modules/ga4_admin.py`, `modules/ga4.py` y paquetes `google-analytics-*` a requirements.")
-            creds = Credentials(**st.session_state["creds_ga4"])
-            ga4_admin = ensure_admin_client(creds)
-            ga4_data  = ensure_data_client(creds)
-            st.markdown(
-                f'''
-                <div class="success-inline">
-                    Cuenta de acceso (GA4): <strong>{st.session_state.get('ga4_account_label','(desconocida)')}</strong>
-                    <a href="{APP_HOME}?action=change_ga4" target="_self" rel="nofollow">(Cambiar cuenta GA4)</a>
-                </div>
-                ''',
-                unsafe_allow_html=True
-            )
-        except Exception as e:
-            st.error(f"No pude inicializar el cliente de GA4: {e}")
-            st.stop()
-
-# --- Elegir MEDIO (Propiedad GA4) ---
-if ga4_admin:
-    props = list_account_property_summaries(ga4_admin)  # [{account_name, property_display_name, property_id, ...}, ...]
-    if not props:
-        st.warning("No se encontraron propiedades GA4 con esta cuenta.")
-    else:
-        labels = [
-            f"{p['account_name']}  /  {p['property_display_name']}  —  {p['property_id']}"
-            for p in props
-        ]
-        default_label = st.session_state.get("ga4_property_choice")
-        default_idx = labels.index(default_label) if default_label in labels else 0
-
-        choice = st.selectbox("Elegí el medio (Propiedad GA4)", labels, index=default_idx, key="ga4_property_choice")
-        sel = props[labels.index(choice)]
-        st.session_state["ga4_property_id"] = sel["property_id"]
-        st.session_state["ga4_property_label"] = f"{sel['property_display_name']} (prop {sel['property_id']})"
-
-        st.markdown(
-            f"""
-            <div class="success-inline">
-                Medio seleccionado (GA4): <strong>{st.session_state['ga4_property_label']}</strong>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-# --- PASO: Selección de cuenta SC (sin duplicar pregunta luego)
-st.subheader("Selecciona la cuenta con acceso a Search Console")
-account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
-_default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
-default_idx = account_options.index(_default_label) if _default_label in account_options else 2
-
-sc_choice = st.selectbox(
-    "Elegí la cuenta para consultar datos de Search Console",
-    account_options, index=default_idx, key="sc_account_choice"
-)
-
-def _choice_to_key(label: str) -> str | None:
-    if norm(label) == norm("Acceso"): return "ACCESO"
-    if norm(label) == norm("Acceso Medios"): return "ACCESO_MEDIOS"
-    return None  # personal usa creds_dest
-
-def pick_source_oauth_forced(account_key: str) -> Credentials | None:
-    st.subheader("Cuenta de Search Console (fuente de datos)")
-    key = f"oauth_src_{account_key}"
+def _pick_source_oauth_forced(account_key: str, scopes: list[str]) -> Credentials | None:
+    key = f"oauth_src_{account_key}_{'_'.join(sorted(scopes))}"
     if key not in st.session_state:
-        flow = _build_flow_installed_or_local(account_key, GSC_SCOPES)
-        auth_url, state = flow.authorization_url(
-            prompt="consent select_account",
-            access_type="offline",
-        )
+        flow = _build_flow_installed_or_local(account_key, scopes)
+        auth_url, state = flow.authorization_url(prompt="consent select_account", access_type="offline")
         st.session_state[key] = {"account": account_key, "flow": flow, "auth_url": auth_url, "state": state}
 
     osrc = st.session_state[key]
-    st.markdown(f"🔗 **Autorizar acceso a Search Console** → {osrc['auth_url']}")
-    with st.expander("Ver/copiar URL de autorización (fuente)"):
+    st.markdown(f"🔗 **Autorizar acceso** (SC/GA4 según selección) → {osrc['auth_url']}")
+    with st.expander("Ver/copiar URL de autorización"):
         st.code(osrc["auth_url"])
 
     url = st.text_input(
@@ -664,8 +426,8 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
     c1, c2 = st.columns([1,1])
     creds = None
     with c1:
-        if st.button("Conectar Search Console", key=f"btn_connect_src_{account_key}", type="secondary"):
-            if not url.strip():
+        if st.button("Conectar", key=f"btn_connect_src_{account_key}", type="secondary"):
+            if not (url or "").strip():
                 st.error("Pegá la URL completa de redirección (incluye code y state)."); st.stop()
             from urllib.parse import urlsplit, parse_qs
             try:
@@ -682,7 +444,7 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
                 flow.fetch_token(authorization_response=url.strip())
                 creds = flow.credentials
             except Exception as e:
-                st.error("No se pudo conectar Search Console. Reintentá la autorización.")
+                st.error("No se pudo completar la autorización. Reintentá.")
                 st.caption(f"Detalle técnico: {e}")
     with c2:
         if st.button("Reiniciar conexión", key=f"btn_reset_src_{account_key}"):
@@ -692,108 +454,220 @@ def pick_source_oauth_forced(account_key: str) -> Credentials | None:
             clear_qp(); st.rerun()
     return creds
 
-# Inicializar sc_service según selección
-sc_service = None
-if sc_choice == "Acceso en cuenta personal de Nomadic":
-    creds_dest_dict = st.session_state.get("creds_dest") or token_store.load("creds_dest")
-    if not creds_dest_dict:
-        st.error("No encuentro la sesión personal. Volvé a iniciar sesión en el Paso 0."); st.stop()
-    if not has_gsc_scope(creds_dest_dict.get("scopes")):
-        st.warning("Tu cuenta personal no tiene permisos de Search Console todavía.")
-        st.caption("Volvé a realizar el Paso 0 solicitando también el permiso de Search Console.")
-        st.stop()
-    try:
-        creds_src = Credentials(**creds_dest_dict)
-        sc_service = ensure_sc_client(creds_src)
-        st.session_state["creds_src"] = creds_dest_dict
-        st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
-        st.session_state["step3_done"] = True
-        st.markdown(
-            f'''
-            <div class="success-inline">
-                Cuenta de acceso (Search Console): <strong>Acceso en cuenta personal de Nomadic</strong>
-                <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-    except Exception as e:
-        st.error(f"No pude inicializar Search Console con la cuenta personal: {e}")
-        st.stop()
-else:
-    wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
-    need_new_auth = (
-        not st.session_state.get("step3_done") or
-        norm(st.session_state.get("src_account_label")) != norm(sc_choice) or
-        norm(st.session_state.get("src_account_label")) == norm("Acceso en cuenta personal de Nomadic")
+if need_auth:
+    st.subheader("Seleccioná la cuenta de acceso (se usará para SC y/o GA4)")
+    account_options = ["Acceso", "Acceso Medios", "Acceso en cuenta personal de Nomadic"]
+    _default_label = st.session_state.get("sc_account_choice", "Acceso en cuenta personal de Nomadic")
+    default_idx = account_options.index(_default_label) if _default_label in account_options else 2
+    sc_choice = st.selectbox(
+        "Elegí la cuenta para consultar datos",
+        account_options, index=default_idx, key="sc_account_choice"
     )
-    if need_new_auth:
-        creds_src_obj = pick_source_oauth_forced(wanted_key)
-        if not creds_src_obj:
+
+    def _choice_to_key(label: str) -> str | None:
+        if norm(label) == norm("Acceso"): return "ACCESO"
+        if norm(label) == norm("Acceso Medios"): return "ACCESO_MEDIOS"
+        return None  # personal usa creds_dest
+
+    # Scopes dinámicos según selección
+    wanted_scopes: list[str] = []
+    if "sc" in selected_sources:
+        wanted_scopes.append(SC_SCOPE)
+    if "ga" in selected_sources:
+        wanted_scopes.append(GA_SCOPE)
+
+    # Inicializar clientes según elección
+    if sc_choice == "Acceso en cuenta personal de Nomadic":
+        creds_dest_dict = st.session_state.get("creds_dest") or token_store.load("creds_dest")
+        if not creds_dest_dict:
+            st.error("No encuentro la sesión personal. Volvé a iniciar sesión en el Paso 0."); st.stop()
+
+        # Validar scopes en la sesión personal
+        scopes_have = set(creds_dest_dict.get("scopes") or [])
+        missing = []
+        if "sc" in selected_sources and not has_gsc_scope(scopes_have): missing.append("Search Console")
+        if "ga" in selected_sources and not has_ga4_scope(scopes_have): missing.append("Google Analytics (analytics.readonly)")
+        if missing:
+            st.warning("Tu cuenta personal no tiene los permisos requeridos: " + ", ".join(missing))
+            st.caption("Volvé a realizar el Paso 0 solicitando también esos permisos.")
             st.stop()
-        st.session_state["creds_src"] = {
-            "token": creds_src_obj.token,
-            "refresh_token": getattr(creds_src_obj, "refresh_token", None),
-            "token_uri": creds_src_obj.token_uri,
-            "client_id": creds_src_obj.client_id,
-            "client_secret": creds_src_obj.client_secret,
-            "scopes": list(getattr(creds_src_obj, "scopes", [])),
-        }
-        token_store.save("creds_src", st.session_state["creds_src"])
-        st.session_state["src_account_label"] = sc_choice
-        st.session_state["step3_done"] = True
-        clear_qp(); st.rerun()
-    else:
+
         try:
-            if not st.session_state.get("creds_src"):
-                cdict = token_store.load("creds_src")
-                if cdict:
-                    st.session_state["creds_src"] = cdict
-            creds_src = Credentials(**st.session_state["creds_src"])
-            sc_service = ensure_sc_client(creds_src)
-            src_label = st.session_state.get("src_account_label") or sc_choice
+            creds_src = Credentials(**creds_dest_dict)
+            if "sc" in selected_sources:
+                sc_service = ensure_sc_client(creds_src)
+            if "ga" in selected_sources:
+                if build_admin_client is None or build_data_client is None:
+                    raise RuntimeError("Módulos GA4 no disponibles. Agregá `modules/ga4_admin.py`, `modules/ga4_data.py` y paquetes `google-analytics-*` a requirements.")
+                ga4_admin = build_admin_client(creds_src)
+                ga4_data = build_data_client(creds_src)
+
+            st.session_state["creds_src"] = creds_dest_dict
+            st.session_state["src_account_label"] = "Acceso en cuenta personal de Nomadic"
+            st.session_state["step3_done"] = True
             st.markdown(
                 f'''
                 <div class="success-inline">
-                    Cuenta de acceso (Search Console): <strong>{src_label}</strong>
+                    Cuenta de acceso: <strong>Acceso en cuenta personal de Nomadic</strong>
                     <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
                 </div>
                 ''',
                 unsafe_allow_html=True
             )
         except Exception as e:
-            st.error(f"No pude inicializar el cliente de Search Console: {e}")
+            st.error(f"No pude inicializar clientes con la cuenta personal: {e}")
             st.stop()
 
-# --- PASO: elegir sitio(s) ---
-def pick_sites(sc_service) -> list[str]:
-    st.subheader("Elige el/los sitios a analizar")
-    try:
-        site_list = sc_service.sites().list().execute()
-        sites = site_list.get("siteEntry", [])
-    except Exception as e:
-        st.error(f"Error al obtener sitios: {e}")
-        st.stop()
-    verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
-    if not verified:
-        st.error("No se encontraron sitios verificados en esta cuenta."); st.stop()
-
-    options = sorted({s["siteUrl"] for s in verified})
-    multi = st.toggle("Analizar múltiples sitios", value=False, key="multi_sites")
-
-    if multi:
-        prev_multi = st.session_state.get("site_urls_choice", [])
-        defaults = prev_multi or ([st.session_state.get("site_url_choice")] if st.session_state.get("site_url_choice") in options else [])
-        selected = st.multiselect("Sitios verificados:", options, default=[x for x in defaults if x in options], key="site_urls_choice")
-        return selected
     else:
-        prev = st.session_state.get("site_url_choice")
-        index = options.index(prev) if prev in options else 0
-        site = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
-        return [site]
+        wanted_key = _choice_to_key(sc_choice)  # "ACCESO" o "ACCESO_MEDIOS"
+        need_new_auth = (
+            not st.session_state.get("step3_done") or
+            norm(st.session_state.get("src_account_label")) != norm(sc_choice) or
+            norm(st.session_state.get("src_account_label")) == norm("Acceso en cuenta personal de Nomadic")
+        )
+        if need_new_auth:
+            creds_src_obj = _pick_source_oauth_forced(wanted_key, wanted_scopes)
+            if not creds_src_obj:
+                st.stop()
+            st.session_state["creds_src"] = {
+                "token": creds_src_obj.token,
+                "refresh_token": getattr(creds_src_obj, "refresh_token", None),
+                "token_uri": creds_src_obj.token_uri,
+                "client_id": creds_src_obj.client_id,
+                "client_secret": creds_src_obj.client_secret,
+                "scopes": list(getattr(creds_src_obj, "scopes", [])),
+            }
+            token_store.save("creds_src", st.session_state["creds_src"])
+            st.session_state["src_account_label"] = sc_choice
+            st.session_state["step3_done"] = True
+            clear_qp(); st.rerun()
+        else:
+            try:
+                if not st.session_state.get("creds_src"):
+                    cdict = token_store.load("creds_src")
+                    if cdict:
+                        st.session_state["creds_src"] = cdict
+                creds_src = Credentials(**st.session_state["creds_src"])
+                if "sc" in selected_sources:
+                    sc_service = ensure_sc_client(creds_src)
+                if "ga" in selected_sources:
+                    if build_admin_client is None or build_data_client is None:
+                        raise RuntimeError("Módulos GA4 no disponibles. Agregá `modules/ga4_admin.py`, `modules/ga4_data.py` y paquetes `google-analytics-*` a requirements.")
+                    ga4_admin = build_admin_client(creds_src)
+                    ga4_data = build_data_client(creds_src)
+                src_label = st.session_state.get("src_account_label") or sc_choice
+                st.markdown(
+                    f'''
+                    <div class="success-inline">
+                        Cuenta de acceso: <strong>{src_label}</strong>
+                        <a href="{APP_HOME}?action=change_src" target="_self" rel="nofollow">(Cambiar cuenta de acceso)</a>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+            except Exception as e:
+                st.error(f"No pude inicializar clientes: {e}")
+                st.stop()
 
-site_urls = pick_sites(sc_service)
-site_url = site_urls[0] if site_urls else None  # compat con código existente
+# ===== Selector de propiedad GA4 (si corresponde) =====
+if "ga" in selected_sources:
+    st.subheader("Seleccioná la propiedad de Google Analytics 4")
+    props = []
+    _perm_issue = False
+    try:
+        props = list_account_property_summaries(ga4_admin)
+    except PermissionError as e:
+        if str(e) == "GA4_ADMIN_PERMISSION":
+            _perm_issue = True
+        else:
+            st.error(f"GA4 Admin API: {e}")
+    except PermissionDenied:
+        _perm_issue = True
+    except Exception as e:
+        st.error(f"GA4 Admin API (otro error): {e}")
+
+    if _perm_issue:
+        st.warning(
+            "No pude listar cuentas/propiedades con la **Analytics Admin API**. "
+            "Ingresá el **ID de la propiedad GA4** manualmente."
+        )
+        pid_manual = st.text_input(
+            "ID de propiedad GA4 (número, ej. 123456789)",
+            value=st.session_state.get("ga4_property_id", ""),
+            key="ga4_pid_manual"
+        ).strip()
+        if pid_manual:
+            st.session_state["ga4_property_id"] = pid_manual
+            props = [{
+                "account_name": "—",
+                "property_display_name": f"Propiedad {pid_manual} (manual)",
+                "property_id": pid_manual
+            }]
+
+    if props:
+        labels = [
+            f"{p['property_display_name']} — {p.get('account_name','—')} (ID {p['property_id']})"
+            for p in props
+        ]
+        default_idx = 0
+        if "ga4_property_id" in st.session_state:
+            try:
+                default_idx = next(
+                    (i for i, p in enumerate(props) if p["property_id"] == st.session_state["ga4_property_id"]),
+                    0
+                )
+            except Exception:
+                default_idx = 0
+        choice = st.selectbox("Propiedad GA4", labels, index=default_idx, key="ga4_property_choice")
+        sel = props[labels.index(choice)]
+        st.session_state["ga4_property_id"] = sel["property_id"]
+        st.session_state["ga4_property_name"] = sel["property_display_name"]
+        st.markdown(
+            f"""
+            <div class="success-inline">
+                Propiedad GA4 seleccionada: <strong>{st.session_state['ga4_property_name']} (ID {st.session_state['ga4_property_id']})</strong>
+                <a href="{APP_HOME}?action=change_ga4" target="_self" rel="nofollow">(Cambiar propiedad GA4)</a>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("No hay propiedades para mostrar todavía.")
+
+# ===== Sitios de GSC (solo si se seleccionó SC) =====
+if "sc" in selected_sources:
+    def pick_sites(sc_service) -> list[str]:
+        st.subheader("Elige el/los sitios a analizar (Search Console)")
+        try:
+            site_list = sc_service.sites().list().execute()
+            sites = site_list.get("siteEntry", [])
+        except Exception as e:
+            st.error(f"Error al obtener sitios: {e}")
+            st.stop()
+        verified = [s for s in sites if s.get("permissionLevel") != "siteUnverifiedUser"]
+        if not verified:
+            st.error("No se encontraron sitios verificados en esta cuenta."); st.stop()
+
+        options = sorted({s["siteUrl"] for s in verified})
+        multi = st.toggle("Analizar múltiples sitios", value=False, key="multi_sites")
+
+        if multi:
+            prev_multi = st.session_state.get("site_urls_choice", [])
+            defaults = prev_multi or ([st.session_state.get("site_url_choice")] if st.session_state.get("site_url_choice") in options else [])
+            selected = st.multiselect("Sitios verificados:", options, default=[x for x in defaults if x in options], key="site_urls_choice")
+            return selected
+        else:
+            prev = st.session_state.get("site_url_choice")
+            index = options.index(prev) if prev in options else 0
+            site = st.selectbox("Sitio verificado:", options, index=index, key="site_url_choice")
+            return [site]
+
+    site_urls = pick_sites(sc_service)
+    site_url = site_urls[0] if site_urls else None
+else:
+    # Sin SC → mantener compatibilidad con el resto del código
+    site_urls = []
+    site_url = None
 
 # =========================
 # Utilidades comunes
@@ -1449,8 +1323,126 @@ def _scrape_sync(urls: list[str], ua: str, wants: dict, xpaths: dict, joiner: st
     results.sort(key=lambda r: order.get(r.get("url",""), 1e9))
     return results
 
-# ============== Flujos por análisis (requieren GSC) ==============
+# ============== Flujos por análisis ==============
+
+# ---------- Rama especial: Nombres (no usa GSC) ----------
+if analisis == "7":
+    if run_names_analysis is None:
+        st.warning("Este despliegue no incluye `run_names_analysis`.")
+    else:
+        params_names = params_for_names()
+        total = len(params_names.get("items") or [])
+        if total == 0:
+            st.info("Cargá un CSV o pegá al menos un nombre para habilitar la ejecución.")
+        else:
+            if st.button("🔎 Ejecutar Análisis de Nombres (KG + Wikipedia)", type="primary", key="btn_names_run"):
+                sid = run_with_indicator(
+                    "Procesando Análisis de Nombres (KG + Wikipedia)",
+                    run_names_analysis, drive_service, gs_client,
+                    params_names, st.session_state.get("dest_folder_id")
+                )
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url="",
+                    analysis_kind="Nombres (KG+Wikipedia)",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account="", notes=f"lang={params_names.get('lang')}, n={total}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "names"
+    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
+        st.divider(); st.subheader("📄 Resumen del análisis")
+        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
+        gemini_summary(gs_client, st.session_state["last_file_id"],
+                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
+    st.stop()
+
+# ---------- Rama especial: Discover Snoop (no usa GSC) ----------
+if analisis == "8":
+    if run_discover_snoop is None:
+        st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
+    else:
+        st.subheader("Subí el CSV exportado de Discover Snoop")
+        up = st.file_uploader("Archivo CSV", type=["csv"], key="ds_file")
+        params_ds = params_for_discover_snoop()
+
+        with st.expander("Formato esperado (campos mínimos)"):
+            st.markdown("""
+            Debe contener **publisher, title, url, category, firstviewed, lastviewed**.  
+            `entities` es opcional pero recomendado.
+            """)
+
+        df = None
+        if up is not None:
+            try:
+                df = pd.read_csv(up)
+            except Exception:
+                up.seek(0)
+                df = pd.read_csv(up, encoding="latin-1")
+            st.success(f"CSV cargado: {len(df):,} filas")
+
+        if df is None:
+            st.info("Cargá el CSV para habilitar la ejecución.")
+        else:
+            if st.button("🔎 Ejecutar Análisis Discover Snoop", type="primary", key="btn_ds_run"):
+                sid = run_with_indicator(
+                    "Procesando Discover Snoop",
+                    run_discover_snoop,  # función del paquete externo
+                    drive_service, gs_client,  # servicios Google
+                    df, params_ds,            # datos + parámetros
+                    st.session_state.get("dest_folder_id")
+                )
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                try:
+                    meta = drive_service.files().get(fileId=sid, fields="name,webViewLink").execute()
+                    sheet_name = meta.get("name", ""); sheet_url = meta.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sid}"
+                except Exception:
+                    sheet_name = ""; sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                activity_log_append(
+                    drive_service, gs_client,
+                    user_email=( _me or {}).get("emailAddress") or "",
+                    event="analysis", site_url="",
+                    analysis_kind="Discover Snoop",
+                    sheet_id=sid, sheet_name=sheet_name, sheet_url=sheet_url,
+                    gsc_account="", notes=f"params={params_ds!r}"
+                )
+                st.session_state["last_file_id"] = sid
+                st.session_state["last_file_kind"] = "discover"
+
+    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
+        st.divider(); st.subheader("📄 Resumen del análisis")
+        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
+        gemini_summary(gs_client, st.session_state["last_file_id"],
+                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
+    st.stop()
+
+# ============== Resto de análisis (algunos requieren SC) ==============
+
+# Análisis que requieren sí o sí Search Console:
+def _require_sc_or_stop():
+    if "sc" not in (st.session_state.get("selected_sources") or set()):
+        st.warning("Este análisis requiere datos de **Search Console**. Marcá *Usar Search Console* arriba.")
+        st.stop()
+    if not sc_service:
+        st.error("El cliente de Search Console no está inicializado."); st.stop()
+    if not site_urls:
+        st.error("No hay sitios seleccionados de Search Console."); st.stop()
+
 if analisis == "4":
+    _require_sc_or_stop()
     if run_core_update is None:
         st.warning("Este despliegue no incluye run_core_update.")
     else:
@@ -1509,6 +1501,7 @@ if analisis == "4":
                     st.session_state["last_file_kind"] = "core"
 
 elif analisis == "3":
+    _require_sc_or_stop()
     if run_sections_analysis is None:
         st.warning("Este despliegue no incluye `run_sections_analysis` (agregá `seo_analisis_ext/sections_analysis.py`).")
         st.stop()
@@ -1621,6 +1614,7 @@ elif analisis == "3":
                 st.session_state["last_file_kind"] = "sections"
 
 elif analisis == "5":
+    _require_sc_or_stop()
     if run_evergreen is None:
         st.warning("Este despliegue no incluye run_evergreen.")
     else:
@@ -1673,6 +1667,7 @@ elif analisis == "5":
                     st.session_state["last_file_kind"] = "evergreen"
 
 elif analisis == "6":
+    _require_sc_or_stop()
     if run_traffic_audit is None:
         st.warning("Este despliegue no incluye run_traffic_audit.")
     else:
@@ -1725,6 +1720,8 @@ elif analisis == "6":
                     st.session_state["last_file_kind"] = "audit"
 
 elif analisis == "2":
+    # Por ahora, este runner usa SC para extraer series.
+    _require_sc_or_stop()
     from modules.app_ext import run_report_results
     if run_report_results is None:
         st.warning("Este despliegue no incluye `run_report_results` (agregá `seo_analisis_ext/report_results.py`).")
@@ -1794,11 +1791,14 @@ elif analisis == "2":
         # 2) Punto de corte inicial: (primer día del mes del anchor - 16 meses) + (anchor.day - 1).
         #    Ej.: si anchor es 3/sep, el corte es 3/may; el primer mes CALENDARIO completo que
         #    empieza >= ese corte es JUNIO (no mayo).
-        cut = add_months(first_day_of_month(anchor), -16) + timedelta(days=anchor.day - 1)
+        def add_months_local(d: date, months: int) -> date:
+            y = d.year + (d.month - 1 + months) // 12
+            m = (d.month - 1 + months) % 12 + 1
+            day = min(d.day, [31,29 if y%4==0 and (y%100!=0 or y%400==0) else 28,31,30,31,30,31,31,30,31,30,31][m-1])
+            return date(y, m, day)
+        cut = add_months_local(first_day_of_month(anchor), -16) + timedelta(days=anchor.day - 1)
 
-        # 3) Si el corte cae el día 1, arrancamos ese mismo mes; si no, arrancamos el mes siguiente.
-        start_month = first_day_of_month(cut) if cut.day == 1 else first_day_of_month(add_months(cut, 1))
-
+        start_month = first_day_of_month(cut) if cut.day == 1 else first_day_of_month(add_months_local(cut, 1))
         start_dt, end_dt = start_month, last_full_end
     else:
         # Personalizado
@@ -1936,6 +1936,7 @@ elif analisis == "9":
         st.info("Este modo utiliza el runner externo. Si preferís algo más simple/rápido, usá **Análisis de estructura de contenidos** (opción 10).")
 
 elif analisis == "10":
+    _require_sc_or_stop()
     # ===== ANÁLISIS DE ESTRUCTURA DE CONTENIDOS =====
     st.subheader("Análisis de estructura de contenidos")
     st.caption("Trae URLs por Search / Discover, filtra y scrapea **solo los campos que elijas** (en el scope del artículo si indicas su XPath) y publica en Sheets. Incluye extracción de entidades con spaCy.")
