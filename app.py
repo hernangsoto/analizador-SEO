@@ -306,19 +306,26 @@ try:
         ''',
         unsafe_allow_html=True
     )
+
+    # Verificar scopes sin romper si falta info
     try:
-    _scopes_have = set((st.session_state.get("creds_dest") or {}).get("scopes") or [])
-    if not has_docs_scope(_scopes_have):
-        st.caption("⚠️ Esta sesión no tiene permisos de **Google Docs**. "
-                   "Si pensás exportar el resumen a Docs, repetí el **Paso 0** con el scope de Docs activo.")
-except Exception:
-    pass
+        _scopes_have = set((st.session_state.get("creds_dest") or {}).get("scopes") or [])
+        if not has_docs_scope(_scopes_have):
+            st.caption(
+                "⚠️ Esta sesión no tiene permisos de **Google Docs**. "
+                "Si pensás exportar el resumen a Docs, repetí el **Paso 0** con el scope de Docs activo."
+            )
+    except Exception:
+        pass
+
+    # Log de actividad cuando todo lo anterior salió bien
     activity_log_append(
         drive_service, gs_client,
         user_email=email_txt, event="login",
         gsc_account=st.session_state.get("src_account_label") or "",
         notes="Paso 0 OK (OIDC + Drive/Sheets + GSC)"
     )
+
 except Exception as e:
     st.error(f"No pude inicializar Drive/Sheets con la cuenta personal: {e}")
     st.stop()
