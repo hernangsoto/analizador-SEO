@@ -2830,21 +2830,9 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
     # 🔑 Sufijo único (kind + sheet_id + site_url + random corto)
     suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
-    do_sum = st.checkbox(
-        "🤖 Resumen del análisis generado con Nomadic BOT",
-        value=True,
-        key=f"post_sum_{suffix}"
-    )
-    do_doc = st.checkbox(
-        "🤖 Documento de texto basado en el análisis de Nomadic BOT",
-        value=False,
-        key=f"post_doc_{suffix}"
-    )
-    do_slack = st.checkbox(
-        "Resumen del análisis para enviar a Slack (A desarrollar)",
-        value=False,
-        key=f"post_slack_{suffix}"
-    )
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{suffix}")
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{suffix}")
 
     if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
         selected = [do_sum, do_doc, do_slack]
@@ -2871,7 +2859,6 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                     st.error(f"Falló el resumen IA: {e}")
             done += 1; progress.progress(done/max(total,1))
 
-        # 🔄 Releer resumen después de generar (por si lo necesitamos en Doc o Slack)
         if not summary_text:
             summary_text = (
                 st.session_state.get("last_summary_text")
@@ -2931,7 +2918,6 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         st.markdown(f"• **Google Sheets** → https://docs.google.com/spreadsheets/d/{sheet_id}")
         if doc_url:
             st.markdown(f"• **Google Doc** → {doc_url}")
-
 
 
 # --- Acciones posteriores (unificadas) ---
