@@ -1389,14 +1389,8 @@ if analisis == "7":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "names"
-    if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
-        st.divider(); st.subheader("📄 Resumen del análisis")
-        st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
-        gemini_summary(gs_client, st.session_state["last_file_id"],
-                       kind=st.session_state["last_file_kind"], widget_suffix="panel")
-    st.stop()
-
-# ---------- Rama especial: Discover Snoop (no usa GSC) ----------
+    
+    # ---------- Rama especial: Discover Snoop (no usa GSC) ----------
 if analisis == "8":
     if run_discover_snoop is None:
         st.warning("Este despliegue no incluye `run_discover_snoop` (repo externo).")
