@@ -2720,27 +2720,21 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         done = 0
         summary_text = st.session_state.get("last_summary_text") or st.session_state.get("gemini_last_text") or ""
 
-        # 1) Resumen IA
-        if do_sum:
-            with st.spinner("Generando resumen con Nomadic BOT…"):
-                try:
-                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
-                    if txt:
-                        summary_text = txt
-                        st.session_state["last_summary_text"] = txt
-                        st.success("Resumen IA generado ✅")
-                    else:
-                        st.warning("No se obtuvo texto de resumen (vacío).")
-                except Exception as e:
-                    st.error(f"Falló el resumen IA: {e}")
-            done += 1; progress.progress(done/max(total,1))
-
-        if not summary_text:
-            summary_text = (
-                st.session_state.get("last_summary_text")
-                or st.session_state.get("gemini_last_text")
-                or ""
-            )
+   # 1) Resumen IA (si está seleccionado o si hace falta para Doc)
+need_summary = do_sum or (do_doc and not summary_text)
+if need_summary:
+    with st.spinner("Generando resumen con Nomadic BOT…"):
+        try:
+            txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
+            if txt:
+                summary_text = txt
+                st.session_state["last_summary_text"] = txt
+                st.success("Resumen IA generado ✅")
+            else:
+                st.warning("No se obtuvo texto de resumen (vacío).")
+        except Exception as e:
+            st.error(f"Falló el resumen IA: {e}")
+    done += 1; progress.progress(done/max(total,1))
 
         # 2) Documento de texto
         doc_url = None
