@@ -1,4 +1,4 @@
-frfrom __future__ import annotations
+from __future__ import annotations
 
 # --- Permisos OAuth en localhost + tolerancia de scope
 import os
