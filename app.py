@@ -1479,16 +1479,6 @@ if analisis == "8":
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "discover"
 
-    # --- Panel persistente de resumen (una sola vez) ---
-if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
-    show_post_run_actions(
-        gs_client=gs_client,
-        sheet_id=st.session_state["last_file_id"],
-        kind=st.session_state["last_file_kind"],
-        site_url=st.session_state.get("site_url_choice")
-    )
-
-
 # ============== Resto de análisis (algunos requieren SC) ==============
 
 # Análisis que requieren sí o sí Search Console:
