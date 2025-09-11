@@ -33,7 +33,7 @@ for _name in [
         pass
 
 # ====== UI / Branding ======
-from modules.ui apply_page_style, get_user, sidebar_user_info, login_screen
+from modules.ui import apply_page_style, get_user, sidebar_user_info, login_screen
 
 # ====== Documento de texto ======
 from modules.doc_export import (
