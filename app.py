@@ -50,7 +50,7 @@ def has_docs_scope(scopes: set[str] | list[str] | tuple[str, ...] | None) -> boo
     return "https://www.googleapis.com/auth/documents" in set(scopes or [])
 
 from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
-from modules.app_params (
+from modules.app_params import (
     params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names,
 )
 try:
