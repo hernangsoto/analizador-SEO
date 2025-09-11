@@ -43,7 +43,7 @@ from modules.doc_export import (
 )
 
 # ====== Carga de módulos locales ======
-from modules.app_config apply_base_style_and_logo, get_app_home
+from modules.app_config import apply_base_style_and_logo, get_app_home
 from modules.app_ext USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis, run_discover_snoop, run_content_analysis
 from modules.app_utils get_qp, clear_qp, has_gsc_scope, norm, has_ga4_scope
 def has_docs_scope(scopes: set[str] | list[str] | tuple[str, ...] | None) -> bool:
