@@ -2799,105 +2799,18 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             st.markdown(f"• **Google Doc** → {doc_url}")
 
 
+# --- Panel persistente unificado ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
-    st.divider()
-    st.subheader("📄 Resumen del análisis")
-    st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
-
-    # Capturamos el texto del resumen (si la función no retorna texto, intentamos session_state)
-    summary_text = gemini_summary(
-        gs_client,
-        st.session_state["last_file_id"],
+    show_post_run_actions(
+        gs_client=gs_client,
+        sheet_id=st.session_state["last_file_id"],
         kind=st.session_state["last_file_kind"],
-        force_prompt_key="core" if st.session_state["last_file_kind"] == "core" else None,
-        widget_suffix="panel"
+        site_url=st.session_state.get("site_url_choice")
     )
-    if not summary_text:
-        # Fallbacks habituales si gemini_summary almacena en session_state
-        summary_text = (
-            st.session_state.get("gemini_last_text")
-            or st.session_state.get("last_summary_text")
-            or st.session_state.get("summary_text")
-        )
-
-    # === Exportar a Google Docs (opcional) ===
-    with st.expander("✍️ Exportar a Google Docs (opcional)", expanded=False):
-        # Verificación de permisos (scope de Docs en la sesión personal del Paso 0)
-        creds_dest_dict = st.session_state.get("creds_dest") or {}
-        scopes_have = set(creds_dest_dict.get("scopes") or [])
-        if not has_docs_scope(scopes_have):
-            st.warning(
-                "Tu sesión actual no tiene permisos de **Google Docs**. "
-                "Volvé a realizar el Paso 0 solicitando también el scope de Docs "
-                "(`https://www.googleapis.com/auth/documents`)."
-            )
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                want_prompt_doc = st.checkbox("Generar Doc con el prompt corporativo (Nomadic)", value=False, key="want_prompt_doc_final")
-                prompt_doc_title = st.text_input(
-                    "Título del Doc (prompt)",
-                    value="Nomadic - Instrucciones de formateo corporativo",
-                    key="prompt_doc_title_final"
-                )
-            with c2:
-                want_corp_doc = st.checkbox("Generar Doc corporativo con el ANÁLISIS (template)", value=False, key="want_corp_doc_final")
-                corp_doc_title = st.text_input(
-                    "Título del Doc (análisis)",
-                    value="Análisis de Core Update - Nomadic",
-                    key="corp_doc_title_final"
-                )
-
-            disabled_export = (not want_prompt_doc and not want_corp_doc)
-            if st.button("Crear Google Docs seleccionados", type="primary", disabled=disabled_export, key="btn_docs_export"):
-                from google.oauth2.credentials import Credentials
-                try:
-                    creds_personal = Credentials(**creds_dest_dict)
-                except Exception as e:
-                    st.error(f"No pude reconstruir credenciales personales: {e}")
-                    st.stop()
-
-                dest_folder_id = st.session_state.get("dest_folder_id")
-                made_any = False
-
-                # 1) Doc con PROMPT corporativo (brief)
-                if want_prompt_doc:
-                    try:
-                        doc_id_prompt = create_doc_with_prompt(
-                            credentials=creds_personal,
-                            title=prompt_doc_title.strip() or "Nomadic - Instrucciones de formateo corporativo",
-                            prompt_text=PROMPT_BRANDING_NOMADIC,
-                            dest_folder_id=dest_folder_id
-                        )
-                        st.success("Google Doc (prompt) creado ✅")
-                        st.link_button("Abrir Google Doc (prompt)", f"https://docs.google.com/document/d/{doc_id_prompt}/edit")
-                        made_any = True
-                    except Exception as e:
-                        st.error(f"Falló la creación del Doc (prompt): {e}")
-
-                # 2) Doc corporativo con el ANÁLISIS (usa template)
-                if want_corp_doc:
-                    if not summary_text:
-                        st.warning("Generá el **resumen IA** primero (arriba) para poder crear el Doc corporativo con el análisis.")
-                    else:
-                        try:
-                            doc_id_corp = create_doc_from_template_with_content(
-                                credentials=creds_personal,
-                                title=corp_doc_title.strip() or "Análisis - Nomadic",
-                                analysis_text=summary_text,
-                                dest_folder_id=dest_folder_id
-                            )
-                            st.success("Google Doc corporativo (análisis) creado ✅")
-                            st.link_button("Abrir Google Doc (análisis)", f"https://docs.google.com/document/d/{doc_id_corp}/edit")
-                            made_any = True
-                        except Exception as e:
-                            st.error(f"Falló la creación del Doc corporativo (análisis): {e}")
-
-                if not made_any:
-                    st.info("No se creó ningún documento.")
 
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
         "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets.get('gemini', {}))
     )
+
