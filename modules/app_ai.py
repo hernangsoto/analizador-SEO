@@ -4,7 +4,12 @@ import pathlib
 import streamlit as st
 
 from app_config import _resolve_gemini_model  # solo para healthcheck
-from app_ext import EXT_PACKAGE
+try:
+    from .app_ext import EXT_PACKAGE
+except Exception:
+    # Fallback por si app.py ya mapeó 'app_ext' en sys.modules
+    from app_ext import EXT_PACKAGE  # type: ignore
+
 from modules.ai import is_gemini_configured, summarize_sheet_auto, render_summary_box
 
 # Estado interno (accesible vía getters)
