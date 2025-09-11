@@ -94,8 +94,16 @@ from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_lo
 from modules.app_errors import run_with_indicator
 try:
     from modules.app_auth_flow import step0_google_identity, logout_screen
-except Exception:
+except ModuleNotFoundError:
+    # Fallback para repos viejos sin el paquete "modules"
     from app_auth_flow import step0_google_identity, logout_screen
+except Exception as e:
+    # El módulo existe pero falló al inicializarse: mostramos la traza y detenemos
+    import traceback as _tb
+    st.error(f"Error al importar modules.app_auth_flow: {e}")
+    st.code(_tb.format_exc())
+    st.stop()
+
 
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context  # si existe en el repo
 
