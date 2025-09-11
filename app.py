@@ -2699,6 +2699,8 @@ else:
 
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
     import uuid
+    import streamlit as st
+    from google.oauth2.credentials import Credentials
 
     st.divider()
     st.subheader("Acciones posteriores")
@@ -2714,29 +2716,42 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         selected = [do_sum, do_doc, do_slack]
         total = sum(1 for x in selected if x)
         if total == 0:
-            st.info("Seleccioná al menos una acción."); return
+            st.info("Seleccioná al menos una acción.")
+            return
 
         progress = st.progress(0.0)
         done = 0
-        summary_text = st.session_state.get("last_summary_text") or st.session_state.get("gemini_last_text") or ""
 
-   # 1) Resumen IA (si está seleccionado o si hace falta para Doc)
-need_summary = do_sum or (do_doc and not summary_text)
-if need_summary:
-    with st.spinner("Generando resumen con Nomadic BOT…"):
-        try:
-            txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
-            if txt:
-                summary_text = txt
-                st.session_state["last_summary_text"] = txt
-                st.success("Resumen IA generado ✅")
-            else:
-                st.warning("No se obtuvo texto de resumen (vacío).")
-        except Exception as e:
-            st.error(f"Falló el resumen IA: {e}")
-    done += 1; progress.progress(done/max(total,1))
+        # Estado previo (por si ya hubo un resumen en otra ejecución)
+        summary_text = (
+            st.session_state.get("last_summary_text")
+            or st.session_state.get("gemini_last_text")
+            or ""
+        )
 
-        # 2) Documento de texto
+        # Si el usuario no tildó Resumen pero sí Doc y todavía no hay resumen,
+        # agregamos un paso extra implícito para el progreso.
+        extra_steps = 1 if (do_doc and not do_sum and not summary_text) else 0
+        total_steps = total + extra_steps
+
+        # 1) Resumen IA (si está seleccionado o si hace falta para crear el Doc)
+        need_summary = do_sum or (do_doc and not summary_text)
+        if need_summary:
+            with st.spinner("Generando resumen con Nomadic BOT…"):
+                try:
+                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
+                    if txt:
+                        summary_text = txt
+                        st.session_state["last_summary_text"] = txt
+                        st.success("Resumen IA generado ✅")
+                    else:
+                        st.warning("No se obtuvo texto de resumen (vacío).")
+                except Exception as e:
+                    st.error(f"Falló el resumen IA: {e}")
+            done += 1
+            progress.progress(done / max(total_steps, 1))
+
+        # 2) Documento de texto (usa el resumen disponible/generado recién)
         doc_url = None
         if do_doc:
             if not summary_text:
@@ -2763,9 +2778,10 @@ if need_summary:
                             st.success("Documento de texto creado ✅")
                     except Exception as e:
                         st.error(f"Falló la creación del Doc: {e}")
-            done += 1; progress.progress(done/max(total,1))
+            done += 1
+            progress.progress(done / max(total_steps, 1))
 
-        # 3) Slack (placeholder)
+        # 3) Mensaje para Slack (placeholder)
         if do_slack:
             with st.spinner("Preparando mensaje para Slack…"):
                 sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
@@ -2781,7 +2797,8 @@ if need_summary:
                     key=f"slack_msg_{suffix}"
                 )
                 st.success("Mensaje listo ✅")
-            done += 1; progress.progress(done/max(total,1))
+            done += 1
+            progress.progress(done / max(total_steps, 1))
 
         progress.empty()
         st.markdown("### Enlaces")
