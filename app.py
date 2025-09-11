@@ -2687,10 +2687,15 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
 
     suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
-    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
-    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{suffix}")
-    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{suffix}")
-
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT",
+                     value=st.session_state.get(f"post_sum_{suffix}", True),
+                     key=f"post_sum_{suffix}")
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT",
+                     value=st.session_state.get(f"post_doc_{suffix}", False),
+                     key=f"post_doc_{suffix}")
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", 
+                     value=st.session_state.get(f"post_slack_{suffix}", False),
+                     key=f"post_slack_{suffix}")
     if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
         selected = [do_sum, do_doc, do_slack]
         total = sum(1 for x in selected if x)
