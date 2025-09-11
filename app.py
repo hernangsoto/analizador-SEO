@@ -92,7 +92,11 @@ except Exception:
 
 from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
-from modules.app_auth_flow import step0_google_identity, logout_screen
+try:
+    from modules.app_auth_flow import step0_google_identity, logout_screen
+except Exception:
+    from app_auth_flow import step0_google_identity, logout_screen
+
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context  # si existe en el repo
 
 
@@ -302,6 +306,13 @@ try:
         ''',
         unsafe_allow_html=True
     )
+    try:
+    _scopes_have = set((st.session_state.get("creds_dest") or {}).get("scopes") or [])
+    if not has_docs_scope(_scopes_have):
+        st.caption("⚠️ Esta sesión no tiene permisos de **Google Docs**. "
+                   "Si pensás exportar el resumen a Docs, repetí el **Paso 0** con el scope de Docs activo.")
+except Exception:
+    pass
     activity_log_append(
         drive_service, gs_client,
         user_email=email_txt, event="login",
@@ -526,6 +537,7 @@ if need_auth:
         missing = []
         if "sc" in selected_sources and not has_gsc_scope(scopes_have): missing.append("Search Console")
         if "ga" in selected_sources and not has_ga4_scope(scopes_have): missing.append("Google Analytics (analytics.readonly)")
+
         if missing:
             st.warning("Tu cuenta personal no tiene los permisos requeridos: " + ", ".join(missing))
             st.caption("Volvé a realizar el Paso 0 solicitando también esos permisos.")
