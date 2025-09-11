@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 from datetime import date, timedelta
 
-import pandas as pd             # <-- Asegurate que tenga "import"
+import pandas as pd
 import streamlit as st
 from google.oauth2.credentials import Credentials
 
@@ -95,27 +95,20 @@ from modules.app_errors import run_with_indicator
 try:
     from modules.app_auth_flow import step0_google_identity, logout_screen
 except ModuleNotFoundError:
-    # Fallback para repos viejos sin el paquete "modules"
     from app_auth_flow import step0_google_identity, logout_screen
 except Exception as e:
-    # El módulo existe pero falló al inicializarse: mostramos la traza y detenemos
     import traceback as _tb
     st.error(f"Error al importar modules.app_auth_flow: {e}")
     st.code(_tb.format_exc())
     st.stop()
 
-
-from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context  # si existe en el repo
-
-
-# 🔑 para leer tokens guardados por el Paso 0 en otra pestaña
+from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 from modules.utils import token_store
 
-# ====== Google modules ======
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
 
-# ====== Módulos GA4 (opcionales, con fallback limpio) ======
+# ====== Módulos GA4 ======
 try:
     from modules.ga4_admin import build_admin_client, list_account_property_summaries
     from modules.ga4_data import build_data_client
@@ -123,7 +116,6 @@ except Exception:
     build_admin_client = None
     build_data_client = None
     def list_account_property_summaries(_): return []
-# PermissionDenied puede no estar disponible si no está instalado google-api-core
 try:
     from google.api_core.exceptions import PermissionDenied
 except Exception:
@@ -131,7 +123,6 @@ except Exception:
 
 # ====== Estilo / branding ======
 apply_base_style_and_logo()
-# Aplica estilos adicionales de UI si el módulo está disponible
 try:
     apply_page_style()
 except Exception:
@@ -2716,7 +2707,6 @@ elif analisis == "10":
 else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
 
-# ===== Helper para acciones post-ejecución =====
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
     import uuid
 
@@ -2724,7 +2714,6 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    # 🔑 Sufijo único (kind + sheet_id + site_url + random corto)
     suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
     do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
@@ -2834,4 +2823,3 @@ if st.session_state.get("DEBUG"):
             "gemini" in st.secrets and "api_key" in st.secrets.get("gemini", {})
         )
     )
-
