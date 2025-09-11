@@ -1,3 +1,4 @@
+# modules/app_ai.py
 import os
 import importlib.util
 import pathlib
@@ -17,6 +18,7 @@ _SUMMARIZE_WITH_PROMPT = None
 _PROMPTS = None
 _AI_SRC = "none"
 _AI_IMPORT_ERR = None
+
 
 def load_prompts():
     """Carga PROMPTS y summarize_sheet_with_prompt del repo privado; si falla, usa fallback local."""
@@ -62,14 +64,18 @@ def load_prompts():
         e_loc = el
         _AI_IMPORT_ERR = f"external={repr(e_ext)} | file={repr(e_file)} | local={repr(e_loc)}"
 
+
 def ai_source() -> str:
     return _AI_SRC
+
 
 def ai_import_error():
     return _AI_IMPORT_ERR
 
+
 def prompts_map():
     return _PROMPTS
+
 
 def gemini_healthcheck():
     ok = True
@@ -102,6 +108,7 @@ def gemini_healthcheck():
         msgs.append(f"Error al importar/configurar Gemini: {repr(e)}")
 
     return ok, msgs
+
 
 def render_prompt_probe(kind: str, force_key: str | None = None):
     key = force_key or kind
@@ -139,17 +146,11 @@ def render_prompt_probe(kind: str, force_key: str | None = None):
         st.markdown("**bullets_hint:**")
         st.code(bh, language="md")
 
-def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    st.divider()
-    use_ai = st.toggle(
-        "Generar resumen con IA (Nomadic Bot 🤖)",
-        value=False,
-        help="Usa Gemini para leer el Google Sheet y crear un resumen breve y accionable.",
-        key=f"ai_summary_toggle_{kind}_{sid}_{widget_suffix}"
-    )
-    if not use_ai:
-        return
 
+def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
+    """Genera un resumen IA directamente (sin toggle UI).
+    Devuelve el texto generado o "" si falla.
+    """
     if _AI_IMPORT_ERR:
         st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
     elif _AI_SRC != "none":
@@ -157,7 +158,7 @@ def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None 
 
     if not is_gemini_configured():
         st.info("🔐 Configurá tu API key de Gemini en Secrets (`GEMINI_API_KEY` o `[gemini].api_key`).")
-        return
+        return ""
 
     def _looks_unsupported(md: str) -> bool:
         if not isinstance(md, str):
@@ -199,6 +200,7 @@ def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None 
 
         st.caption(f"🧠 Prompt en uso: **{prompt_source}**")
         render_summary_box(md)
+        return md
 
     except Exception as e:
         st.error(
@@ -209,3 +211,4 @@ def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None 
             md = summarize_sheet_auto(gs_client, sid, kind=kind)
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
+        return md
