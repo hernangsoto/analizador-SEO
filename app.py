@@ -1513,6 +1513,7 @@ if analisis == "4":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "core"
+                st.session_state["post_actions_visible"] = True
             else:
                 results = run_for_sites("Procesando Core Update", run_core_update,
                                         sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
@@ -1531,6 +1532,7 @@ if analisis == "4":
                 if results:
                     st.session_state["last_file_id"] = results[-1][1]
                     st.session_state["last_file_kind"] = "core"
+                    st.session_state["post_actions_visible"] = True
 
 elif analisis == "3":
     _require_sc_or_stop()
@@ -1626,6 +1628,7 @@ elif analisis == "3":
             )
             st.session_state["last_file_id"] = sid
             st.session_state["last_file_kind"] = "sections"
+            st.session_state["post_actions_visible"] = True
         else:
             results = run_for_sites("Procesando Secciones", run_sections_analysis,
                                     sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
@@ -1644,6 +1647,7 @@ elif analisis == "3":
             if results:
                 st.session_state["last_file_id"] = results[-1][1]
                 st.session_state["last_file_kind"] = "sections"
+                st.session_state["post_actions_visible"] = True
 
 elif analisis == "5":
     _require_sc_or_stop()
@@ -1679,6 +1683,7 @@ elif analisis == "5":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "evergreen"
+                st.session_state["post_actions_visible"] = True
             else:
                 results = run_for_sites("Procesando Evergreen", run_evergreen,
                                         sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
@@ -1697,6 +1702,7 @@ elif analisis == "5":
                 if results:
                     st.session_state["last_file_id"] = results[-1][1]
                     st.session_state["last_file_kind"] = "evergreen"
+                    st.session_state["post_actions_visible"] = True
 
 elif analisis == "6":
     _require_sc_or_stop()
@@ -1732,6 +1738,7 @@ elif analisis == "6":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "audit"
+                st.session_state["post_actions_visible"] = True
             else:
                 results = run_for_sites("Procesando Auditoría", run_traffic_audit,
                                         sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
@@ -1750,6 +1757,7 @@ elif analisis == "6":
                 if results:
                     st.session_state["last_file_id"] = results[-1][1]
                     st.session_state["last_file_kind"] = "audit"
+                    st.session_state["post_actions_visible"] = True
 
 elif analisis == "2":
     # Por ahora, este runner usa SC para extraer series.
@@ -1938,6 +1946,7 @@ elif analisis == "2":
                     )
                     st.session_state["last_file_id"] = sid
                     st.session_state["last_file_kind"] = "report_results"
+                    st.session_state["post_actions_visible"] = True
             else:
                 results = run_for_sites("Generando Reporte de resultados", run_report_results,
                                         sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id"))
@@ -1956,6 +1965,7 @@ elif analisis == "2":
                 if results:
                     st.session_state["last_file_id"] = results[-1][1]
                     st.session_state["last_file_kind"] = "report_results"
+                    st.session_state["post_actions_visible"] = True
         except Exception as e:
             st.error(f"Falló la generación del reporte: {e}")
 
@@ -2160,6 +2170,7 @@ elif analisis == "11":
                 )
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "ga4_audience"
+                st.session_state["post_actions_visible"] = True
         except Exception as e:
             st.error(f"Falló la generación del reporte de audiencia: {e}")
 
@@ -2648,6 +2659,7 @@ elif analisis == "10":
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
                 st.session_state["last_file_id"] = sid
                 st.session_state["last_file_kind"] = "content_structure"
+                st.session_state["post_actions_visible"] = True
                 with st.expander("Vista previa (primeras 20 filas)"):
                     st.dataframe(df_out.head(20), use_container_width=True)
         else:
@@ -2665,6 +2677,7 @@ elif analisis == "10":
                     st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
                 st.session_state["last_file_id"] = results_cs[-1][1]
                 st.session_state["last_file_kind"] = "content_structure"
+                st.session_state["post_actions_visible"] = True
 
 else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
