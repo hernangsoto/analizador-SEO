@@ -2677,21 +2677,19 @@ else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
 
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
+    import uuid
+    import streamlit as st
     from google.oauth2.credentials import Credentials
 
     st.divider()
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}"
+    suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
-    if st.button("Ocultar Acciones posteriores", key=f"hide_post_{suffix}"):
-        st.session_state["post_actions_visible"] = False
-        st.rerun()
-
-    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True,  key=f"post_sum_{suffix}")
-    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT",  value=False, key=f"post_doc_{suffix}")
-    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)",   value=False, key=f"post_slack_{suffix}")
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{suffix}")
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{suffix}")
 
     if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
         selected = [do_sum, do_doc, do_slack]
@@ -2702,23 +2700,28 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
 
         progress = st.progress(0.0)
         done = 0
+
+        # Estado previo (por si ya hubo un resumen en otra ejecución)
         summary_text = (
             st.session_state.get("last_summary_text")
             or st.session_state.get("gemini_last_text")
             or ""
         )
 
+        # Si el usuario no tildó Resumen pero sí Doc y todavía no hay resumen,
+        # agregamos un paso extra implícito para el progreso.
         extra_steps = 1 if (do_doc and not do_sum and not summary_text) else 0
         total_steps = total + extra_steps
 
+        # 1) Resumen IA (si está seleccionado o si hace falta para crear el Doc)
         need_summary = do_sum or (do_doc and not summary_text)
         if need_summary:
             with st.spinner("Generando resumen con Nomadic BOT…"):
                 try:
                     txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
-                    if txt:
-                        summary_text = txt
-                        st.session_state["last_summary_text"] = txt
+                    if txt.strip():
+                        summary_text = txt.strip()
+                        st.session_state["last_summary_text"] = summary_text
                         st.success("Resumen IA generado ✅")
                     else:
                         st.warning("No se obtuvo texto de resumen (vacío).")
@@ -2727,20 +2730,22 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             done += 1
             progress.progress(done / max(total_steps, 1))
 
+        # 2) Documento de texto (usa el resumen disponible/generado recién)
         doc_url = None
         if do_doc:
             if not summary_text:
-                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA**.")
+                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
             else:
                 creds_dest_dict = st.session_state.get("creds_dest") or {}
                 scopes_have = set(creds_dest_dict.get("scopes") or [])
                 if not has_docs_scope(scopes_have):
-                    st.error("Tu sesión NO tiene permisos de Google Docs.")
+                    st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
                 else:
                     try:
                         creds_personal = Credentials(**creds_dest_dict)
                         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                        content = summary_text.strip() + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
+                        content = (summary_text if summary_text else "(Resumen no disponible)") \
+                                  + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
                         title_guess = f"Análisis {kind or ''}".strip() or "Análisis"
                         with st.spinner("Creando Google Doc…"):
                             doc_id = create_doc_from_template_with_content(
@@ -2756,6 +2761,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             done += 1
             progress.progress(done / max(total_steps, 1))
 
+        # 3) Mensaje para Slack (placeholder)
         if do_slack:
             with st.spinner("Preparando mensaje para Slack…"):
                 sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
@@ -2779,6 +2785,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         st.markdown(f"• **Google Sheets** → https://docs.google.com/spreadsheets/d/{sheet_id}")
         if doc_url:
             st.markdown(f"• **Google Doc** → {doc_url}")
+
 
 # --- Acciones posteriores (mostrar solo tras ejecutar un análisis) ---
 if (
