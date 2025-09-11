@@ -2902,7 +2902,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             st.markdown(f"• **Google Doc** → {doc_url}")
 
 
-# --- Panel persistente unificado ---
+# --- Acciones posteriores (unificadas) ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     show_post_run_actions(
         gs_client=gs_client,
@@ -2911,9 +2911,12 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
         site_url=st.session_state.get("site_url_choice")
     )
 
+# --- Debug info (opcional) ---
 if st.session_state.get("DEBUG"):
     st.write(
         "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets or ("gemini" in st.secrets and "api_key" in st.secrets.get('gemini', {}))
+        "GEMINI_API_KEY" in st.secrets or (
+            "gemini" in st.secrets and "api_key" in st.secrets.get("gemini", {})
+        )
     )
 
