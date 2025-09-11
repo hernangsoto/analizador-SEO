@@ -212,3 +212,20 @@ def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None 
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
         return md
+        
+def gemini_summary_text(gs_client, sid: str, kind: str) -> str:
+    """Devuelve solo el texto del resumen (sin UI)."""
+    prompt_key = kind
+    prompt_used = None
+
+    if _SUMMARIZE_WITH_PROMPT and _PROMPTS and (prompt_key in _PROMPTS):
+        prompt_used = _PROMPTS[prompt_key]
+
+    try:
+        if _SUMMARIZE_WITH_PROMPT and prompt_used:
+            return _SUMMARIZE_WITH_PROMPT(gs_client, sid, kind=prompt_key, prompt=prompt_used) or ""
+        else:
+            return summarize_sheet_auto(gs_client, sid, kind=kind) or ""
+    except Exception:
+        return summarize_sheet_auto(gs_client, sid, kind=kind) or ""
+
