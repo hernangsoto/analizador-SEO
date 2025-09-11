@@ -11,8 +11,8 @@ import asyncio
 from types import SimpleNamespace
 from datetime import date, timedelta
 
-import pandas as pd
-import streamlit as st
+pandas as pd
+streamlit as st
 from google.oauth2.credentials import Credentials
 
 # ====== Config base ======
@@ -33,35 +33,45 @@ for _name in [
         pass
 
 # ====== UI / Branding ======
-from modules.ui import apply_page_style, get_user, sidebar_user_info, login_screen
+from modules.ui apply_page_style, get_user, sidebar_user_info, login_screen
+
+# ====== Documento de texto ======
+from modules.doc_export import (
+    create_doc_with_prompt,
+    create_doc_from_template_with_content,
+    PROMPT_BRANDING_NOMADIC,
+)
 
 # ====== Carga de módulos locales ======
-from modules.app_config import apply_base_style_and_logo, get_app_home
-from modules.app_ext import USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis, run_discover_snoop, run_content_analysis
-from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm, has_ga4_scope
-from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
-from modules.app_params import (
+from modules.app_config apply_base_style_and_logo, get_app_home
+from modules.app_ext USING_EXT, run_core_update, run_evergreen, run_traffic_audit, run_names_analysis, run_discover_snoop, run_content_analysis
+from modules.app_utils get_qp, clear_qp, has_gsc_scope, norm, has_ga4_scope
+def has_docs_scope(scopes: set[str] | list[str] | tuple[str, ...] | None) -> bool:
+    return "https://www.googleapis.com/auth/documents" in set(scopes or [])
+
+from modules.app_ai load_prompts, gemini_healthcheck, gemini_summary
+from modules.app_params (
     params_for_core_update, params_for_evergreen, params_for_auditoria, params_for_names,
 )
 try:
-    from modules.app_params import params_for_discover_snoop
+    from modules.app_params params_for_discover_snoop
 except Exception:
     params_for_discover_snoop = lambda: {}
 try:
-    from modules.app_params import params_for_content
+    from modules.app_params params_for_content
 except Exception:
     params_for_content = None
 try:
     # AÑADIDO: importar también el runner de GA4 audiencia si existe
-    from modules.app_ext import run_sections_analysis, run_ga4_audience_report
+    from modules.app_ext run_sections_analysis, run_ga4_audience_report
 except Exception:
     try:
-        from modules.app_ext import run_sections_analysis
+        from modules.app_ext run_sections_analysis
     except Exception:
         run_sections_analysis = None
     run_ga4_audience_report = None
 
-from modules.app_activity import maybe_prefix_sheet_name_with_medio, activity_log_append
+from modules.app_activity maybe_prefix_sheet_name_with_medio, activity_log_append
 from modules.app_errors import run_with_indicator
 from modules.app_auth_flow import step0_google_identity, logout_screen
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context  # (disponible si está en el repo)
@@ -2657,17 +2667,103 @@ else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
 
 # --- Panel persistente de resumen (una sola vez) ---
+# --- Panel persistente de resumen (una sola vez) ---
 if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
     st.divider()
     st.subheader("📄 Resumen del análisis")
     st.caption("Podés generar o regenerar el resumen sin volver a ejecutar el análisis.")
-    gemini_summary(
+
+    # Capturamos el texto del resumen (si la función no retorna texto, intentamos session_state)
+    summary_text = gemini_summary(
         gs_client,
         st.session_state["last_file_id"],
         kind=st.session_state["last_file_kind"],
         force_prompt_key="core" if st.session_state["last_file_kind"] == "core" else None,
         widget_suffix="panel"
     )
+    if not summary_text:
+        # Fallbacks habituales si gemini_summary almacena en session_state
+        summary_text = (
+            st.session_state.get("gemini_last_text")
+            or st.session_state.get("last_summary_text")
+            or st.session_state.get("summary_text")
+        )
+
+    # === Exportar a Google Docs (opcional) ===
+    with st.expander("✍️ Exportar a Google Docs (opcional)", expanded=False):
+        # Verificación de permisos (scope de Docs en la sesión personal del Paso 0)
+        creds_dest_dict = st.session_state.get("creds_dest") or {}
+        scopes_have = set(creds_dest_dict.get("scopes") or [])
+        if not has_docs_scope(scopes_have):
+            st.warning(
+                "Tu sesión actual no tiene permisos de **Google Docs**. "
+                "Volvé a realizar el Paso 0 solicitando también el scope de Docs "
+                "(`https://www.googleapis.com/auth/documents`)."
+            )
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                want_prompt_doc = st.checkbox("Generar Doc con el prompt corporativo (Nomadic)", value=False, key="want_prompt_doc_final")
+                prompt_doc_title = st.text_input(
+                    "Título del Doc (prompt)",
+                    value="Nomadic - Instrucciones de formateo corporativo",
+                    key="prompt_doc_title_final"
+                )
+            with c2:
+                want_corp_doc = st.checkbox("Generar Doc corporativo con el ANÁLISIS (template)", value=False, key="want_corp_doc_final")
+                corp_doc_title = st.text_input(
+                    "Título del Doc (análisis)",
+                    value="Análisis de Core Update - Nomadic",
+                    key="corp_doc_title_final"
+                )
+
+            disabled_export = (not want_prompt_doc and not want_corp_doc)
+            if st.button("Crear Google Docs seleccionados", type="primary", disabled=disabled_export, key="btn_docs_export"):
+                from google.oauth2.credentials import Credentials
+                try:
+                    creds_personal = Credentials(**creds_dest_dict)
+                except Exception as e:
+                    st.error(f"No pude reconstruir credenciales personales: {e}")
+                    st.stop()
+
+                dest_folder_id = st.session_state.get("dest_folder_id")
+                made_any = False
+
+                # 1) Doc con PROMPT corporativo (brief)
+                if want_prompt_doc:
+                    try:
+                        doc_id_prompt = create_doc_with_prompt(
+                            credentials=creds_personal,
+                            title=prompt_doc_title.strip() or "Nomadic - Instrucciones de formateo corporativo",
+                            prompt_text=PROMPT_BRANDING_NOMADIC,
+                            dest_folder_id=dest_folder_id
+                        )
+                        st.success("Google Doc (prompt) creado ✅")
+                        st.link_button("Abrir Google Doc (prompt)", f"https://docs.google.com/document/d/{doc_id_prompt}/edit")
+                        made_any = True
+                    except Exception as e:
+                        st.error(f"Falló la creación del Doc (prompt): {e}")
+
+                # 2) Doc corporativo con el ANÁLISIS (usa template)
+                if want_corp_doc:
+                    if not summary_text:
+                        st.warning("Generá el **resumen IA** primero (arriba) para poder crear el Doc corporativo con el análisis.")
+                    else:
+                        try:
+                            doc_id_corp = create_doc_from_template_with_content(
+                                credentials=creds_personal,
+                                title=corp_doc_title.strip() or "Análisis - Nomadic",
+                                analysis_text=summary_text,
+                                dest_folder_id=dest_folder_id
+                            )
+                            st.success("Google Doc corporativo (análisis) creado ✅")
+                            st.link_button("Abrir Google Doc (análisis)", f"https://docs.google.com/document/d/{doc_id_corp}/edit")
+                            made_any = True
+                        except Exception as e:
+                            st.error(f"Falló la creación del Doc corporativo (análisis): {e}")
+
+                if not made_any:
+                    st.info("No se creó ningún documento.")
 
 if st.session_state.get("DEBUG"):
     st.write(
