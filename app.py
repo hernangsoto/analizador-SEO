@@ -2731,7 +2731,6 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         if need_summary:
             with st.spinner("Generando resumen con Nomadic BOT…"):
                 try:
-                    from modules.app_ai import gemini_summary_text
                     txt = gemini_summary_text(gs_client, sheet_id, kind=kind) or ""
                     if txt.strip():
                         summary_text = txt.strip()
@@ -2799,6 +2798,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         st.markdown(f"• **Google Sheets** → https://docs.google.com/spreadsheets/d/{sheet_id}")
         if doc_url:
             st.markdown(f"• **Google Doc** → {doc_url}")
+
 
 
 
