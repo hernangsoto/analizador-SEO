@@ -148,9 +148,7 @@ def render_prompt_probe(kind: str, force_key: str | None = None):
 
 
 def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None = None, widget_suffix: str = "main"):
-    """Genera un resumen IA directamente (sin toggle UI).
-    Devuelve el texto generado o "" si falla.
-    """
+    """Genera un resumen IA con UI y devuelve texto."""
     if _AI_IMPORT_ERR:
         st.warning("No pude cargar prompts de ai_summaries; usaré fallback automático.")
     elif _AI_SRC != "none":
@@ -212,7 +210,8 @@ def gemini_summary(gs_client, sid: str, kind: str, force_prompt_key: str | None 
         st.caption("🧠 Prompt en uso: **fallback:auto**")
         render_summary_box(md)
         return md
-        
+
+
 def gemini_summary_text(gs_client, sid: str, kind: str) -> str:
     """Devuelve solo el texto del resumen (sin UI)."""
     prompt_key = kind
@@ -228,4 +227,3 @@ def gemini_summary_text(gs_client, sid: str, kind: str) -> str:
             return summarize_sheet_auto(gs_client, sid, kind=kind) or ""
     except Exception:
         return summarize_sheet_auto(gs_client, sid, kind=kind) or ""
-
