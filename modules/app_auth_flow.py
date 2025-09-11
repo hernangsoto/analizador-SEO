@@ -9,6 +9,10 @@ from google_auth_oauthlib.flow import Flow
 # Guardado cross-pestaña
 from .utils import token_store
 
+# --- arriba, junto a los imports/constantes ---
+
+DOCS_SCOPE = "https://www.googleapis.com/auth/documents"
+
 # Scopes para Paso 0 (OIDC + Drive/Sheets + GSC)
 SCOPES_PERSONAL_FULL = [
     "openid", "email", "profile",
@@ -16,7 +20,21 @@ SCOPES_PERSONAL_FULL = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/analytics.readonly",
+    DOCS_SCOPE,  # ⬅️ AÑADIDO
 ]
+
+def _get_scopes_for_step0() -> list[str]:
+    """Permite sobreescribir scopes desde secrets; si no hay, usa los por defecto."""
+    cfg = (st.secrets.get("auth") or {})
+    custom = cfg.get("scopes") or []
+    scopes = custom if custom else SCOPES_PERSONAL_FULL
+    # dedup conservando orden
+    seen, out = set(), []
+    for s in scopes:
+        if s not in seen:
+            out.append(s); seen.add(s)
+    return out
+
 
 # ---- helpers de query params
 def _get_qp() -> dict:
@@ -58,13 +76,15 @@ def _build_flow_web(scopes: list[str]) -> Flow:
 
 def _creds_to_dict_web(creds) -> dict:
     cid, csec, _ = _get_web_oauth_config()
+    asked_scopes = _get_scopes_for_step0()
+    got_scopes = list(getattr(creds, "scopes", []) or asked_scopes)
     return {
         "token": creds.token,
         "refresh_token": getattr(creds, "refresh_token", None),
         "token_uri": getattr(creds, "token_uri", "https://oauth2.googleapis.com/token"),
         "client_id": cid,
         "client_secret": csec,
-        "scopes": list(getattr(creds, "scopes", SCOPES_PERSONAL_FULL)),
+        "scopes": got_scopes,
     }
 
 def _fetch_userinfo(creds) -> Dict[str, str]:
@@ -99,18 +119,20 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
         return None
 
     # Construir una sola vez la URL de autorización
-    if "oauth_oidc" not in st.session_state:
-        flow = _build_flow_web(SCOPES_PERSONAL_FULL)
-        auth_url, state = flow.authorization_url(
-            prompt="consent select_account",
-            access_type="offline",
-        )
-        st.session_state["oauth_oidc"] = {
-            "flow": flow,
-            "auth_url": auth_url,
-            "state": state,
-            "redirect_uri": ruri,
-        }
+if "oauth_oidc" not in st.session_state:
+    flow = _build_flow_web(_get_scopes_for_step0())
+    auth_url, state = flow.authorization_url(
+        prompt="consent select_account",
+        access_type="offline",
+        include_granted_scopes=True,  # ⬅️ permite pedir scopes incrementales
+    )
+    st.session_state["oauth_oidc"] = {
+        "flow": flow,
+        "auth_url": auth_url,
+        "state": state,
+        "redirect_uri": ruri,
+    }
+
 
     oo = st.session_state["oauth_oidc"]
 
