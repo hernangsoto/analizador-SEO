@@ -2857,29 +2857,30 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         # 2) Documento de texto
         doc_url = None
         if do_doc:
-            creds_dest_dict = st.session_state.get("creds_dest") or {}
-            scopes_have = set(creds_dest_dict.get("scopes") or [])
-            if not has_docs_scope(scopes_have):
-                st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
+            if not summary_text:
+                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
             else:
-                try:
-                    creds_personal = Credentials(**creds_dest_dict)
-                    sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                    if not summary_text:
-                        summary_text = "Resumen pendiente de generar.\n"
-                    content = summary_text.strip() + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
-                    title_guess = f"Análisis {kind or ''}".strip() or "Análisis"
-                    with st.spinner("Creando Google Doc…"):
-                        doc_id = create_doc_from_template_with_content(
-                            credentials=creds_personal,
-                            title=title_guess,
-                            analysis_text=content,
-                            dest_folder_id=st.session_state.get("dest_folder_id")
-                        )
-                        doc_url = f"https://docs.google.com/document/d/{doc_id}"
-                        st.success("Documento de texto creado ✅")
-                except Exception as e:
-                    st.error(f"Falló la creación del Doc: {e}")
+                creds_dest_dict = st.session_state.get("creds_dest") or {}
+                scopes_have = set(creds_dest_dict.get("scopes") or [])
+                if not has_docs_scope(scopes_have):
+                    st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
+                else:
+                    try:
+                        creds_personal = Credentials(**creds_dest_dict)
+                        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                        content = summary_text.strip() + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
+                        title_guess = f"Análisis {kind or ''}".strip() or "Análisis"
+                        with st.spinner("Creando Google Doc…"):
+                            doc_id = create_doc_from_template_with_content(
+                                credentials=creds_personal,
+                                title=title_guess,
+                                analysis_text=content,
+                                dest_folder_id=st.session_state.get("dest_folder_id")
+                            )
+                            doc_url = f"https://docs.google.com/document/d/{doc_id}"
+                            st.success("Documento de texto creado ✅")
+                    except Exception as e:
+                        st.error(f"Falló la creación del Doc: {e}")
             done += 1; progress.progress(done/max(total,1))
 
         # 3) Slack (placeholder)
