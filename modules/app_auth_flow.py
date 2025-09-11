@@ -121,8 +121,9 @@ def step0_google_identity() -> Optional[Dict[str, str]]:
         auth_url, state = flow.authorization_url(
             prompt="consent select_account",
             access_type="offline",
-            include_granted_scopes=True,  # ⬅️ permite pedir scopes incrementales
+            include_granted_scopes="true",  # <- cadena en minúsculas
         )
+
         st.session_state["oauth_oidc"] = {
             "flow": flow,
             "auth_url": auth_url,
