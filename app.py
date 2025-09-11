@@ -21,7 +21,7 @@ try:
 except Exception:
     pass
 
-# ---- Shims de compatibilidad (por si estos módulos están fuera)
+# ---- Shims de compatibilidad
 for _name in [
     "app_constants","app_config","app_ext","app_utils","app_params",
     "app_errors","app_activity","app_auth_flow","app_diagnostics","app_ai",
@@ -42,9 +42,8 @@ from modules.doc_export import (
     PROMPT_BRANDING_NOMADIC,
 )
 
-# ====== Carga de módulos locales ======
+# ====== Carga de módulos ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
-
 from modules.app_ext import (
     USING_EXT,
     run_core_update,
@@ -54,33 +53,27 @@ from modules.app_ext import (
     run_discover_snoop,
     run_content_analysis,
 )
-
 from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm, has_ga4_scope
 
 def has_docs_scope(scopes: set[str] | list[str] | tuple[str, ...] | None) -> bool:
     return "https://www.googleapis.com/auth/documents" in set(scopes or [])
 
 from modules.app_ai import load_prompts, gemini_healthcheck, gemini_summary
-
 from modules.app_params import (
     params_for_core_update,
     params_for_evergreen,
     params_for_auditoria,
     params_for_names,
 )
-
-# Opcionales con fallback limpio
 try:
     from modules.app_params import params_for_discover_snoop
 except Exception:
     params_for_discover_snoop = lambda: {}
-
 try:
     from modules.app_params import params_for_content
 except Exception:
     params_for_content = None
 
-# Runners opcionales (repo externo)
 try:
     from modules.app_ext import run_sections_analysis, run_ga4_audience_report
 except Exception:
@@ -104,7 +97,6 @@ except Exception as e:
 
 from modules.app_diagnostics import scan_repo_for_gsc_and_filters, read_context
 from modules.utils import token_store
-
 from modules.drive import ensure_drive_clients, get_google_identity, pick_destination, share_controls
 from modules.gsc import ensure_sc_client
 
@@ -121,38 +113,18 @@ try:
 except Exception:
     class PermissionDenied(Exception): pass
 
-# ====== Estilo / branding ======
+# ====== Estilo ======
 apply_base_style_and_logo()
 try:
     apply_page_style()
 except Exception:
     pass
 
-# ⬇️ Sin espacios arriba + CSS
-st.markdown("""
-<style>
-#nmd-band, .nmd-band, [data-nmd="band"], [id*="band"], [class*="band"] {
-  display: none !important; height:0 !important; margin:0 !important; padding:0 !important;
-}
-div[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
-main .block-container { margin-top: 0 !important; padding-top: .75rem !important; }
-header[data-testid="stHeader"] { z-index: 1500 !important; }
-/* Sidebar abierto */
-:root:has([data-testid="stSidebar"][aria-expanded="true"])
-  header[data-testid="stHeader"]::before { left: 350px !important; }
-/* Sidebar cerrado */
-:root:has([data-testid="stSidebar"][aria-expanded="false"])
-  header[data-testid="stHeader"]::before { left: 100px !important; }
-/* Fallback */
-:root:not(:has([data-testid="stSidebar"])) header[data-testid="stHeader"]::before { left: 16px !important; }
-.success-inline {
-  background:#e7f6ee;border:1px solid #c5ead7;color:#174d2a;border-radius:8px;
-  padding:8px 12px;margin:8px 0;font-size:0.95rem;
-}
-</style>
-""", unsafe_allow_html=True)
-
+st.markdown("""<style>header[data-testid="stHeader"] { z-index:1500 !important; }</style>""", unsafe_allow_html=True)
 st.title("Analizador SEO 🚀")
+
+# Flag global
+st.session_state.setdefault("post_actions_visible", False)
 
 # ---------- IA / Prompts ----------
 load_prompts()
@@ -160,7 +132,7 @@ if not st.session_state.get("DEBUG"):
     try:
         ok, _ = gemini_healthcheck()
         if not ok:
-            st.caption("💡 Podés cargar una API key de Gemini en Secrets (GEMINI_API_KEY o [gemini].api_key).")
+            st.caption("💡 Podés cargar una API key de Gemini en Secrets.")
     except Exception:
         pass
 
@@ -2698,19 +2670,21 @@ else:
     st.info("La opción 1 aún no esta disponible en esta versión.")
 
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
-    import uuid
-    import streamlit as st
     from google.oauth2.credentials import Credentials
 
     st.divider()
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
+    suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}"
 
-    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
-    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{suffix}")
-    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{suffix}")
+    if st.button("Ocultar Acciones posteriores", key=f"hide_post_{suffix}"):
+        st.session_state["post_actions_visible"] = False
+        st.rerun()
+
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True,  key=f"post_sum_{suffix}")
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT",  value=False, key=f"post_doc_{suffix}")
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)",   value=False, key=f"post_slack_{suffix}")
 
     if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
         selected = [do_sum, do_doc, do_slack]
@@ -2721,20 +2695,15 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
 
         progress = st.progress(0.0)
         done = 0
-
-        # Estado previo (por si ya hubo un resumen en otra ejecución)
         summary_text = (
             st.session_state.get("last_summary_text")
             or st.session_state.get("gemini_last_text")
             or ""
         )
 
-        # Si el usuario no tildó Resumen pero sí Doc y todavía no hay resumen,
-        # agregamos un paso extra implícito para el progreso.
         extra_steps = 1 if (do_doc and not do_sum and not summary_text) else 0
         total_steps = total + extra_steps
 
-        # 1) Resumen IA (si está seleccionado o si hace falta para crear el Doc)
         need_summary = do_sum or (do_doc and not summary_text)
         if need_summary:
             with st.spinner("Generando resumen con Nomadic BOT…"):
@@ -2751,16 +2720,15 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             done += 1
             progress.progress(done / max(total_steps, 1))
 
-        # 2) Documento de texto (usa el resumen disponible/generado recién)
         doc_url = None
         if do_doc:
             if not summary_text:
-                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
+                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA**.")
             else:
                 creds_dest_dict = st.session_state.get("creds_dest") or {}
                 scopes_have = set(creds_dest_dict.get("scopes") or [])
                 if not has_docs_scope(scopes_have):
-                    st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
+                    st.error("Tu sesión NO tiene permisos de Google Docs.")
                 else:
                     try:
                         creds_personal = Credentials(**creds_dest_dict)
@@ -2781,7 +2749,6 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             done += 1
             progress.progress(done / max(total_steps, 1))
 
-        # 3) Mensaje para Slack (placeholder)
         if do_slack:
             with st.spinner("Preparando mensaje para Slack…"):
                 sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
@@ -2806,9 +2773,12 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         if doc_url:
             st.markdown(f"• **Google Doc** → {doc_url}")
 
-
-# --- Acciones posteriores (unificadas) ---
-if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind"):
+# --- Acciones posteriores (mostrar solo tras ejecutar un análisis) ---
+if (
+    st.session_state.get("post_actions_visible") and
+    st.session_state.get("last_file_id") and
+    st.session_state.get("last_file_kind")
+):
     show_post_run_actions(
         gs_client=gs_client,
         sheet_id=st.session_state["last_file_id"],
@@ -2816,11 +2786,6 @@ if st.session_state.get("last_file_id") and st.session_state.get("last_file_kind
         site_url=st.session_state.get("site_url_choice")
     )
 
-# --- Debug info (opcional) ---
+# --- Debug info ---
 if st.session_state.get("DEBUG"):
-    st.write(
-        "¿Gemini listo?",
-        "GEMINI_API_KEY" in st.secrets or (
-            "gemini" in st.secrets and "api_key" in st.secrets.get("gemini", {})
-        )
-    )
+    st.write("¿Gemini listo?", "GEMINI_API_KEY" in st.secrets)
