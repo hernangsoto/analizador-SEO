@@ -1,4 +1,4 @@
-from __future__ import annotations
+frfrom __future__ import annotations
 
 # --- Permisos OAuth en localhost + tolerancia de scope
 import os
@@ -11,8 +11,8 @@ import asyncio
 from types import SimpleNamespace
 from datetime import date, timedelta
 
-pandas as pd
-streamlit as st
+import pandas as pd             # <-- Asegurate que tenga "import"
+import streamlit as st
 from google.oauth2.credentials import Credentials
 
 # ====== Config base ======
