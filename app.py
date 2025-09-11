@@ -2821,12 +2821,14 @@ else:
 
 # ===== Helper para acciones post-ejecución =====
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
+    import uuid
+
     st.divider()
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    # 🔑 Sufijo único por combinación de análisis + sheet_id
-    suffix = f"{kind}_{sheet_id}"
+    # 🔑 Sufijo único (kind + sheet_id + site_url + random corto)
+    suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
     do_sum = st.checkbox(
         "🤖 Resumen del análisis generado con Nomadic BOT",
@@ -2929,6 +2931,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         st.markdown(f"• **Google Sheets** → https://docs.google.com/spreadsheets/d/{sheet_id}")
         if doc_url:
             st.markdown(f"• **Google Doc** → {doc_url}")
+
 
 
 # --- Acciones posteriores (unificadas) ---
