@@ -2825,11 +2825,26 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{sheet_id}")
-    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{sheet_id}")
-    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{sheet_id}")
+    # 🔑 Sufijo único por combinación de análisis + sheet_id
+    suffix = f"{kind}_{sheet_id}"
 
-    if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{sheet_id}"):
+    do_sum = st.checkbox(
+        "🤖 Resumen del análisis generado con Nomadic BOT",
+        value=True,
+        key=f"post_sum_{suffix}"
+    )
+    do_doc = st.checkbox(
+        "🤖 Documento de texto basado en el análisis de Nomadic BOT",
+        value=False,
+        key=f"post_doc_{suffix}"
+    )
+    do_slack = st.checkbox(
+        "Resumen del análisis para enviar a Slack (A desarrollar)",
+        value=False,
+        key=f"post_slack_{suffix}"
+    )
+
+    if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
         selected = [do_sum, do_doc, do_slack]
         total = sum(1 for x in selected if x)
         if total == 0:
@@ -2843,7 +2858,7 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         if do_sum:
             with st.spinner("Generando resumen con Nomadic BOT…"):
                 try:
-                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix="post") or ""
+                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
                     if txt:
                         summary_text = txt
                         st.session_state["last_summary_text"] = txt
@@ -2853,6 +2868,14 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                 except Exception as e:
                     st.error(f"Falló el resumen IA: {e}")
             done += 1; progress.progress(done/max(total,1))
+
+        # 🔄 Releer resumen después de generar (por si lo necesitamos en Doc o Slack)
+        if not summary_text:
+            summary_text = (
+                st.session_state.get("last_summary_text")
+                or st.session_state.get("gemini_last_text")
+                or ""
+            )
 
         # 2) Documento de texto
         doc_url = None
@@ -2892,7 +2915,12 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                     head += f" — `{site_url}`"
                 body = (summary_text or "Resumen pendiente de generar.").strip()
                 msg = f"{head}\n{sheet_url}\n\n{body}"
-                st.text_area("Mensaje para Slack (copiá y pegá en tu canal)", value=msg, height=220, key=f"slack_msg_{sheet_id}")
+                st.text_area(
+                    "Mensaje para Slack (copiá y pegá en tu canal)",
+                    value=msg,
+                    height=220,
+                    key=f"slack_msg_{suffix}"
+                )
                 st.success("Mensaje listo ✅")
             done += 1; progress.progress(done/max(total,1))
 
