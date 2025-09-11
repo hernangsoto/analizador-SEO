@@ -2731,7 +2731,8 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
         if need_summary:
             with st.spinner("Generando resumen con Nomadic BOT…"):
                 try:
-                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
+                    from modules.app_ai import gemini_summary_text
+                    txt = gemini_summary_text(gs_client, sheet_id, kind=kind) or ""
                     if txt.strip():
                         summary_text = txt.strip()
                         st.session_state["last_summary_text"] = summary_text
