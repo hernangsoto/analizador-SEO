@@ -2749,71 +2749,65 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
             steps_done += 1
             progress.progress(steps_done / max(1, total_steps))
 
-        # 2) Documento de texto (requiere permisos de Docs + resumen disponible)
-        doc_url = None
-        if do_doc:
-            if not summary_text:
-                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
-            else:
-                creds_dest_dict = st.session_state.get("creds_dest") or {}
-                scopes_have = set(creds_dest_dict.get("scopes") or [])
-                if "https://www.googleapis.com/auth/documents" not in scopes_have:
-                    st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
-                else:
-                    try:
-                        # imports declarados al inicio del archivo principal:
-                        # from modules.doc_export import create_doc_from_template_with_content
-                        creds_personal = Credentials(**creds_dest_dict)
-                        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                        content = summary_text + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
-                        # --- Título: "Medio - Nombre de análisis - AAAA-MM-DD"
-from urllib.parse import urlparse
-from datetime import date
+        # 2) Documento de texto (usa el resumen disponible/generado recién)
+doc_url = None
+if do_doc:
+    if not summary_text:
+        st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
+    else:
+        creds_dest_dict = st.session_state.get("creds_dest") or {}
+        scopes_have = set(creds_dest_dict.get("scopes") or [])
+        if not has_docs_scope(scopes_have):
+            st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
+        else:
+            try:
+                creds_personal = Credentials(**creds_dest_dict)
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
 
-def _pretty_medium_name(site_url: str | None) -> str:
-    if not site_url:
-        return "Documento"
-    try:
-        netloc = urlparse(site_url).netloc or site_url
-        netloc = netloc.lower().replace("http://", "").replace("https://", "")
-        netloc = netloc.replace("www.", "").strip("/")
-        return netloc or "Documento"
-    except Exception:
-        return (site_url or "Documento")
+                # ---- Título: "Medio - Nombre de análisis - AAAA-MM-DD" (sin imports adicionales)
+                def _pretty_medium_name(u: str | None) -> str:
+                    if not u:
+                        return "Documento"
+                    v = str(u).replace("https://", "").replace("http://", "")
+                    if v.startswith("www."):
+                        v = v[4:]
+                    v = v.split("/")[0].strip()
+                    return v or "Documento"
 
-def _analysis_pretty(kind: str | None) -> str:
-    m = {
-        "core": "Core Update",
-        "audit": "Auditoría de tráfico",
-        "evergreen": "Evergreen",
-        "sections": "Análisis de secciones",
-        "report_results": "Reporte de resultados",
-        "ga4_audience": "GA4 Audiencia",
-        "content_structure": "Estructura de contenidos",
-        "discover": "Discover Snoop",
-        "names": "Análisis de Nombres",
-    }
-    k = (kind or "").strip().lower()
-    return m.get(k, f"Análisis {kind or ''}".strip() or "Análisis")
+                def _analysis_pretty(k: str | None) -> str:
+                    mapping = {
+                        "core": "Core Update",
+                        "audit": "Auditoría de tráfico",
+                        "evergreen": "Evergreen",
+                        "sections": "Análisis de secciones",
+                        "report_results": "Reporte de resultados",
+                        "ga4_audience": "GA4 Audiencia",
+                        "content_structure": "Estructura de contenidos",
+                        "discover": "Discover Snoop",
+                        "names": "Análisis de Nombres",
+                    }
+                    kk = (k or "").strip().lower()
+                    return mapping.get(kk, f"Análisis {k or ''}".strip() or "Análisis")
 
-medio_name = _pretty_medium_name(site_url)
-analysis_name = _analysis_pretty(kind)
-today_str = date.today().strftime("%Y-%m-%d")
-title_guess = f"{medio_name} - {analysis_name} - {today_str}"
+                medio_name = _pretty_medium_name(site_url)
+                analysis_name = _analysis_pretty(kind)
+                # 'date' ya está importado arriba en el archivo
+                title_guess = f"{medio_name} - {analysis_name} - {date.today():%Y-%m-%d}"
 
-                        with st.spinner("Creando Google Doc…"):
-                            doc_id = create_doc_from_template_with_content(
-                                credentials=creds_personal,
-                                title=title_guess,
-                                analysis_text=content,
-                                dest_folder_id=st.session_state.get("dest_folder_id")
-                            )
-                            doc_url = f"https://docs.google.com/document/d/{doc_id}"
-                            st.success("Documento de texto creado ✅")
-                    except Exception as e:
-                        st.error(f"Falló la creación del Doc: {e}")
-            steps_done += 1
-            progress.progress(steps_done / max(1, total_steps))
+                content = (summary_text if summary_text else "(Resumen no disponible)") \
+                          + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
+
+                with st.spinner("Creando Google Doc…"):
+                    doc_id = create_doc_from_template_with_content(
+                        credentials=creds_personal,
+                        title=title_guess,
+                        analysis_text=content,
+                        dest_folder_id=st.session_state.get("dest_folder_id")
+                    )
+                    doc_url = f"https://docs.google.com/document/d/{doc_id}"
+                    st.success("Documento de texto creado ✅")
+            except Exception as e:
+                st.error(f"Falló la creación del Doc: {e}")
 
         # 3) Mensaje para Slack (placeholder)
         if do_slack:
