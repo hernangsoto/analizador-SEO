@@ -2687,51 +2687,29 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
 
     suffix = f"{kind}_{sheet_id}_{(site_url or 'global').replace('https://','').replace('http://','').replace('/','_')}_{uuid.uuid4().hex[:6]}"
 
-    # Checkboxes con valores persistentes en session_state
-    do_sum = st.checkbox(
-        "🤖 Resumen del análisis generado con Nomadic BOT",
-        value=st.session_state.get(f"post_sum_{suffix}", True),
-        key=f"post_sum_{suffix}"
-    )
-    do_doc = st.checkbox(
-        "🤖 Documento de texto basado en el análisis de Nomadic BOT",
-        value=st.session_state.get(f"post_doc_{suffix}", False),
-        key=f"post_doc_{suffix}"
-    )
-    do_slack = st.checkbox(
-        "Resumen del análisis para enviar a Slack (A desarrollar)",
-        value=st.session_state.get(f"post_slack_{suffix}", False),
-        key=f"post_slack_{suffix}"
-    )
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT", value=True, key=f"post_sum_{suffix}")
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT", value=False, key=f"post_doc_{suffix}")
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)", value=False, key=f"post_slack_{suffix}")
 
     if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
+        from modules.app_ai import gemini_summary_text
+
         selected = [do_sum, do_doc, do_slack]
-        total = sum(1 for x in selected if x)
-        if total == 0:
+        if not any(selected):
             st.info("Seleccioná al menos una acción.")
             return
 
         progress = st.progress(0.0)
         done = 0
 
-        # Estado previo (por si ya hubo un resumen en otra ejecución)
-        summary_text = (
-            st.session_state.get("last_summary_text")
-            or st.session_state.get("gemini_last_text")
-            or ""
-        )
+        # Estado previo
+        summary_text = st.session_state.get("last_summary_text", "")
 
-        # Si el usuario no tildó Resumen pero sí Doc y todavía no hay resumen,
-        # agregamos un paso extra implícito para el progreso.
-        extra_steps = 1 if (do_doc and not do_sum and not summary_text) else 0
-        total_steps = total + extra_steps
-
-        # 1) Resumen IA (si está seleccionado o si hace falta para crear el Doc)
-        need_summary = do_sum or (do_doc and not summary_text)
-        if need_summary:
-            with st.spinner("Generando resumen con Nomadic BOT…"):
+        # 1) Generar resumen si corresponde
+        if do_sum or (do_doc and not summary_text):
+            with st.spinner("🤖 Nomadic BOT está generando el resumen…"):
                 try:
-                    txt = gemini_summary_text(gs_client, sheet_id, kind=kind) or ""
+                    txt = gemini_summary_text(gs_client, sheet_id, kind) or ""
                     if txt.strip():
                         summary_text = txt.strip()
                         st.session_state["last_summary_text"] = summary_text
@@ -2741,13 +2719,13 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                 except Exception as e:
                     st.error(f"Falló el resumen IA: {e}")
             done += 1
-            progress.progress(done / max(total_steps, 1))
+            progress.progress(done / max(1, sum(selected)))
 
-        # 2) Documento de texto (usa el resumen disponible/generado recién)
+        # 2) Documento de texto
         doc_url = None
         if do_doc:
             if not summary_text:
-                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
+                st.warning("⚠️ No hay un resumen disponible. Primero generá el Resumen IA para poder crear el Doc.")
             else:
                 creds_dest_dict = st.session_state.get("creds_dest") or {}
                 scopes_have = set(creds_dest_dict.get("scopes") or [])
@@ -2757,9 +2735,8 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                     try:
                         creds_personal = Credentials(**creds_dest_dict)
                         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                        content = (summary_text if summary_text else "(Resumen no disponible)") \
-                                  + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
-                        title_guess = f"Análisis {kind or ''}".strip() or "Análisis"
+                        content = summary_text + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
+                        title_guess = f"Análisis {kind}".strip() or "Análisis"
                         with st.spinner("Creando Google Doc…"):
                             doc_id = create_doc_from_template_with_content(
                                 credentials=creds_personal,
@@ -2772,26 +2749,20 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                     except Exception as e:
                         st.error(f"Falló la creación del Doc: {e}")
             done += 1
-            progress.progress(done / max(total_steps, 1))
+            progress.progress(done / max(1, sum(selected)))
 
-        # 3) Mensaje para Slack (placeholder)
+        # 3) Slack
         if do_slack:
-            with st.spinner("Preparando mensaje para Slack…"):
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                head = f"*{kind or 'Análisis'}*"
-                if site_url:
-                    head += f" — `{site_url}`"
-                body = (summary_text or "Resumen pendiente de generar.").strip()
-                msg = f"{head}\n{sheet_url}\n\n{body}"
-                st.text_area(
-                    "Mensaje para Slack (copiá y pegá en tu canal)",
-                    value=msg,
-                    height=220,
-                    key=f"slack_msg_{suffix}"
-                )
-                st.success("Mensaje listo ✅")
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            head = f"*{kind or 'Análisis'}*"
+            if site_url:
+                head += f" — `{site_url}`"
+            body = (summary_text or "Resumen pendiente de generar.")
+            msg = f"{head}\n{sheet_url}\n\n{body}"
+            st.text_area("Mensaje para Slack (copiá y pegá en tu canal)", value=msg, height=220, key=f"slack_msg_{suffix}")
+            st.success("Mensaje listo ✅")
             done += 1
-            progress.progress(done / max(total_steps, 1))
+            progress.progress(done / max(1, sum(selected)))
 
         progress.empty()
         st.markdown("### Enlaces")
