@@ -1,156 +1,119 @@
 # modules/doc_export.py
 from __future__ import annotations
-
 import os
-from typing import Optional, Tuple
-import streamlit as st
+import uuid
+import datetime as _dt
+from googleapiclient.discovery import build
 
-# Branding opcional que se antepone al contenido del documento
-PROMPT_BRANDING_NOMADIC = "📝 Resumen generado con Nomadic BOT"
-
-# ---------------- Helpers internos ----------------
-def _get_services(credentials):
-    """Devuelve clients de Drive y Docs usando las credenciales dadas."""
-    from googleapiclient.discovery import build
-    drive = build("drive", "v3", credentials=credentials)
-    docs = build("docs", "v1", credentials=credentials)
-    return drive, docs
-
-def _get_placeholder_token() -> str:
+def _get_template_id():
+    tid = os.environ.get("DOC_TEMPLATE_ID")
     try:
-        val = (st.secrets.get("docs", {}) or {}).get("placeholder")
-        if val:
-            return str(val)
+        import streamlit as st  # opcional: si estás en Streamlit
+        tid = tid or (st.secrets.get("docs", {}).get("template_id"))
     except Exception:
         pass
-    return os.environ.get("DOC_TEMPLATE_PLACEHOLDER", "{{CONTENT}}")
+    if not tid:
+        raise RuntimeError("Falta template_id: define DOC_TEMPLATE_ID o secrets['docs']['template_id'].")
+    return tid
 
-def _copy_or_create_doc(credentials, title: str, dest_folder_id: Optional[str]) -> Tuple[str, bool]:
-    """
-    Copia template si existe (secrets['docs']['template_id'] o env DOC_TEMPLATE_ID),
-    si no, crea un Doc vacío.
-    Devuelve (documentId, used_template: bool).
-    """
-    drive, docs = _get_services(credentials)
-    # Buscar template
-    template_id = None
-    try:
-        template_id = (st.secrets.get("docs", {}) or {}).get("template_id")
-    except Exception:
-        template_id = None
-    if not template_id:
-        template_id = os.environ.get("DOC_TEMPLATE_ID")
-
-    if template_id:
-        body = {"name": title}
-        if dest_folder_id:
-            body["parents"] = [dest_folder_id]
-        newfile = drive.files().copy(fileId=template_id, body=body, fields="id").execute()
-        return newfile["id"], True
-
-    # Crear documento vacío
-    created = docs.documents().create(body={"title": title}).execute()
-    doc_id = created["documentId"]
-
-    # Mover a carpeta destino (opcional)
-    if dest_folder_id:
-        try:
-            drive.files().update(fileId=doc_id, addParents=dest_folder_id, fields="id,parents").execute()
-        except Exception:
-            pass
-    return doc_id, False
-
-def _insert_text_at_start(credentials, doc_id: str, text: str) -> None:
-    """Inserta texto al comienzo del body (index=1)."""
-    from googleapiclient.discovery import build
-    docs = build("docs", "v1", credentials=credentials)
-    requests = [{"insertText": {"location": {"index": 1}, "text": text}}]
-    docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
-
-def _find_placeholder_indices(credentials, doc_id: str, placeholder: str) -> Optional[Tuple[int, int]]:
-    """Devuelve (startIndex, endIndex) de la PRIMERA aparición del placeholder en el Doc."""
-    from googleapiclient.discovery import build
-    docs = build("docs", "v1", credentials=credentials)
-    doc = docs.documents().get(documentId=doc_id, fields="body(content)").execute()
-    content = (doc.get("body") or {}).get("content") or []
-    for elem in content:
-        para = elem.get("paragraph")
-        if not para:
-            continue
-        for el in para.get("elements", []):
-            tr = el.get("textRun")
-            if not tr:
-                continue
-            txt = tr.get("content") or ""
-            if not txt:
-                continue
-            idx = txt.find(placeholder)
-            if idx >= 0:
-                start_index = el.get("startIndex", 1) + idx
-                end_index = start_index + len(placeholder)
-                return start_index, end_index
-    return None
-
-def _replace_placeholder_with_text(credentials, doc_id: str, placeholder: str, text: str) -> bool:
-    """
-    Reemplaza el 'placeholder' por 'text' manteniendo el estilo del párrafo del template.
-    Devuelve True si pudo reemplazar, False si no se encontró placeholder.
-    """
-    from googleapiclient.discovery import build
-    docs = build("docs", "v1", credentials=credentials)
-
-    # 1) Buscar indices del placeholder
-    rng = _find_placeholder_indices(credentials, doc_id, placeholder)
-    if not rng:
-        return False
-    start, end = rng
-
-    # 2) Borrar placeholder e insertar texto en su lugar
-    requests = [
-        {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}},
-        {"insertText": {"location": {"index": start}, "text": text}},
-    ]
-    docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
-    return True
-
-# ---------------- API pública ----------------
 def create_doc_from_template_with_content(
     credentials,
     title: str,
     analysis_text: str,
-    dest_folder_id: Optional[str] = None,
+    dest_folder_id: str | None = None,
+    template_id: str | None = None,
+    extra_replacements: dict[str, str] | None = None,
 ) -> str:
     """
-    Crea un Google Doc (copiando un template si existe) y ESCRIBE 'analysis_text' en el placeholder
-    (por defecto {{CONTENT}}) para heredar el formato del template. Si no hay template/placeholder,
-    inserta el contenido al inicio del documento.
-    Devuelve el doc_id.
+    Crea un Doc desde template y pega analysis_text en {{CONTENT}} preservando estilo del template.
+    - Si el párrafo de {{CONTENT}} era una lista, se aplica bullet a todo el bloque insertado.
+    - Reemplaza también {{TITLE}}, {{DATE}} y cualquier clave en extra_replacements.
+    Devuelve doc_id.
     """
-    analysis_text = (analysis_text or "").strip() or "(Resumen no disponible)"
+    template_id = template_id or _get_template_id()
 
-    branding = (PROMPT_BRANDING_NOMADIC or "").strip()
-    full_text = f"{branding}\n\n{analysis_text}" if branding else analysis_text
-    # Asegurar salto de línea final (evita pegarse al siguiente contenido del Doc)
-    full_text = full_text.rstrip() + "\n"
+    drive = build("drive", "v3", credentials=credentials)
+    docs  = build("docs",  "v1", credentials=credentials)
 
-    doc_id, used_template = _copy_or_create_doc(credentials, title, dest_folder_id)
-    placeholder = _get_placeholder_token() if used_template else None
+    # 1) Copia del template + nombre final
+    copy_body = {"name": title}
+    if dest_folder_id:
+        copy_body["parents"] = [dest_folder_id]
+    newf = drive.files().copy(fileId=template_id, body=copy_body, fields="id,name").execute()
+    doc_id = newf["id"]
 
-    if placeholder:
-        replaced = _replace_placeholder_with_text(credentials, doc_id, placeholder, full_text)
-        if not replaced:
-            # Fallback si el template no tiene el placeholder
-            _insert_text_at_start(credentials, doc_id, full_text)
-    else:
-        _insert_text_at_start(credentials, doc_id, full_text)
+    # 2) Reemplazos simples (menos {{CONTENT}})
+    today = _dt.date.today().strftime("%Y-%m-%d")
+    reps = {"{{TITLE}}": title, "{{DATE}}": today}
+    if extra_replacements:
+        reps.update(extra_replacements)
 
+    reqs = []
+    for k, v in reps.items():
+        if k == "{{CONTENT}}":
+            continue
+        reqs.append({
+            "replaceAllText": {
+                "containsText": {"text": k, "matchCase": True},
+                "replaceText": v
+            }
+        })
+
+    # 3) Marcador temporal para {{CONTENT}}
+    marker = f"<<CONTENT_{uuid.uuid4().hex[:8]}>>"
+    reqs.append({
+        "replaceAllText": {
+            "containsText": {"text": "{{CONTENT}}", "matchCase": True},
+            "replaceText": marker
+        }
+    })
+
+    if reqs:
+        docs.documents().batchUpdate(documentId=doc_id, body={"requests": reqs}).execute()
+
+    # 4) Buscar el marcador con índices y reemplazarlo por el texto real
+    doc = docs.documents().get(documentId=doc_id).execute()
+
+    def _find_marker_range(document, needle: str):
+        body = document.get("body", {})
+        for el in body.get("content", []):
+            para = el.get("paragraph")
+            if not para:
+                continue
+            elements = para.get("elements", [])
+            for e in elements:
+                tr = e.get("textRun")
+                if not tr:
+                    continue
+                txt = tr.get("content", "") or ""
+                pos = txt.find(needle)
+                if pos != -1:
+                    start = e["startIndex"] + pos
+                    end   = start + len(needle)
+                    is_bulleted = bool(para.get("bullet"))
+                    return start, end, is_bulleted
+        return None, None, False
+
+    start, end, is_bulleted = _find_marker_range(doc, marker)
+    if start is None:
+        # No se encontró marcador; devolvemos tal cual
+        return doc_id
+
+    # 5) Borrar marcador e insertar el contenido
+    req2 = [
+        {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}},
+        {"insertText": {"location": {"index": start}, "text": analysis_text}},
+    ]
+
+    # 6) Si el párrafo original era una lista, aplicar bullets a TODOS los párrafos insertados
+    end_after = start + len(analysis_text)
+    if is_bulleted:
+        req2.append({
+            "createParagraphBullets": {
+                "range": {"startIndex": start, "endIndex": end_after},
+                "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"
+            }
+        })
+
+    docs.documents().batchUpdate(documentId=doc_id, body={"requests": req2}).execute()
     return doc_id
-
-def create_doc_with_prompt(
-    credentials,
-    title: str,
-    content: str,
-    dest_folder_id: Optional[str] = None,
-) -> str:
-    """Compat: alias del viejo nombre."""
-    return create_doc_from_template_with_content(credentials, title, content, dest_folder_id)
