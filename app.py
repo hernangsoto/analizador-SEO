@@ -2679,140 +2679,139 @@ else:
 def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | None = None):
     import streamlit as st
     from google.oauth2.credentials import Credentials
-    from modules.app_ai import gemini_summary_text
-
-    # --- Keys ESTABLES (sin UUID) ---
-    def _slug(s: str | None) -> str:
-        s = (s or "global").replace("https://", "").replace("http://", "").strip("/")
-        s = s.replace("/", "_")
-        # reducir caracteres raros para que la key sea segura
-        return "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in s)
-
-    suffix = f"{kind}_{sheet_id}_{_slug(site_url)}"
-    sum_key   = f"post_sum_{suffix}"
-    doc_key   = f"post_doc_{suffix}"
-    slack_key = f"post_slack_{suffix}"
-    btn_key   = f"post_go_{suffix}"
 
     st.divider()
     st.subheader("Acciones posteriores")
     st.caption("Elegí qué querés hacer ahora:")
 
-    # Checkboxes con default persistente (value solo se usa en la 1ª renderización de esa key)
-    do_sum = st.checkbox(
-        "🤖 Resumen del análisis generado con Nomadic BOT",
-        value=st.session_state.get(sum_key, True),
-        key=sum_key
-    )
-    do_doc = st.checkbox(
-        "🤖 Documento de texto basado en el análisis de Nomadic BOT",
-        value=st.session_state.get(doc_key, False),
-        key=doc_key
-    )
-    do_slack = st.checkbox(
-        "Resumen del análisis para enviar a Slack (A desarrollar)",
-        value=st.session_state.get(slack_key, False),
-        key=slack_key
-    )
+    # Sufijo ESTABLE (sin uuid) para que los widgets no se 'destilden' al recargar
+    def _stable_suffix():
+        base = (site_url or "global").replace("https://","").replace("http://","").replace("/","_")
+        return f"{kind}_{sheet_id}_{base}"
 
-    if st.button("Ejecutar acciones seleccionadas", type="primary", key=btn_key):
-        selected_flags = [do_sum, do_doc, do_slack]
-        if not any(selected_flags):
+    suffix = _stable_suffix()
+
+    # Checkboxes con claves estables y valores persistentes
+    sum_key = f"post_sum_{suffix}"
+    doc_key = f"post_doc_{suffix}"
+    slack_key = f"post_slack_{suffix}"
+
+    if sum_key not in st.session_state:
+        st.session_state[sum_key] = True
+    if doc_key not in st.session_state:
+        st.session_state[doc_key] = False
+    if slack_key not in st.session_state:
+        st.session_state[slack_key] = False
+
+    do_sum = st.checkbox("🤖 Resumen del análisis generado con Nomadic BOT",
+                         value=st.session_state[sum_key], key=sum_key)
+    do_doc = st.checkbox("🤖 Documento de texto basado en el análisis de Nomadic BOT",
+                         value=st.session_state[doc_key], key=doc_key)
+    do_slack = st.checkbox("Resumen del análisis para enviar a Slack (A desarrollar)",
+                           value=st.session_state[slack_key], key=slack_key)
+
+    if st.button("Ejecutar acciones seleccionadas", type="primary", key=f"post_go_{suffix}"):
+        selected = [do_sum, do_doc, do_slack]
+        if sum(1 for x in selected if x) == 0:
             st.info("Seleccioná al menos una acción.")
             return
 
         progress = st.progress(0.0)
-        steps_done = 0
-        total_steps = sum(1 for x in selected_flags if x)
+        done = 0
 
-        # Estado previo de resumen
+        # Reusar resumen previo si ya existe
         summary_text = (
             st.session_state.get("last_summary_text")
             or st.session_state.get("gemini_last_text")
             or ""
         )
 
-        # 1) Generar resumen si corresponde o si hace falta para el Doc
+        # Si solo tildó Doc y no hay resumen, igual generamos resumen primero.
         need_summary = do_sum or (do_doc and not summary_text)
+
+        # 1) Resumen IA
         if need_summary:
-            with st.spinner("🤖 Nomadic BOT está generando el resumen…"):
-                try:
-                    txt = gemini_summary_text(gs_client, sheet_id, kind) or ""
-                    if txt.strip():
-                        summary_text = txt.strip()
-                        st.session_state["last_summary_text"] = summary_text
-                        st.success("Resumen IA generado ✅")
-                    else:
-                        st.warning("No se obtuvo texto de resumen (vacío).")
-                except Exception as e:
-                    st.error(f"Falló el resumen IA: {e}")
-            steps_done += 1
-            progress.progress(steps_done / max(1, total_steps))
-
-        # 2) Documento de texto (usa el resumen disponible/generado recién)
-doc_url = None
-if do_doc:
-    if not summary_text:
-        st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
-    else:
-        creds_dest_dict = st.session_state.get("creds_dest") or {}
-        scopes_have = set(creds_dest_dict.get("scopes") or [])
-        if not has_docs_scope(scopes_have):
-            st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
-        else:
             try:
-                creds_personal = Credentials(**creds_dest_dict)
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-
-                # ---- Título: "Medio - Nombre de análisis - AAAA-MM-DD" (sin imports adicionales)
-                def _pretty_medium_name(u: str | None) -> str:
-                    if not u:
-                        return "Documento"
-                    v = str(u).replace("https://", "").replace("http://", "")
-                    if v.startswith("www."):
-                        v = v[4:]
-                    v = v.split("/")[0].strip()
-                    return v or "Documento"
-
-                def _analysis_pretty(k: str | None) -> str:
-                    mapping = {
-                        "core": "Core Update",
-                        "audit": "Auditoría de tráfico",
-                        "evergreen": "Evergreen",
-                        "sections": "Análisis de secciones",
-                        "report_results": "Reporte de resultados",
-                        "ga4_audience": "GA4 Audiencia",
-                        "content_structure": "Estructura de contenidos",
-                        "discover": "Discover Snoop",
-                        "names": "Análisis de Nombres",
-                    }
-                    kk = (k or "").strip().lower()
-                    return mapping.get(kk, f"Análisis {k or ''}".strip() or "Análisis")
-
-                medio_name = _pretty_medium_name(site_url)
-                analysis_name = _analysis_pretty(kind)
-                # 'date' ya está importado arriba en el archivo
-                title_guess = f"{medio_name} - {analysis_name} - {date.today():%Y-%m-%d}"
-
-                content = (summary_text if summary_text else "(Resumen no disponible)") \
-                          + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
-
-                with st.spinner("Creando Google Doc…"):
-                    doc_id = create_doc_from_template_with_content(
-                        credentials=creds_personal,
-                        title=title_guess,
-                        analysis_text=content,
-                        dest_folder_id=st.session_state.get("dest_folder_id")
-                    )
-                    doc_url = f"https://docs.google.com/document/d/{doc_id}"
-                    st.success("Documento de texto creado ✅")
+                with st.spinner("Generando resumen con Nomadic BOT…"):
+                    from modules.app_ai import gemini_summary
+                    txt = gemini_summary(gs_client, sheet_id, kind=kind, widget_suffix=f"post_{suffix}") or ""
+                if txt.strip():
+                    summary_text = txt.strip()
+                    st.session_state["last_summary_text"] = summary_text
+                    st.success("Resumen IA generado ✅")
+                else:
+                    st.warning("No se obtuvo texto de resumen (vacío).")
             except Exception as e:
-                st.error(f"Falló la creación del Doc: {e}")
+                st.error(f"Falló el resumen IA: {e}")
+            done += 1
+            progress.progress(done / 3.0)
+
+        # 2) Documento de texto (respeta estilo del template: reemplaza {{CONTENT}})
+        doc_url = None
+        if do_doc:
+            if not summary_text:
+                st.warning("⚠️ No hay un resumen disponible. Primero generá el **Resumen IA** para poder crear el Doc.")
+            else:
+                creds_dest_dict = st.session_state.get("creds_dest") or {}
+                scopes_have = set(creds_dest_dict.get("scopes") or [])
+                if not has_docs_scope(scopes_have):
+                    st.error("Tu sesión NO tiene permisos de Google Docs. Repetí el Paso 0 habilitando el scope de Docs.")
+                else:
+                    try:
+                        creds_personal = Credentials(**creds_dest_dict)
+                        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+
+                        # ---- Título: "Medio - Nombre de análisis - AAAA-MM-DD"
+                        def _pretty_medium_name(u: str | None) -> str:
+                            if not u:
+                                return "Documento"
+                            v = str(u).replace("https://", "").replace("http://", "")
+                            if v.startswith("www."):
+                                v = v[4:]
+                            v = v.split("/")[0].strip()
+                            return v or "Documento"
+
+                        def _analysis_pretty(k: str | None) -> str:
+                            mapping = {
+                                "core": "Core Update",
+                                "audit": "Auditoría de tráfico",
+                                "evergreen": "Evergreen",
+                                "sections": "Análisis de secciones",
+                                "report_results": "Reporte de resultados",
+                                "ga4_audience": "GA4 Audiencia",
+                                "content_structure": "Estructura de contenidos",
+                                "discover": "Discover Snoop",
+                                "names": "Análisis de Nombres",
+                            }
+                            kk = (k or "").strip().lower()
+                            return mapping.get(kk, f"Análisis {k or ''}".strip() or "Análisis")
+
+                        medio_name = _pretty_medium_name(site_url)
+                        analysis_name = _analysis_pretty(kind)
+                        title_guess = f"{medio_name} - {analysis_name} - {date.today():%Y-%m-%d}"
+
+                        # El creador reemplaza el marcador {{CONTENT}} y preserva el estilo del párrafo del template.
+                        content = (summary_text if summary_text else "(Resumen no disponible)") \
+                                  + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
+
+                        with st.spinner("Creando Google Doc…"):
+                            doc_id = create_doc_from_template_with_content(
+                                credentials=creds_personal,
+                                title=title_guess,
+                                analysis_text=content,
+                                dest_folder_id=st.session_state.get("dest_folder_id")
+                            )
+                            doc_url = f"https://docs.google.com/document/d/{doc_id}"
+                            st.success("Documento de texto creado ✅")
+                    except Exception as e:
+                        st.error(f"Falló la creación del Doc: {e}")
+            done += 1
+            progress.progress(done / 3.0)
 
         # 3) Mensaje para Slack (placeholder)
         if do_slack:
             sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-            head = f"*{kind or 'Análisis'}*"
+            head = f"*{analysis_name if 'analysis_name' in locals() else (kind or 'Análisis')}*"
             if site_url:
                 head += f" — `{site_url}`"
             body = (summary_text or "Resumen pendiente de generar.").strip()
@@ -2824,8 +2823,8 @@ if do_doc:
                 key=f"slack_msg_{suffix}"
             )
             st.success("Mensaje listo ✅")
-            steps_done += 1
-            progress.progress(steps_done / max(1, total_steps))
+            done += 1
+            progress.progress(done / 3.0)
 
         progress.empty()
         st.markdown("### Enlaces")
