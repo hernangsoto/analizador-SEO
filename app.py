@@ -2766,7 +2766,41 @@ def show_post_run_actions(gs_client, sheet_id: str, kind: str, site_url: str | N
                         creds_personal = Credentials(**creds_dest_dict)
                         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
                         content = summary_text + f"\n\n—\n➡️ Sheet del análisis: {sheet_url}"
-                        title_guess = f"Análisis {kind}".strip() or "Análisis"
+                        # --- Título: "Medio - Nombre de análisis - AAAA-MM-DD"
+from urllib.parse import urlparse
+from datetime import date
+
+def _pretty_medium_name(site_url: str | None) -> str:
+    if not site_url:
+        return "Documento"
+    try:
+        netloc = urlparse(site_url).netloc or site_url
+        netloc = netloc.lower().replace("http://", "").replace("https://", "")
+        netloc = netloc.replace("www.", "").strip("/")
+        return netloc or "Documento"
+    except Exception:
+        return (site_url or "Documento")
+
+def _analysis_pretty(kind: str | None) -> str:
+    m = {
+        "core": "Core Update",
+        "audit": "Auditoría de tráfico",
+        "evergreen": "Evergreen",
+        "sections": "Análisis de secciones",
+        "report_results": "Reporte de resultados",
+        "ga4_audience": "GA4 Audiencia",
+        "content_structure": "Estructura de contenidos",
+        "discover": "Discover Snoop",
+        "names": "Análisis de Nombres",
+    }
+    k = (kind or "").strip().lower()
+    return m.get(k, f"Análisis {kind or ''}".strip() or "Análisis")
+
+medio_name = _pretty_medium_name(site_url)
+analysis_name = _analysis_pretty(kind)
+today_str = date.today().strftime("%Y-%m-%d")
+title_guess = f"{medio_name} - {analysis_name} - {today_str}"
+
                         with st.spinner("Creando Google Doc…"):
                             doc_id = create_doc_from_template_with_content(
                                 credentials=creds_personal,
