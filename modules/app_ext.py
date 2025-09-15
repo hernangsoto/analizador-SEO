@@ -134,13 +134,235 @@ if run_sections_analysis is None:
             _rsa = None
     run_sections_analysis = _rsa
 
-# Reporte de resultados (si no está expuesto en __init__, buscar submódulo)
+# Reporte de resultados (si no está expuesto en __init__, buscar submódulo; si no existe, fallback local)
 if run_report_results is None:
     try:
         from seo_analisis_ext.report_results import run_report_results as _rrr  # type: ignore
         run_report_results = _rrr
     except Exception:
-        run_report_results = None
+        # --------------------------
+        # Fallback local "simple" GSC
+        # --------------------------
+        from datetime import date
+        import pandas as _pd  # local alias para no interferir con el parche inferior
+        from urllib.parse import urlsplit as _urlsplit
+
+        def _rr__domain_from_site(site_url: str) -> str:
+            try:
+                u = site_url.strip()
+                if not u:
+                    return "sitio"
+                if "://" not in u:
+                    u = "https://" + u
+                net = _urlsplit(u).netloc
+                return net or u.strip("/").replace("https://","").replace("http://","")
+            except Exception:
+                return site_url.replace("https://","").replace("http://","").strip("/")
+
+        def _rr__as_date(d):
+            if isinstance(d, date):
+                return d
+            s = str(d).strip()
+            y, m, dd = int(s[0:4]), int(s[5:7]), int(s[8:10])
+            return date(y, m, dd)
+
+        def _rr__gsc_query(sc, site, start, end, search_type, dimensions, filters=None,
+                           row_limit=25000, order_by=None):
+            """
+            dimensions: p.ej. ["date"] o ["page"]
+            filters: lista de dicts Search Analytics API (dimension/operator/expression)
+            order_by: [{"field":"clicks","descending":True}] (opcional)
+            """
+            body = {
+                "startDate": str(start),
+                "endDate": str(end),
+                "dimensions": dimensions,
+                "rowLimit": int(row_limit),
+                "startRow": 0,
+                "type": "discover" if search_type == "discover" else "web",
+            }
+            if filters:
+                body["dimensionFilterGroups"] = [{"groupType": "and", "filters": filters}]
+            if order_by:
+                body["orderBy"] = order_by
+
+            resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
+            rows = resp.get("rows", []) or []
+            out = []
+            for r in rows:
+                keys = r.get("keys") or []
+                rec = {}
+                for i, dim in enumerate(dimensions):
+                    val = keys[i] if i < len(keys) else ""
+                    if dim == "date" and val and len(val) == 10:
+                        rec["date"] = val
+                    else:
+                        rec[dim] = val
+                rec["clicks"] = r.get("clicks", 0)
+                rec["impressions"] = r.get("impressions", 0)
+                rec["ctr"] = r.get("ctr", 0.0)
+                rec["position"] = r.get("position", 0.0)
+                out.append(rec)
+            return _pd.DataFrame(out)
+
+        def _rr__apply_metrics(df: _pd.DataFrame, metrics: dict) -> _pd.DataFrame:
+            if df is None or df.empty:
+                return df
+            if "ctr" in df.columns:
+                df["CTR"] = (df["ctr"].fillna(0) * 100).round(2)
+            if "position" in df.columns:
+                df["Posición"] = df["position"].astype(float).round(2)
+            # Map de columnas visibles
+            keep = []
+            if metrics.get("clicks"): keep.append("Clics")
+            if metrics.get("impressions"): keep.append("Impresiones")
+            if metrics.get("ctr"): keep.append("CTR")
+            if metrics.get("position"): keep.append("Posición")
+            # Asegurar alias
+            if "clicks" in df.columns and "Clics" not in df.columns:
+                df["Clics"] = df["clicks"]
+            if "impressions" in df.columns and "Impresiones" not in df.columns:
+                df["Impresiones"] = df["impressions"]
+            dims = [c for c in df.columns if c in ("date","page","country")]
+            ordered = dims + [c for c in ["Clics","Impresiones","CTR","Posición"] if c in keep]
+            return df[ordered] if ordered else df
+
+        def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)"):
+            if df is None or df.empty:
+                ws.clear()
+                ws.update([[empty_note]])
+                return
+            ws.clear()
+            ws.update([df.columns.tolist()] + df.fillna("").astype(str).values.tolist())
+
+        def run_report_results(sc_service, drive_service, gs_client, site_url: str, params: dict, dest_folder_id: str | None = None) -> str | None:  # type: ignore[override]
+            """
+            Crea un Sheet con:
+              - Serie diaria (por origen)
+              - Top de páginas global (y por país si se pidió), ordenado por Clics
+            Soporta origen = "search" | "discover" | "both"
+            """
+            start = _rr__as_date(params.get("start"))
+            end   = _rr__as_date(params.get("end"))
+            origin = (params.get("origin") or "search").strip().lower()   # "search" | "discover" | "both"
+            origin_list = ["search","discover"] if origin == "both" else [origin]
+            path = params.get("path") or None  # p.ej. "/vida/"
+            countries = list(params.get("countries") or [])  # ISO3 (ARG, ESP, USA, ...)
+            metrics = dict(params.get("metrics") or {"clicks":True, "impressions":True, "ctr":True, "position":origin!="discover"})
+            top_n = int(params.get("top_n", 20))
+            title_prefix = params.get("sheet_title_prefix") or "Reporte de resultados"
+
+            # 1) Crear el Sheet
+            site_pretty = _rr__domain_from_site(site_url)
+            sheet_name = f"{title_prefix} ({start} a {end}) - {site_pretty}"
+            meta = {"name": sheet_name, "mimeType": "application/vnd.google-apps.spreadsheet"}
+            if dest_folder_id:
+                meta["parents"] = [dest_folder_id]
+            newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
+            sid = newfile["id"]
+
+            # 2) Abrir con gspread y preparar pestañas
+            sh = gs_client.open_by_key(sid)
+            ws0 = sh.sheet1
+            ws0.update_title("Resumen")
+
+            def _ensure(title: str):
+                try:
+                    return sh.worksheet(title)
+                except Exception:
+                    return sh.add_worksheet(title=title, rows=100, cols=20)
+
+            # 3) Por cada origen → serie + tops
+            for src in origin_list:
+                label = "Search" if src == "search" else "Discover"
+
+                # --- Serie diaria (global, con filtro de path si aplica)
+                filters = []
+                if path:
+                    filters.append({"dimension": "page", "operator": "contains", "expression": path})
+                df_series = _pd.DataFrame()
+                try:
+                    df_series = _rr__gsc_query(
+                        sc_service, site_url, start, end, src,
+                        dimensions=["date"], filters=filters, row_limit=25000
+                    )
+                    if not df_series.empty:
+                        df_series = df_series.groupby(["date"], as_index=False).agg({
+                            "clicks":"sum", "impressions":"sum", "ctr":"mean", "position":"mean"
+                        })
+                        df_series = _rr__apply_metrics(df_series, metrics)
+                except Exception:
+                    pass
+                _rr__write_ws(_ensure(f"Serie diaria ({label})"), df_series)
+
+                # --- Top páginas Global
+                df_top_global = _pd.DataFrame()
+                try:
+                    df_top_global = _rr__gsc_query(
+                        sc_service, site_url, start, end, src,
+                        dimensions=["page"],
+                        filters=filters,
+                        row_limit=max(1000, top_n if top_n > 0 else 1000),
+                        order_by=[{"field": "clicks", "descending": True}],
+                    )
+                    if not df_top_global.empty:
+                        df_top_global = (df_top_global
+                                         .sort_values("clicks", ascending=False)
+                                         .groupby("page", as_index=False)
+                                         .first())
+                        if top_n > 0:
+                            df_top_global = df_top_global.head(top_n)
+                        df_top_global = _rr__apply_metrics(df_top_global, metrics)
+                        df_top_global = df_top_global.rename(columns={"page":"URL"})
+                except Exception:
+                    pass
+                _rr__write_ws(_ensure(f"Top Global ({label})"), df_top_global)
+
+                # --- Top por país (si se pidió)
+                for iso3 in countries:
+                    iso = str(iso3).strip().lower()
+                    filters_iso = list(filters) if filters else []
+                    filters_iso.append({"dimension": "country", "operator": "equals", "expression": iso})
+                    df_top_ctry = _pd.DataFrame()
+                    try:
+                        df_top_ctry = _rr__gsc_query(
+                            sc_service, site_url, start, end, src,
+                            dimensions=["page","country"],
+                            filters=filters_iso,
+                            row_limit=max(1000, top_n if top_n > 0 else 1000),
+                            order_by=[{"field": "clicks", "descending": True}],
+                        )
+                        if not df_top_ctry.empty:
+                            df_top_ctry = (df_top_ctry
+                                           .sort_values("clicks", ascending=False)
+                                           .groupby("page", as_index=False)
+                                           .first())
+                            if top_n > 0:
+                                df_top_ctry = df_top_ctry.head(top_n)
+                            df_top_ctry = _rr__apply_metrics(df_top_ctry, metrics)
+                            df_top_ctry = df_top_ctry.rename(columns={"page":"URL","country":"País"})
+                    except Exception:
+                        pass
+                    _rr__write_ws(_ensure(f"Top {iso.upper()} ({label})"), df_top_ctry)
+
+            # 4) Meta
+            try:
+                ws_meta = _ensure("Meta")
+                info = _pd.DataFrame({
+                    "campo": ["site_url","start","end","origin","path","countries","top_n","metrics"],
+                    "valor": [
+                        site_url, str(start), str(end),
+                        origin, path or "(todo el sitio)",
+                        ", ".join([c.upper() for c in countries]) if countries else "(Global)",
+                        top_n,
+                        ", ".join([k for k,v in metrics.items() if v]) or "(ninguna)"
+                    ],
+                })
+                _rr__write_ws(ws_meta, info)
+            except Exception:
+                pass
+
+            return sid
 
 # GA4 Audiencia (ext → submódulo → local)  <-- NUEVO
 if run_ga4_audience_report is None:
