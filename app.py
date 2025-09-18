@@ -35,42 +35,42 @@ for _name in [
 # ====== UI / Branding ======
 from modules.ui import apply_page_style, get_user, sidebar_user_info, login_screen
 
-+# ====== Documento de texto ======
-+# Intentar local -> externo -> fallback mínimo.
-+from modules.utils import ensure_external_package
-+_EXT = ensure_external_package()  # asegura que seo_analisis_ext quede disponible en sys.path
-+try:
-+    from modules.doc_export import create_doc_from_template_with_content
-+except Exception:
-+    try:
-+        # Implementación del repo externo (si está instalado/cargado por ensure_external_package)
-+        from seo_analisis_ext.doc_export import create_doc_from_template_with_content  # type: ignore
-+    except Exception:
-+        # Fallback mínimo: crea un Doc en blanco, inserta el texto y lo mueve a la carpeta destino.
-+        def create_doc_from_template_with_content(credentials, title, analysis_text, dest_folder_id=None):
-+            from googleapiclient.discovery import build
-+            drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
-+            docs  = build("docs",  "v1", credentials=credentials, cache_discovery=False)
-+            # Crear Doc
-+            doc = docs.documents().create(body={"title": title}).execute()
-+            doc_id = doc["documentId"]
-+            # Mover a carpeta destino (si aplica)
-+            if dest_folder_id:
-+                meta = drive.files().get(fileId=doc_id, fields="parents", supportsAllDrives=True).execute()
-+                prev_parents = ",".join(meta.get("parents", []) or [])
-+                drive.files().update(
-+                    fileId=doc_id,
-+                    addParents=dest_folder_id,
-+                    removeParents=prev_parents if prev_parents else None,
-+                    supportsAllDrives=True,
-+                    fields="id, parents",
-+                ).execute()
-+            # Insertar contenido al inicio
-+            docs.documents().batchUpdate(
-+                documentId=doc_id,
-+                body={"requests": [{"insertText": {"location": {"index": 1}, "text": analysis_text}}]},
-+            ).execute()
-+            return doc_id
+# ====== Documento de texto ======
+# Intentar local -> externo -> fallback mínimo.
+from modules.utils import ensure_external_package
+_EXT = ensure_external_package()  # asegura que seo_analisis_ext quede disponible en sys.path
+try:
+    from modules.doc_export import create_doc_from_template_with_content
+except Exception:
+    try:
+        # Implementación del repo externo (si está instalado/cargado por ensure_external_package)
+        from seo_analisis_ext.doc_export import create_doc_from_template_with_content  # type: ignore
+    except Exception:
+        # Fallback mínimo: crea un Doc en blanco, inserta el texto y lo mueve a la carpeta destino.
+        def create_doc_from_template_with_content(credentials, title, analysis_text, dest_folder_id=None):
+            from googleapiclient.discovery import build
+            drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            docs  = build("docs",  "v1", credentials=credentials, cache_discovery=False)
+            # Crear Doc
+            doc = docs.documents().create(body={"title": title}).execute()
+            doc_id = doc["documentId"]
+            # Mover a carpeta destino (si aplica)
+            if dest_folder_id:
+                meta = drive.files().get(fileId=doc_id, fields="parents", supportsAllDrives=True).execute()
+                prev_parents = ",".join(meta.get("parents", []) or [])
+                drive.files().update(
+                    fileId=doc_id,
+                    addParents=dest_folder_id,
+                    removeParents=prev_parents if prev_parents else None,
+                    supportsAllDrives=True,
+                    fields="id, parents",
+                ).execute()
+            # Insertar contenido al inicio
+            docs.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{"insertText": {"location": {"index": 1}, "text": analysis_text}}]},
+            ).execute()
+            return doc_id
 
 # ====== Carga de módulos ======
 from modules.app_config import apply_base_style_and_logo, get_app_home
