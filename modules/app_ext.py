@@ -395,7 +395,42 @@ if run_ga4_audience_report is None:
             _ga4aud = None
     run_ga4_audience_report = _ga4aud
 
-# Discover Retention (ext → submódulo → local opcional) con resolución perezosa
+# =============================================================================
+# Discover Retention con normalización de params y resolución perezosa
+# =============================================================================
+def _dr_normalize_params(p: dict) -> dict:
+    """Ajusta el payload del UI al constructor DiscoverRetentionParams del paquete externo.
+       - Aplana window.start/end -> start/end (ISO YYYY-MM-DD)
+       - Elimina claves no soportadas (p.ej. 'window')
+       - Setea defaults razonables
+    """
+    from datetime import date, datetime
+
+    q = dict(p or {})
+    win = dict(q.pop("window", {}) or {})
+
+    start = q.get("start") or win.get("start") or win.get("start_date")
+    end   = q.get("end")   or win.get("end")   or win.get("end_date")
+
+    def _as_iso10(x):
+        if x in (None, "", "None"):
+            return None
+        if isinstance(x, (date, datetime)):
+            return x.isoformat()[:10]
+        s = str(x).strip()
+        return s[:10] if len(s) >= 10 else s
+
+    clean = {
+        "start": _as_iso10(start),
+        "end": _as_iso10(end),
+        "lag_days": int(q.get("lag_days", 2) or 0),
+        "min_clicks": int(q.get("min_clicks", 0) or 0),
+        "min_impressions": int(q.get("min_impressions", 0) or 0),
+        "sheet_title_prefix": q.get("sheet_title_prefix") or q.get("sheet_title_pref") or "Incorp. y permanencia Discover",
+    }
+    # Nota: 'site_url' lo recibe la función run_discover_retention como argumento aparte.
+    return clean
+
 def _resolve_discover_retention():
     """Devuelve (fn, Params) intentando, en orden:
        1) Atributos exportados por el paquete externo ya cargado (_ext)
@@ -429,20 +464,30 @@ def _resolve_discover_retention():
 
     return fn, Params
 
+def _wrap_dr(fn):
+    """Envoltura que limpia el payload antes de delegar al paquete externo."""
+    def _inner(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
+        try:
+            params_clean = _dr_normalize_params(params)
+        except Exception:
+            params_clean = dict(params or {})
+            params_clean.pop("window", None)
+        return fn(sc_service, drive_service, gs_client, site_url, params_clean, dest_folder_id, *args, **kwargs)
+    return _inner
+
 # Intento de resolución al importar el módulo
 _fn, _Params = _resolve_discover_retention()
-
 if _fn and _Params:
-    run_discover_retention = _fn            # type: ignore[assignment]
-    DiscoverRetentionParams = _Params       # type: ignore[assignment]
+    run_discover_retention = _wrap_dr(_fn)     # type: ignore[assignment]
+    DiscoverRetentionParams = _Params          # type: ignore[assignment]
 else:
-    # Stub perezoso: reintenta resolver en el momento de la llamada
+    # Stub perezoso: reintenta resolver y envuelve en el momento de la llamada
     def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
         _fn2, _Params2 = _resolve_discover_retention()
         if _fn2 and _Params2:
-            globals()["run_discover_retention"] = _fn2
+            globals()["run_discover_retention"] = _wrap_dr(_fn2)
             globals()["DiscoverRetentionParams"] = _Params2
-            return _fn2(*args, **kwargs)
+            return globals()["run_discover_retention"](*args, **kwargs)
         raise RuntimeError(
             "Falta seo_analisis_ext.run_discover_retention. "
             "Instalá/actualizá el paquete externo o agregá modules/discover_retention.py."
@@ -780,4 +825,3 @@ __all__ = [
     "run_discover_retention",         # <-- NUEVO
     "DiscoverRetentionParams",        # <-- NUEVO
 ]
-
