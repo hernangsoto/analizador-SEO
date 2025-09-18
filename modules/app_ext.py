@@ -16,15 +16,19 @@ Exporta:
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
 - Shim de normalización para run_content_structure (fechas, source, filtros, scraping)
-- Normalizador + wrapper de run_discover_retention (quita `window`, fechas ISO, ints)
 - Parche de serialización segura al escribir DataFrames a Google Sheets
+- Implementación local de run_discover_retention que:
+  * Copia el template indicado
+  * Crea hojas "Configuración" y "Análisis"
+  * Usa Search Console Discover con granularidad horaria (últimos 10 días)
+  * Calcula primeras/últimas apariciones y días de permanencia
 """
 
 # ============================================================================ #
 # 1) Carga "suave" del paquete externo (sin depender de modules.utils)        #
 # ============================================================================ #
 try:
-    import importlib  # usado para parches opcionales
+    import importlib
 except Exception:
     importlib = None  # type: ignore
 
@@ -50,7 +54,7 @@ run_content_structure   = _get_ext_attr("run_content_structure")
 run_sections_analysis   = _get_ext_attr("run_sections_analysis")
 run_report_results      = _get_ext_attr("run_report_results")
 run_ga4_audience_report = _get_ext_attr("run_ga4_audience_report")
-# Nuevo análisis Discover Retention (preferir export desde __init__, si existe)
+# Exportes Discover Retention si están en el paquete
 run_discover_retention  = _get_ext_attr("run_discover_retention")
 DiscoverRetentionParams = _get_ext_attr("DiscoverRetentionParams")
 
@@ -92,12 +96,7 @@ if run_discover_snoop is None:
     try:
         from seo_analisis_ext.discover_snoop import run_discover_snoop as _rds  # type: ignore
     except Exception:
-        try:
-            # Fallback local opcional:
-            # from modules.discover_snoop import run_discover_snoop as _rds  # type: ignore
-            _rds = None
-        except Exception:
-            _rds = None
+        _rds = None
     run_discover_snoop = _rds
 
 # Content Analysis (ext rutas alternas → local)
@@ -132,12 +131,7 @@ if run_content_structure is None:
         try:
             from seo_analisis_ext.analysis_structure import run_content_structure as _rcs  # type: ignore
         except Exception:
-            try:
-                # Fallbacks locales opcionales:
-                # from modules.content_structure import run_content_structure as _rcs  # type: ignore
-                _rcs = None
-            except Exception:
-                _rcs = None
+            _rcs = None
     run_content_structure = _rcs
 
 # Sections Analysis (ext → local opcional)
@@ -146,12 +140,7 @@ if run_sections_analysis is None:
     try:
         from seo_analisis_ext.sections_analysis import run_sections_analysis as _rsa  # type: ignore
     except Exception:
-        try:
-            # Fallback local opcional:
-            # from modules.sections_analysis import run_sections_analysis as _rsa  # type: ignore
-            _rsa = None
-        except Exception:
-            _rsa = None
+        _rsa = None
     run_sections_analysis = _rsa
 
 # Reporte de resultados (si no está expuesto en __init__, buscar submódulo; si no existe, fallback local)
@@ -187,25 +176,19 @@ if run_report_results is None:
             return date(y, m, dd)
 
         def _rr__gsc_query(sc, site, start, end, search_type, dimensions, filters=None,
-                           row_limit=25000, order_by=None):
-            """
-            dimensions: p.ej. ["date"] o ["page"]
-            filters: lista de dicts Search Analytics API (dimension/operator/expression)
-            order_by: [{"field":"clicks","descending":True}] (opcional)
-            """
+                           row_limit=25000, order_by=None, start_row=0):
             body = {
                 "startDate": str(start),
                 "endDate": str(end),
                 "dimensions": dimensions,
                 "rowLimit": int(row_limit),
-                "startRow": 0,
+                "startRow": int(start_row),
                 "type": "discover" if search_type == "discover" else "web",
             }
             if filters:
                 body["dimensionFilterGroups"] = [{"groupType": "and", "filters": filters}]
             if order_by:
                 body["orderBy"] = order_by
-
             resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
             rows = resp.get("rows", []) or []
             out = []
@@ -214,10 +197,7 @@ if run_report_results is None:
                 rec = {}
                 for i, dim in enumerate(dimensions):
                     val = keys[i] if i < len(keys) else ""
-                    if dim == "date" and val and len(val) == 10:
-                        rec["date"] = val
-                    else:
-                        rec[dim] = val
+                    rec[dim] = val
                 rec["clicks"] = r.get("clicks", 0)
                 rec["impressions"] = r.get("impressions", 0)
                 rec["ctr"] = r.get("ctr", 0.0)
@@ -247,7 +227,7 @@ if run_report_results is None:
             ordered = dims + [c for c in ["Clics", "Impresiones", "CTR", "Posición"] if c in keep]
             return df[ordered] if ordered else df
 
-        def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)") -> None:
+        def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)"):
             if df is None or df.empty:
                 ws.clear()
                 ws.update([[empty_note]])
@@ -256,23 +236,16 @@ if run_report_results is None:
             ws.update([df.columns.tolist()] + df.fillna("").astype(str).values.tolist())
 
         def run_report_results(sc_service, drive_service, gs_client, site_url: str, params: dict, dest_folder_id: str | None = None) -> str | None:  # type: ignore[override]
-            """
-            Crea un Sheet con:
-              - Serie diaria (por origen)
-              - Top de páginas global (y por país si se pidió), ordenado por Clics
-            Soporta origen = "search" | "discover" | "both"
-            """
             start = _rr__as_date(params.get("start"))
             end   = _rr__as_date(params.get("end"))
-            origin = (params.get("origin") or "search").strip().lower()   # "search" | "discover" | "both"
+            origin = (params.get("origin") or "search").strip().lower()
             origin_list = ["search", "discover"] if origin == "both" else [origin]
-            path = params.get("path") or None  # p.ej. "/vida/"
-            countries = list(params.get("countries") or [])  # ISO3
+            path = params.get("path") or None
+            countries = list(params.get("countries") or [])
             metrics = dict(params.get("metrics") or {"clicks": True, "impressions": True, "ctr": True, "position": origin != "discover"})
             top_n = int(params.get("top_n", 20))
             title_prefix = params.get("sheet_title_prefix") or "Reporte de resultados"
 
-            # 1) Crear el Sheet
             site_pretty = _rr__domain_from_site(site_url)
             sheet_name = f"{title_prefix} ({start} a {end}) - {site_pretty}"
             meta = {"name": sheet_name, "mimeType": "application/vnd.google-apps.spreadsheet"}
@@ -281,7 +254,6 @@ if run_report_results is None:
             newfile = drive_service.files().create(body=meta, fields="id,name,webViewLink").execute()
             sid = newfile["id"]
 
-            # 2) Abrir con gspread y preparar pestañas
             sh = gs_client.open_by_key(sid)
             ws0 = sh.sheet1
             ws0.update_title("Resumen")
@@ -292,14 +264,12 @@ if run_report_results is None:
                 except Exception:
                     return sh.add_worksheet(title=title, rows=100, cols=20)
 
-            # 3) Por cada origen → serie + tops
             for src in origin_list:
                 label = "Search" if src == "search" else "Discover"
-
-                # --- Serie diaria (global)
                 filters = []
                 if path:
                     filters.append({"dimension": "page", "operator": "contains", "expression": path})
+
                 try:
                     df_series = _rr__gsc_query(
                         sc_service, site_url, start, end, src,
@@ -315,7 +285,6 @@ if run_report_results is None:
                     df_series = _pd.DataFrame()
                 _rr__write_ws(_ensure(f"Serie diaria ({label})"), df_series)
 
-                # --- Top páginas Global
                 try:
                     df_top_global = _rr__gsc_query(
                         sc_service, site_url, start, end, src,
@@ -338,7 +307,6 @@ if run_report_results is None:
                     df_top_global = _pd.DataFrame()
                 _rr__write_ws(_ensure(f"Top Global ({label})"), df_top_global)
 
-                # --- Top por país (si se pidió)
                 for iso3 in countries:
                     iso = str(iso3).strip().lower()
                     filters_iso = list(filters) if filters else []
@@ -365,7 +333,6 @@ if run_report_results is None:
                         df_top_ctry = _pd.DataFrame()
                     _rr__write_ws(_ensure(f"Top {iso.upper()} ({label})"), df_top_ctry)
 
-            # 4) Meta
             try:
                 import pandas as _pd
                 ws_meta = _ensure("Meta")
@@ -401,145 +368,9 @@ if run_ga4_audience_report is None:
     run_ga4_audience_report = _ga4aud
 
 
-# =============================================================================
-# Discover Retention: resolución + normalizador + wrapper con debug
-# =============================================================================
-def _resolve_discover_retention():
-    """Devuelve (fn, Params) intentando, en orden:
-       1) Atributos exportados por el paquete externo ya cargado (_ext)
-       2) Submódulo del paquete externo
-       3) Fallback local modules/discover_retention
-    """
-    fn = getattr(_ext, "run_discover_retention", None) if _ext else None
-    Params = getattr(_ext, "DiscoverRetentionParams", None) if _ext else None
-
-    if fn is None or Params is None:
-        try:
-            from seo_analisis_ext.discover_retention import (  # type: ignore
-                run_discover_retention as _fn2,
-                DiscoverRetentionParams as _Params2,
-            )
-            fn = fn or _fn2
-            Params = Params or _Params2
-        except Exception:
-            pass
-
-    if fn is None or Params is None:
-        try:
-            from modules.discover_retention import (  # type: ignore
-                run_discover_retention as _fn3,
-                DiscoverRetentionParams as _Params3,
-            )
-            fn = fn or _fn3
-            Params = Params or _Params3
-        except Exception:
-            pass
-
-    return fn, Params
-
-
-def _dr_normalize_params(p: dict) -> dict:
-    """Ajusta el payload del UI al constructor DiscoverRetentionParams del paquete externo.
-       - Aplana window.start/end -> start/end (YYYY-MM-DD)
-       - Settea defaults si faltan fechas (últimos 10 días con lag)
-       - Fuerza tipos correctos (ints)
-       - Elimina claves no soportadas (p.ej. 'window')
-    """
-    from datetime import date, datetime, timedelta
-
-    q = dict(p or {})
-    win = dict(q.pop("window", {}) or {})
-
-    start = q.get("start") or win.get("start") or win.get("start_date")
-    end   = q.get("end")   or win.get("end")   or win.get("end_date")
-    lag   = int(q.get("lag_days", 2) or 0)
-    lookback_days = int(q.get("days", 10) or 10)
-
-    def _as_iso10(x):
-        if x in (None, "", "None"):
-            return None
-        if isinstance(x, (date, datetime)):
-            return x.isoformat()[:10]
-        s = str(x).strip()
-        return s[:10] if len(s) >= 10 else s
-
-    end_iso = _as_iso10(end)
-    if not end_iso:
-        end_iso = (date.today() - timedelta(days=lag)).isoformat()
-
-    start_iso = _as_iso10(start)
-    if not start_iso:
-        start_iso = (date.fromisoformat(end_iso) - timedelta(days=lookback_days - 1)).isoformat()
-
-    if start_iso > end_iso:
-        start_iso, end_iso = end_iso, start_iso
-
-    clean = {
-        "start": start_iso,                     # YYYY-MM-DD
-        "end": end_iso,                         # YYYY-MM-DD
-        "lag_days": lag,                        # int
-        "min_clicks": int(q.get("min_clicks", 0) or 0),
-        "min_impressions": int(q.get("min_impressions", 0) or 0),
-        "sheet_title_prefix": q.get("sheet_title_prefix")
-                              or q.get("sheet_title_pref")
-                              or "Incorp. y permanencia Discover",
-        # No incluimos claves desconocidas para el dataclass
-    }
-    return clean
-
-
-def _wrap_dr(fn):
-    """Envoltura que limpia el payload y muestra debug en Streamlit si falla."""
-    def _inner(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
-        import json as _json
-        try:
-            import streamlit as st
-        except Exception:
-            st = None
-
-        try:
-            params_clean = _dr_normalize_params(params)
-        except Exception:
-            params_clean = dict(params or {})
-            params_clean.pop("window", None)
-
-        try:
-            return fn(sc_service, drive_service, gs_client, site_url, params_clean, dest_folder_id, *args, **kwargs)
-        except Exception as e:
-            if st is not None:
-                st.session_state["_dr_norm_params"] = params_clean
-                st.session_state["_dr_error"] = str(e)
-                st.error(f"❌ Discover Retention falló: {e}")
-                st.caption("Payload normalizado enviado al runner:")
-                st.code(_json.dumps(params_clean, ensure_ascii=False, indent=2))
-            return None
-    return _inner
-
-
-# Intento de resolución al importar el módulo → SI ENCONTRAMOS, EXPORTAMOS WRAPPER
-_fn, _Params = _resolve_discover_retention()
-if _fn and _Params:
-    run_discover_retention = _wrap_dr(_fn)     # <-- siempre envuelto con normalizador
-    DiscoverRetentionParams = _Params
-else:
-    # Stub perezoso: reintenta resolver en el momento de la llamada
-    def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
-        _fn2, _Params2 = _resolve_discover_retention()
-        if _fn2 and _Params2:
-            globals()["DiscoverRetentionParams"] = _Params2
-            wrapped = _wrap_dr(_fn2)
-            globals()["run_discover_retention"] = wrapped
-            return wrapped(*args, **kwargs)
-        raise RuntimeError(
-            "Falta seo_analisis_ext.run_discover_retention. "
-            "Instalá/actualizá el paquete externo o agregá modules/discover_retention.py."
-        )
-
-    class DiscoverRetentionParams:  # type: ignore[no-redef]
-        """Stub: se reemplaza automáticamente si el paquete externo/fallback está disponible."""
-        pass
-
-
+# =========================
+# Señalizamos si hay paquete ext
+# =========================
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
 
@@ -552,7 +383,6 @@ def _rca_normalize_params(p: dict) -> dict:
     if not isinstance(p, dict):
         return p
 
-    # tipo
     raw_tipo = str(p.get("tipo", "")).strip().lower()
     if raw_tipo in ("ambos", "both", "search+discover", "search + discover", "search y discover"):
         tipo = "both"
@@ -566,7 +396,6 @@ def _rca_normalize_params(p: dict) -> dict:
     p.setdefault("source", tipo)
     p.setdefault("origen", "Search + Discover" if tipo == "both" else tipo.title())
 
-    # ventana
     lag = int(p.get("lag_days", 3))
     win = dict(p.get("window") or {})
     per = dict(p.get("period") or {})
@@ -609,7 +438,6 @@ def _rca_normalize_params(p: dict) -> dict:
 
     p["period_label"] = f"{start} a {end}"
 
-    # filtros
     filters = dict(p.get("filters") or {})
     country = filters.get("country")
     if country in ("Todos", "", None):
@@ -632,7 +460,6 @@ def _rca_normalize_params(p: dict) -> dict:
         filters.setdefault("sections", sec_payload)
     p["filters"] = filters
 
-    # orden y límites
     order_by = str(p.get("order_by", "clicks")).strip().lower()
     if order_by not in ("clicks", "impressions", "ctr", "position"):
         order_by = "clicks"
@@ -854,10 +681,395 @@ for _candidate in [
     "seo_analisis_ext.content_analysis",
     "seo_analisis_ext.analysis_content",
     "seo_analisis_ext.content_structure",
-    "seo_analisis_ext.discover_retention",  # añadido por si define _write_ws
+    "seo_analisis_ext.discover_retention",  # por si define _write_ws
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
+
+
+# =============================================================================
+# NUEVO: Implementación local de run_discover_retention con template + hourly
+# =============================================================================
+
+# -- helpers utilitarios locales --
+from urllib.parse import urlsplit as _urlsplit
+from datetime import datetime as _datetime, date as _date, timedelta as _timedelta
+
+
+def _domain_from_site(site_url: str) -> str:
+    try:
+        u = site_url.strip()
+        if "://" not in u:
+            u = "https://" + u
+        net = _urlsplit(u).netloc
+        return net or u.strip("/").replace("https://", "").replace("http://", "")
+    except Exception:
+        return site_url.replace("https://", "").replace("http://", "").strip("/")
+
+
+def _ensure_ws(sh, title: str):
+    try:
+        return sh.worksheet(title)
+    except Exception:
+        return sh.add_worksheet(title=title, rows=2000, cols=20)
+
+
+def _daterange(d1: _date, d2: _date):
+    cur = d1
+    while cur <= d2:
+        yield cur
+        cur = cur + _timedelta(days=1)
+
+
+def _gsc_query(sc, site, start, end, dimensions, search_type="discover", filters=None,
+               row_limit=25000, start_row=0, order_by=None):
+    """
+    Envoltorio de Search Analytics API.
+    Soporta dimension HOUR (granularidad horaria, últimos 10 días).
+    """
+    body = {
+        "startDate": str(start),
+        "endDate": str(end),
+        "dimensions": dimensions,
+        "rowLimit": int(row_limit),
+        "startRow": int(start_row),
+        "type": "discover" if search_type == "discover" else "web",
+    }
+    if filters:
+        body["dimensionFilterGroups"] = [{"groupType": "and", "filters": filters}]
+    if order_by:
+        body["orderBy"] = order_by
+    resp = sc.searchanalytics().query(siteUrl=site, body=body).execute()
+    rows = resp.get("rows", []) or []
+    out = []
+    for r in rows:
+        keys = r.get("keys") or []
+        rec = {}
+        for i, dim in enumerate(dimensions):
+            rec[dim] = keys[i] if i < len(keys) else ""
+        rec["clicks"] = r.get("clicks", 0)
+        rec["impressions"] = r.get("impressions", 0)
+        rec["ctr"] = r.get("ctr", 0.0)
+        rec["position"] = r.get("position", 0.0)
+        out.append(rec)
+    if pd is None:
+        return out
+    return pd.DataFrame(out)
+
+
+def _parse_section(url: str, site_url: str) -> str:
+    try:
+        u = url
+        if u.startswith("/"):
+            # normalizamos a URL absoluta si nos dieron paths
+            dom = _domain_from_site(site_url)
+            u = f"https://{dom}{u}"
+        parts = _urlsplit(u)
+        path = parts.path or "/"
+        segs = [s for s in path.split("/") if s]
+        return f"/{segs[0]}/" if segs else "/"
+    except Exception:
+        return "/"
+
+
+def _params_for_dr(p: dict | object) -> dict:
+    """
+    Normaliza params para discover retention.
+    Acepta:
+      - dict
+      - instancia DiscoverRetentionParams (si viene del paquete externo)
+    """
+    out = {}
+    if isinstance(p, dict):
+        out.update(p)
+    else:
+        # best-effort: leer atributos comunes
+        for k in ("start", "end", "window", "path", "country", "device", "max_urls",
+                  "template_id", "sheet_title_prefix", "analysis_name"):
+            if hasattr(p, k):
+                out[k] = getattr(p, k)
+
+    win = dict(out.get("window") or {})
+    start = out.get("start") or win.get("start") or win.get("start_date")
+    end   = out.get("end")   or win.get("end")   or win.get("end_date")
+
+    def _iso(d):
+        if isinstance(d, (_date, _datetime)):
+            return d.date().isoformat() if isinstance(d, _datetime) else d.isoformat()
+        return str(d)
+
+    out["start"] = _iso(start)
+    out["end"]   = _iso(end)
+    out["path"]  = out.get("path") or out.get("seccion") or None
+    c = out.get("country") or out.get("pais")
+    out["country"] = (str(c).strip().lower() if c else None)
+    d = out.get("device") or out.get("dispositivo")
+    if isinstance(d, str):
+        d = d.strip().lower()
+        d = d if d in ("desktop", "mobile", "tablet") else None
+    else:
+        d = None
+    out["device"] = d
+    try:
+        out["max_urls"] = int(out.get("max_urls") or 1000)
+    except Exception:
+        out["max_urls"] = 1000
+    out["template_id"] = out.get("template_id") or "1SB9wFHWyDfd5P-24VBP7-dE1f1t7YvVYjnsc2XjqU8M"
+    out["sheet_title_prefix"] = out.get("sheet_title_prefix") or "Discover Retention"
+    out["analysis_name"] = out.get("analysis_name") or "Discover Retention"
+    return out
+
+
+def _copy_from_template(drive_service, template_id: str, title: str, dest_folder_id: str | None):
+    body = {"name": title}
+    if dest_folder_id:
+        body["parents"] = [dest_folder_id]
+    newfile = drive_service.files().copy(fileId=template_id, body=body, fields="id,name,webViewLink").execute()
+    return newfile["id"]
+
+
+def _write_rows(ws, rows: list[list]):
+    # rows es una lista de listas ya "serializada"
+    ws.clear()
+    ws.update(rows)
+
+
+def _status_logic(pub_date: _date | None, start: _date, end: _date,
+                  first_dt: _datetime | None, last_dt: _datetime | None) -> str:
+    # Reglas:
+    # - Si pub_date < start → "Contenido publicado previo al análisis"
+    # - Si se publicó dentro del período y dejó de tener impresiones dentro del período → "Contenido dentro del período de análisis"
+    # - Si siguió con impresiones hasta la última hora del período → "Contenido aún vigente"
+    # - Caso contrario → "Revisar"
+    if pub_date is not None:
+        if pub_date < start:
+            return "Contenido publicado previo al análisis"
+        if start <= pub_date <= end:
+            # publicó dentro del período
+            if last_dt is not None and last_dt.date() < end:
+                return "Contenido dentro del período de análisis"
+            if last_dt is not None and last_dt.date() >= end:
+                return "Contenido aún vigente"
+    # si no tenemos pub_date, usamos solo rango impresiones
+    if last_dt is not None:
+        if last_dt.date() >= end:
+            return "Contenido aún vigente"
+        return "Contenido dentro del período de análisis"
+    return "Revisar"
+
+
+def run_discover_retention(sc_service, drive_service, gs_client, site_url: str,
+                           params: dict | object, dest_folder_id: str | None = None) -> str | None:
+    """
+    Implementación que:
+      - copia el template
+      - crea hoja 'Configuración' con:
+          Sitio Analizado, Tipo de análisis, Periodo analizado, Sección (si hay), País (si hay)
+      - crea hoja 'Análisis' con columnas:
+          URL (A), Clics del período (B), Impresiones del período (C), Sección (D),
+          Fecha de publicación (E), Hora de publicación (F),
+          Fecha de ingreso a Discover (G), Hora de ingreso a Discover (H),
+          Días de permanencia (I), Última visualización en Discover (J), Status (K)
+    Nota: la granularidad horaria de GSC está disponible para ~últimos 10 días.
+    """
+    if pd is None:
+        raise RuntimeError("Pandas es requerido para run_discover_retention")
+
+    p = _params_for_dr(params)
+    start_s, end_s = p["start"], p["end"]
+    start_d = _date.fromisoformat(str(start_s)[:10])
+    end_d   = _date.fromisoformat(str(end_s)[:10])
+    if end_d < start_d:
+        raise ValueError("Rango de fechas inválido (end < start)")
+
+    site_pretty = _domain_from_site(site_url)
+    today = _date.today().isoformat()
+    sheet_title = f"{site_pretty} - {p['analysis_name']} - {today}"
+
+    # 1) Copiar template
+    sid = _copy_from_template(drive_service, p["template_id"], sheet_title, dest_folder_id)
+    sh = gs_client.open_by_key(sid)
+
+    # 2) CONFIGURACIÓN
+    ws_cfg = _ensure_ws(sh, "Configuración")
+    cfg_rows = [
+        ["Configuración", "Valores"],
+        ["Sitio Analizado", site_pretty],
+        ["Tipo de análisis", p["analysis_name"]],
+        ["Periodo analizado", f"{start_d.isoformat()} a {end_d.isoformat()}"],
+    ]
+    if p.get("path"):
+        cfg_rows.append(["Sección", str(p["path"])])
+    if p.get("country"):
+        cfg_rows.append(["País", str(p["country"]).upper()])
+    _write_rows(ws_cfg, cfg_rows)
+
+    # 3) TOP páginas (URL, clics, impresiones) con filtros opcionales
+    filters = []
+    if p.get("path"):
+        filters.append({"dimension": "page", "operator": "contains", "expression": str(p["path"])})
+    if p.get("country"):
+        filters.append({"dimension": "country", "operator": "equals", "expression": str(p["country"]).lower()})
+    if p.get("device"):
+        filters.append({"dimension": "device", "operator": "equals", "expression": str(p["device"]).upper()})
+
+    df_pages = _gsc_query(
+        sc_service, site_url, start_d, end_d,
+        dimensions=["page"], search_type="discover",
+        filters=filters,
+        row_limit=max(1000, int(p["max_urls"])),
+        order_by=[{"field": "clicks", "descending": True}],
+    )
+    if df_pages is None or len(df_pages) == 0:
+        # igual devolvemos el ID de sheet vacío con configuración ya volcada
+        ws_ana = _ensure_ws(sh, "Análisis")
+        _write_rows(ws_ana, [["URL","Clics del período","Impresiones del período","Sección",
+                              "Fecha de publicación","Hora de publicación",
+                              "Fecha de ingreso a Discover","Hora de ingreso a Discover",
+                              "Días de permanencia","Última visualización en Discover","Status"]])
+        return sid
+
+    # Normalizamos columnas
+    if "page" not in df_pages.columns:
+        df_pages["page"] = ""
+    df_pages["clicks"] = df_pages.get("clicks", 0)
+    df_pages["impressions"] = df_pages.get("impressions", 0)
+    # recortamos al máximo deseado
+    df_pages = (df_pages.sort_values("clicks", ascending=False)
+                        .head(int(p["max_urls"]))
+                        .reset_index(drop=True))
+
+    # 4) Horaria: por día (para obtener primera y última aparición por URL)
+    # La API horaria cubre aprox. los últimos 10 días. Iteramos día a día con HOUR.
+    # Nota: hora está en zona horaria del informe (Search Console → Pacífico).
+    # Juntamos todo en un único DF con columnas: page, HOUR, impressions
+    hourly_records = []
+    # limitamos a los últimos 10 días desde hoy por seguridad (si el rango excede)
+    max_hourly_age_days = 10
+    min_hourly_date = _date.today() - _timedelta(days=max_hourly_age_days-1)
+    hourly_start = max(start_d, min_hourly_date)
+    if hourly_start <= end_d:
+        for d in _daterange(hourly_start, end_d):
+            df_h = _gsc_query(
+                sc_service, site_url, d, d,
+                dimensions=["page", "HOUR"], search_type="discover",
+                filters=filters, row_limit=25000
+            )
+            if df_h is None or len(df_h) == 0:
+                continue
+            # quedarnos solo con páginas de interés (top)
+            df_h = df_h[df_h["page"].isin(df_pages["page"])]
+            if len(df_h) == 0:
+                continue
+            df_h = df_h.assign(_date=d.isoformat())
+            hourly_records.append(df_h[["page", "HOUR", "_date", "impressions"]])
+
+    if len(hourly_records):
+        df_hourly = pd.concat(hourly_records, ignore_index=True)
+    else:
+        # no hubo datos horarios (rango fuera de los 10 días o sin impresiones)
+        df_hourly = pd.DataFrame(columns=["page", "HOUR", "_date", "impressions"])
+
+    # 5) Cálculos por URL
+    # sección
+    df_pages["Sección"] = [ _parse_section(u, site_url) for u in df_pages["page"] ]
+
+    # primera y última aparición horaria
+    first_map = {}
+    last_map  = {}
+    if not df_hourly.empty:
+        # convertimos a datetime-pseudo: concatenamos fecha + hora HH:00
+        # HOUR viene como "HH" o "HOUR_09"? La API devuelve la hora como string tipo "09" (según doc),
+        # lo normalizamos a "HH".
+        def _to_dt(d, h):
+            h_str = str(h)
+            # intentamos extraer dígitos
+            hh = "".join([c for c in h_str if c.isdigit()])
+            if len(hh) == 1:
+                hh = "0" + hh
+            if len(hh) == 0:
+                hh = "00"
+            return _datetime.fromisoformat(f"{d}T{hh}:00:00")
+
+        df_hourly = df_hourly.copy()
+        df_hourly["dt"] = [
+            _to_dt(d, h) for d, h in zip(df_hourly["_date"], df_hourly["HOUR"])
+        ]
+        # Solo consideramos impresiones > 0
+        df_hourly_pos = df_hourly[df_hourly["impressions"].astype(float) > 0]
+        if not df_hourly_pos.empty:
+            # first
+            idx_first = df_hourly_pos.sort_values(["page", "dt"]).groupby("page", as_index=False).first()
+            for _, r in idx_first.iterrows():
+                first_map[r["page"]] = r["dt"]
+            # last
+            idx_last = df_hourly_pos.sort_values(["page", "dt"]).groupby("page", as_index=False).last()
+            for _, r in idx_last.iterrows():
+                last_map[r["page"]] = r["dt"]
+
+    # Publicación: por ahora dejamos en blanco (el scraping es externo al alcance de este adaptador)
+    df_pages["Fecha de publicación"] = ""
+    df_pages["Hora de publicación"]  = ""
+
+    # Ingreso y última visualización
+    first_dates = []
+    first_hours = []
+    last_strs   = []
+    dias_perm   = []
+    status_col  = []
+
+    for _, r in df_pages.iterrows():
+        url = r["page"]
+        fdt = first_map.get(url)
+        ldt = last_map.get(url)
+
+        if fdt is not None:
+            first_dates.append(fdt.date().isoformat())
+            first_hours.append(f"{fdt.hour:02d}:00")
+        else:
+            first_dates.append("")
+            first_hours.append("")
+
+        if ldt is not None:
+            last_strs.append(ldt.strftime("%Y-%m-%d %H:%M"))
+        else:
+            last_strs.append("")
+
+        # días de permanencia: (último día - primer día)
+        if fdt is not None and ldt is not None:
+            dias_perm.append((ldt.date() - fdt.date()).days)
+        else:
+            dias_perm.append("")
+
+        # status
+        pub_date = None  # no tenemos scraping aquí
+        status_col.append(_status_logic(pub_date, start_d, end_d, fdt, ldt))
+
+    # 6) Hoja "Análisis"
+    ws_ana = _ensure_ws(sh, "Análisis")
+    rows = [["URL","Clics del período","Impresiones del período","Sección",
+             "Fecha de publicación","Hora de publicación",
+             "Fecha de ingreso a Discover","Hora de ingreso a Discover",
+             "Días de permanencia","Última visualización en Discover","Status"]]
+
+    for i, r in df_pages.iterrows():
+        rows.append([
+            r["page"],
+            int(r.get("clicks", 0)),
+            int(r.get("impressions", 0)),
+            r.get("Sección", "/"),
+            r.get("Fecha de publicación", ""),
+            r.get("Hora de publicación", ""),
+            first_dates[i],
+            first_hours[i],
+            dias_perm[i],
+            last_strs[i],
+            status_col[i],
+        ])
+    _write_rows(ws_ana, rows)
+
+    # 7) Devolvemos el Spreadsheet ID
+    return sid
 
 
 __all__ = [
@@ -873,6 +1085,6 @@ __all__ = [
     "run_sections_analysis",
     "run_report_results",
     "run_ga4_audience_report",
-    "run_discover_retention",         # <-- NUEVO
-    "DiscoverRetentionParams",        # <-- NUEVO
+    "run_discover_retention",         # <-- NUEVO (implementación local con template + hourly)
+    "DiscoverRetentionParams",        # <-- si viene del paquete externo (stub si no)
 ]
