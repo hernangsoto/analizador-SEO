@@ -19,25 +19,37 @@ Incluye:
 - Parche de serialización segura al escribir DataFrames a Google Sheets
 """
 
-from modules.utils import ensure_external_package
+# ============================================================================ #
+# 1) Carga "suave" del paquete externo (sin depender de modules.utils)        #
+# ============================================================================ #
+try:
+    import importlib  # lo usamos más abajo para parches opcionales
+except Exception:
+    importlib = None  # type: ignore
 
-_ext = ensure_external_package()
+try:
+    import seo_analisis_ext as _ext  # type: ignore
+except Exception:
+    _ext = None  # type: ignore
+
+def _get_ext_attr(name: str, default=None):
+    return getattr(_ext, name, default) if _ext is not None else default
 
 # =================== Preferimos funciones del paquete externo ===================
 
-run_core_update         = getattr(_ext, "run_core_update", None) if _ext else None
-run_evergreen           = getattr(_ext, "run_evergreen", None) if _ext else None
-run_traffic_audit       = getattr(_ext, "run_traffic_audit", None) if _ext else None
-run_names_analysis      = getattr(_ext, "run_names_analysis", None) if _ext else None
-run_discover_snoop      = getattr(_ext, "run_discover_snoop", None) if _ext else None
-run_content_analysis    = getattr(_ext, "run_content_analysis", None) if _ext else None
-run_content_structure   = getattr(_ext, "run_content_structure", None) if _ext else None
-run_sections_analysis   = getattr(_ext, "run_sections_analysis", None) if _ext else None
-run_report_results      = getattr(_ext, "run_report_results", None) if _ext else None
-run_ga4_audience_report = getattr(_ext, "run_ga4_audience_report", None) if _ext else None
+run_core_update         = _get_ext_attr("run_core_update")
+run_evergreen           = _get_ext_attr("run_evergreen")
+run_traffic_audit       = _get_ext_attr("run_traffic_audit")
+run_names_analysis      = _get_ext_attr("run_names_analysis")
+run_discover_snoop      = _get_ext_attr("run_discover_snoop")
+run_content_analysis    = _get_ext_attr("run_content_analysis")
+run_content_structure   = _get_ext_attr("run_content_structure")
+run_sections_analysis   = _get_ext_attr("run_sections_analysis")
+run_report_results      = _get_ext_attr("run_report_results")
+run_ga4_audience_report = _get_ext_attr("run_ga4_audience_report")
 # Nuevo análisis Discover Retention (preferir export desde __init__, si existe)
-run_discover_retention  = getattr(_ext, "run_discover_retention", None) if _ext else None
-DiscoverRetentionParams = getattr(_ext, "DiscoverRetentionParams", None) if _ext else None
+run_discover_retention  = _get_ext_attr("run_discover_retention")
+DiscoverRetentionParams = _get_ext_attr("DiscoverRetentionParams")
 
 # ============================= Fallbacks ========================================
 
@@ -148,7 +160,7 @@ if run_report_results is None:
         # Fallback local "simple" GSC
         # --------------------------
         from datetime import date
-        import pandas as _pd  # local alias para no interferir con el parche inferior
+        import pandas as _pd  # local alias
         from urllib.parse import urlsplit as _urlsplit
 
         def _rr__domain_from_site(site_url: str) -> str:
@@ -218,14 +230,10 @@ if run_report_results is None:
                 df["Posición"] = df["position"].astype(float).round(2)
             # Map de columnas visibles
             keep = []
-            if metrics.get("clicks"):
-                keep.append("Clics")
-            if metrics.get("impressions"):
-                keep.append("Impresiones")
-            if metrics.get("ctr"):
-                keep.append("CTR")
-            if metrics.get("position"):
-                keep.append("Posición")
+            if metrics.get("clicks"):      keep.append("Clics")
+            if metrics.get("impressions"): keep.append("Impresiones")
+            if metrics.get("ctr"):         keep.append("CTR")
+            if metrics.get("position"):    keep.append("Posición")
             # Asegurar alias
             if "clicks" in df.columns and "Clics" not in df.columns:
                 df["Clics"] = df["clicks"]
@@ -255,7 +263,7 @@ if run_report_results is None:
             origin = (params.get("origin") or "search").strip().lower()   # "search" | "discover" | "both"
             origin_list = ["search", "discover"] if origin == "both" else [origin]
             path = params.get("path") or None  # p.ej. "/vida/"
-            countries = list(params.get("countries") or [])  # ISO3 (ARG, ESP, USA, ...)
+            countries = list(params.get("countries") or [])  # ISO3
             metrics = dict(params.get("metrics") or {"clicks": True, "impressions": True, "ctr": True, "position": origin != "discover"})
             top_n = int(params.get("top_n", 20))
             title_prefix = params.get("sheet_title_prefix") or "Reporte de resultados"
@@ -284,11 +292,10 @@ if run_report_results is None:
             for src in origin_list:
                 label = "Search" if src == "search" else "Discover"
 
-                # --- Serie diaria (global, con filtro de path si aplica)
+                # --- Serie diaria (global)
                 filters = []
                 if path:
                     filters.append({"dimension": "page", "operator": "contains", "expression": path})
-                df_series = _pd.DataFrame()
                 try:
                     df_series = _rr__gsc_query(
                         sc_service, site_url, start, end, src,
@@ -300,11 +307,11 @@ if run_report_results is None:
                         })
                         df_series = _rr__apply_metrics(df_series, metrics)
                 except Exception:
-                    pass
+                    import pandas as _pd
+                    df_series = _pd.DataFrame()
                 _rr__write_ws(_ensure(f"Serie diaria ({label})"), df_series)
 
                 # --- Top páginas Global
-                df_top_global = _pd.DataFrame()
                 try:
                     df_top_global = _rr__gsc_query(
                         sc_service, site_url, start, end, src,
@@ -323,7 +330,8 @@ if run_report_results is None:
                         df_top_global = _rr__apply_metrics(df_top_global, metrics)
                         df_top_global = df_top_global.rename(columns={"page": "URL"})
                 except Exception:
-                    pass
+                    import pandas as _pd
+                    df_top_global = _pd.DataFrame()
                 _rr__write_ws(_ensure(f"Top Global ({label})"), df_top_global)
 
                 # --- Top por país (si se pidió)
@@ -331,7 +339,6 @@ if run_report_results is None:
                     iso = str(iso3).strip().lower()
                     filters_iso = list(filters) if filters else []
                     filters_iso.append({"dimension": "country", "operator": "equals", "expression": iso})
-                    df_top_ctry = _pd.DataFrame()
                     try:
                         df_top_ctry = _rr__gsc_query(
                             sc_service, site_url, start, end, src,
@@ -350,11 +357,13 @@ if run_report_results is None:
                             df_top_ctry = _rr__apply_metrics(df_top_ctry, metrics)
                             df_top_ctry = df_top_ctry.rename(columns={"page": "URL", "country": "País"})
                     except Exception:
-                        pass
+                        import pandas as _pd
+                        df_top_ctry = _pd.DataFrame()
                     _rr__write_ws(_ensure(f"Top {iso.upper()} ({label})"), df_top_ctry)
 
             # 4) Meta
             try:
+                import pandas as _pd
                 ws_meta = _ensure("Meta")
                 info = _pd.DataFrame({
                     "campo": ["site_url", "start", "end", "origin", "path", "countries", "top_n", "metrics"],
@@ -375,12 +384,10 @@ if run_report_results is None:
 # GA4 Audiencia (ext → submódulo → local)
 if run_ga4_audience_report is None:
     _ga4aud = None
-    # Intentar submódulo del paquete externo (aunque no esté exportado en __init__)
     try:
         from seo_analisis_ext.ga4_audience import run_ga4_audience_report as _ga4aud  # type: ignore
     except Exception:
         pass
-    # Fallback local
     if _ga4aud is None:
         try:
             from modules.ga4_audience import run_ga4_audience_report as _ga4aud  # type: ignore
@@ -392,14 +399,12 @@ if run_ga4_audience_report is None:
 if (run_discover_retention is None) or (DiscoverRetentionParams is None):
     _rdr = None
     _Params = None
-    # Intentar submódulo del paquete externo (aunque no esté exportado en __init__)
     try:
         from seo_analisis_ext.discover_retention import (  # type: ignore
             run_discover_retention as _rdr,
             DiscoverRetentionParams as _Params,
         )
     except Exception:
-        # Fallback local opcional
         try:
             from modules.discover_retention import (  # type: ignore
                 run_discover_retention as _rdr,
@@ -413,7 +418,6 @@ if (run_discover_retention is None) or (DiscoverRetentionParams is None):
     DiscoverRetentionParams = DiscoverRetentionParams or _Params
 
     if run_discover_retention is None or DiscoverRetentionParams is None:
-        # Stub explícito para error claro si se intenta usar sin paquete externo ni fallback local
         def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
             raise RuntimeError(
                 "Falta seo_analisis_ext.run_discover_retention. "
@@ -431,11 +435,10 @@ EXT_PACKAGE = _ext
 # =============================================================================
 def _rca_normalize_params(p: dict) -> dict:
     from datetime import date, timedelta
-
     if not isinstance(p, dict):
         return p
 
-    # ---------- tipo ----------
+    # tipo
     raw_tipo = str(p.get("tipo", "")).strip().lower()
     if raw_tipo in ("ambos", "both", "search+discover", "search + discover", "search y discover"):
         tipo = "both"
@@ -449,7 +452,7 @@ def _rca_normalize_params(p: dict) -> dict:
     p.setdefault("source", tipo)
     p.setdefault("origen", "Search + Discover" if tipo == "both" else tipo.title())
 
-    # ---------- ventana ----------
+    # ventana
     lag = int(p.get("lag_days", 3))
     win = dict(p.get("window") or {})
     per = dict(p.get("period") or {})
@@ -474,31 +477,25 @@ def _rca_normalize_params(p: dict) -> dict:
         start = start or _iso(start_dt)
         end   = end   or _iso(end_dt)
 
-    start = _iso(start)
-    end = _iso(end)
+    start = _iso(start); end = _iso(end)
 
-    win["start"] = start
-    win["end"] = end
-    win["start_date"] = start
-    win["end_date"] = end
-    win.setdefault("days", days)
+    win.update({"start": start, "end": end, "start_date": start, "end_date": end})
+    if "days" not in win and days is not None:
+        win["days"] = days
     p["window"] = win
 
-    per["start"] = start
-    per["end"] = end
-    per.setdefault("days", days)
+    per.update({"start": start, "end": end})
+    if "days" not in per and days is not None:
+        per["days"] = days
     p["period"] = per
 
-    p["start"] = start
-    p["end"] = end
-    p["desde"] = start
-    p["hasta"] = end
-    p["fecha_inicio"] = start
-    p["fecha_fin"] = end
+    for k, v in [("start", start), ("end", end), ("desde", start), ("hasta", end),
+                 ("fecha_inicio", start), ("fecha_fin", end)]:
+        p[k] = v
 
     p["period_label"] = f"{start} a {end}"
 
-    # ---------- filtros ----------
+    # filtros
     filters = dict(p.get("filters") or {})
     country = filters.get("country")
     if country in ("Todos", "", None):
@@ -509,10 +506,7 @@ def _rca_normalize_params(p: dict) -> dict:
     device = filters.get("device")
     if isinstance(device, str):
         dev = device.strip().lower()
-        if dev in ("desktop", "mobile", "tablet"):
-            device = dev
-        elif dev in ("todos", "", "none", None):
-            device = None
+        device = dev if dev in ("desktop", "mobile", "tablet") else None
     else:
         device = None
     filters["device"] = device
@@ -524,7 +518,7 @@ def _rca_normalize_params(p: dict) -> dict:
         filters.setdefault("sections", sec_payload)
     p["filters"] = filters
 
-    # ---------- orden y límites ----------
+    # orden y límites
     order_by = str(p.get("order_by", "clicks")).strip().lower()
     if order_by not in ("clicks", "impressions", "ctr", "position"):
         order_by = "clicks"
@@ -537,7 +531,6 @@ def _rca_normalize_params(p: dict) -> dict:
 
     return p
 
-# Envolver el runner de contenido con shim y manejo de errores visibles (sin relanzar)
 if run_content_analysis is not None:
     _ext_rca_fn = run_content_analysis
 
@@ -546,12 +539,10 @@ if run_content_analysis is not None:
         try:
             import streamlit as st
         except Exception:
-            st = None  # por si se ejecuta en entorno no-Streamlit
-
+            st = None
         norm_params = _rca_normalize_params(dict(params or {}))
         try:
-            sid = _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
-            return sid
+            return _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
         except Exception as e:
             if st is not None:
                 st.session_state["_rca_norm_params"] = norm_params
@@ -569,10 +560,8 @@ if run_content_analysis is not None:
 def _cs_normalize_params(p: dict) -> dict:
     if not isinstance(p, dict):
         return {}
-
     out = dict(p)
 
-    # Fechas
     def _iso(d):
         try:
             return d.isoformat()
@@ -584,7 +573,6 @@ def _cs_normalize_params(p: dict) -> dict:
     if "date_to" in out:
         out["date_to"] = _iso(out["date_to"])
 
-    # Source
     src = str(out.get("source", "both")).strip().lower()
     if src in ("search + discover", "search+discover", "both", "ambos"):
         src = "both"
@@ -596,13 +584,11 @@ def _cs_normalize_params(p: dict) -> dict:
         src = "both"
     out["source"] = src
 
-    # Orden
     order_by = str(out.get("order_by", "clicks")).strip().lower()
     if order_by not in ("clicks", "impressions", "ctr", "position"):
         order_by = "clicks"
     out["order_by"] = order_by
 
-    # Límites y números
     def _to_int(key, default=None):
         try:
             out[key] = int(out.get(key)) if out.get(key) is not None else default
@@ -615,16 +601,13 @@ def _cs_normalize_params(p: dict) -> dict:
     _to_int("concurrency", 24)
     _to_int("timeout_s", 12)
 
-    # Flags
     out["only_articles"] = bool(out.get("only_articles", True))
     out["entities"] = bool(out.get("entities", False))
 
-    # Device/Country
     dev = out.get("device")
     if isinstance(dev, str):
         dev = dev.strip().upper()
-        if dev not in ("DESKTOP", "MOBILE", "TABLET", ""):
-            dev = ""
+        dev = dev if dev in ("DESKTOP", "MOBILE", "TABLET", "") else ""
     else:
         dev = ""
     out["device"] = dev or None
@@ -634,22 +617,17 @@ def _cs_normalize_params(p: dict) -> dict:
         cty = cty.strip().upper()
     out["country"] = cty or None
 
-    # Joiner y UA
     out["joiner"] = out.get("joiner") or " | "
     out["ua"] = out.get("ua") or ""
 
-    # wants/xpaths dicts
     wants = dict(out.get("wants") or {})
     xpaths = dict(out.get("xpaths") or {})
     out["wants"] = wants
     out["xpaths"] = {k: (str(v) if v is not None else "") for k, v in xpaths.items()}
 
-    # Prefijo título
     out["sheet_title_prefix"] = out.get("sheet_title_prefix") or "Estructura contenidos"
-
     return out
 
-# Envolver el runner de estructura con shim y manejo de errores visibles (sin relanzar)
 if run_content_structure is not None:
     _ext_rcs_fn = run_content_structure
 
@@ -659,11 +637,9 @@ if run_content_structure is not None:
             import streamlit as st
         except Exception:
             st = None
-
         norm_params = _cs_normalize_params(dict(params or {}))
         try:
-            sid = _ext_rcs_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
-            return sid
+            return _ext_rcs_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
         except Exception as e:
             if st is not None:
                 st.session_state["_cs_norm_params"] = norm_params
@@ -679,18 +655,21 @@ if run_content_structure is not None:
 # Parche de serialización segura al escribir a Sheets desde módulos externos
 # =============================================================================
 try:
-    import importlib
     import pandas as pd  # type: ignore
-    import numpy as np   # type: ignore
-    import datetime as _dt
 except Exception:
     pd = None  # type: ignore
+try:
+    import numpy as np  # type: ignore
+except Exception:
     np = None  # type: ignore
+try:
+    import datetime as _dt
+except Exception:
     _dt = None  # type: ignore
 
 def _patch_write_ws_if_present(module_name: str) -> None:
     """Si el módulo define _write_ws(...), lo parcheamos para serializar DataFrames de forma segura."""
-    if pd is None:
+    if pd is None or importlib is None:
         return
     try:
         mod = importlib.import_module(module_name)
@@ -705,7 +684,7 @@ def _patch_write_ws_if_present(module_name: str) -> None:
         out = df.copy()
         for c in out.columns:
             s = out[c]
-            if pd.api.types.is_datetime64_any_dtype(s):
+            if hasattr(pd, "api") and pd.api.types.is_datetime64_any_dtype(s):
                 out[c] = s.dt.strftime("%Y-%m-%d %H:%M:%S")
                 continue
 
@@ -715,9 +694,9 @@ def _patch_write_ws_if_present(module_name: str) -> None:
                         return None
                 except Exception:
                     pass
-                if x is pd.NaT:
+                if getattr(pd, "NaT", object()) is x:
                     return None
-                if isinstance(x, (pd.Timestamp, _dt.datetime, _dt.date, _dt.time)):
+                if _dt is not None and isinstance(x, (pd.Timestamp, _dt.datetime, _dt.date, _dt.time)):
                     try:
                         if isinstance(x, pd.Timestamp) and getattr(x, "tz", None) is not None:
                             x = x.tz_convert("UTC").tz_localize(None)
@@ -776,3 +755,4 @@ __all__ = [
     "run_discover_retention",         # <-- NUEVO
     "DiscoverRetentionParams",        # <-- NUEVO
 ]
+
