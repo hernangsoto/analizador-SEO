@@ -400,17 +400,20 @@ if run_ga4_audience_report is None:
 # =============================================================================
 def _dr_normalize_params(p: dict) -> dict:
     """Ajusta el payload del UI al constructor DiscoverRetentionParams del paquete externo.
-       - Aplana window.start/end -> start/end (ISO YYYY-MM-DD)
-       - Elimina claves no soportadas (p.ej. 'window')
-       - Setea defaults razonables
+       - Aplana window.start/end -> start/end (YYYY-MM-DD)
+       - Settea defaults si faltan fechas (últimos 10 días con lag)
+       - Fuerza tipos correctos (ints)
+       - Elimina claves no soportadas
     """
-    from datetime import date, datetime
+    from datetime import date, datetime, timedelta
 
     q = dict(p or {})
     win = dict(q.pop("window", {}) or {})
 
     start = q.get("start") or win.get("start") or win.get("start_date")
     end   = q.get("end")   or win.get("end")   or win.get("end_date")
+    lag   = int(q.get("lag_days", 2) or 0)
+    lookback_days = int(q.get("days", 10) or 10)
 
     def _as_iso10(x):
         if x in (None, "", "None"):
@@ -418,17 +421,33 @@ def _dr_normalize_params(p: dict) -> dict:
         if isinstance(x, (date, datetime)):
             return x.isoformat()[:10]
         s = str(x).strip()
+        # Acepta "YYYY-MM-DD" o "YYYY-MM-DDTHH:MM:SS"
         return s[:10] if len(s) >= 10 else s
 
+    end_iso = _as_iso10(end)
+    if not end_iso:
+        end_iso = (date.today() - timedelta(days=lag)).isoformat()
+
+    # si no viene start, toma ventana de 'lookback_days'
+    start_iso = _as_iso10(start)
+    if not start_iso:
+        start_iso = (date.fromisoformat(end_iso) - timedelta(days=lookback_days - 1)).isoformat()
+
+    # Si por error vienen invertidas, las ordenamos
+    if start_iso > end_iso:
+        start_iso, end_iso = end_iso, start_iso
+
     clean = {
-        "start": _as_iso10(start),
-        "end": _as_iso10(end),
-        "lag_days": int(q.get("lag_days", 2) or 0),
+        "start": start_iso,                     # YYYY-MM-DD
+        "end": end_iso,                         # YYYY-MM-DD
+        "lag_days": lag,                        # int
         "min_clicks": int(q.get("min_clicks", 0) or 0),
         "min_impressions": int(q.get("min_impressions", 0) or 0),
-        "sheet_title_prefix": q.get("sheet_title_prefix") or q.get("sheet_title_pref") or "Incorp. y permanencia Discover",
+        "sheet_title_prefix": q.get("sheet_title_prefix")
+                              or q.get("sheet_title_pref")
+                              or "Incorp. y permanencia Discover",
+        # No incluimos claves desconocidas para el dataclass
     }
-    # Nota: 'site_url' lo recibe la función run_discover_retention como argumento aparte.
     return clean
 
 def _resolve_discover_retention():
@@ -464,17 +483,35 @@ def _resolve_discover_retention():
 
     return fn, Params
 
+# --- reemplaza toda la función _wrap_dr por esta (y su uso permanece igual) ---
 def _wrap_dr(fn):
-    """Envoltura que limpia el payload antes de delegar al paquete externo."""
+    """Envoltura que limpia el payload y muestra debug en Streamlit si falla."""
     def _inner(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
+        import json as _json
+        try:
+            import streamlit as st
+        except Exception:
+            st = None
+
         try:
             params_clean = _dr_normalize_params(params)
         except Exception:
             params_clean = dict(params or {})
             params_clean.pop("window", None)
-        return fn(sc_service, drive_service, gs_client, site_url, params_clean, dest_folder_id, *args, **kwargs)
-    return _inner
 
+        try:
+            return fn(sc_service, drive_service, gs_client, site_url, params_clean, dest_folder_id, *args, **kwargs)
+        except Exception as e:
+            # Modo debug visible sin tocar app.py
+            if st is not None:
+                st.session_state["_dr_norm_params"] = params_clean
+                st.session_state["_dr_error"] = str(e)
+                st.error(f"❌ Discover Retention falló: {e}")
+                st.caption("Payload normalizado enviado al runner:")
+                st.code(_json.dumps(params_clean, ensure_ascii=False, indent=2))
+            # No re-lanzamos: devolvemos None para que el UI siga vivo
+            return None
+    return _inner
 # Intento de resolución al importar el módulo
 _fn, _Params = _resolve_discover_retention()
 if _fn and _Params:
