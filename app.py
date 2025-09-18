@@ -2208,7 +2208,7 @@ elif analisis == "12":
         country = st.text_input("País (ISO-3, ej: ARG/ESP/USA)", value="", key="disc_ret_country").strip().upper()
 
     # --- Ejecutar
-   if st.button("📊 Ejecutar análisis de Discover (incorporación/permanencia)", type="primary", key="disc_ret_run"):
+    if st.button("📊 Ejecutar análisis de Discover (incorporación/permanencia)", type="primary", key="disc_ret_run"):
         params = {
             "window": {
                 "mode": "last_10_days",
