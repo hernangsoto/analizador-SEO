@@ -2628,7 +2628,7 @@ elif analisis == "10":
             df_seeds = df_seeds[df_seeds["impressions"] >= int(min_impr)]
 
         df_seeds["ctr_pct"] = (df_seeds["ctr"].fillna(0) * 100).round(2)
-        df_seeds = df_seeds.rename(columns={"url":"url"})
+        df_seeds = df_seeds.rename(columns={"page":"url", "URL":"url"})
         df_seeds = df_seeds.sort_values(["url","clicks"], ascending=[True,False]).drop_duplicates(subset=["url"], keep="first")
 
         urls = df_seeds["url"].dropna().astype(str).tolist()
@@ -2740,7 +2740,7 @@ elif analisis == "10":
             df_scr["entities_all"] = ""
 
         # Merge con métricas de GSC
-        df_seeds = df_seeds.rename(columns={"url":"url"})
+        df_seeds = df_seeds.rename(columns={"page":"url", "URL":"url"})
         df_out = pd.merge(
             df_seeds[["url","source","clicks","impressions","ctr_pct","position"]],
             df_scr, on="url", how="left"
