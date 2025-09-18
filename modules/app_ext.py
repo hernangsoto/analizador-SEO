@@ -12,6 +12,7 @@ Exporta:
 - run_report_results
 - run_ga4_audience_report
 - run_discover_retention, DiscoverRetentionParams  <-- NUEVO
+- debug_extract_pubdate                           <-- NUEVO (helper de depuración)
 
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
@@ -21,6 +22,7 @@ Incluye:
     * Si la API rechaza HOUR/HOURLY_ALL (HTTP 400 INVALID_ARGUMENT), cae a modo Diario.
     * En modo Diario muestra un aviso en la UI (Streamlit) y arma el Sheets con el template.
 - Parche de serialización segura al escribir DataFrames a Google Sheets
+- Helper de depuración para extraer fecha/hora de publicación de URLs
 """
 
 # ============================================================================ #
@@ -904,6 +906,7 @@ def _run_discover_retention_daily_compat(
         "url": "URL",
         "clicks": "Clics del período",
         "impressions": "Impresiones del período",
+        "Sección": "Sección",
         "section": "Sección",
         "fecha_pub": "Fecha de publicación",
         "hora_pub": "Hora de publicación",
@@ -1330,6 +1333,268 @@ for _candidate in [
 ]:
     _patch_write_ws_if_present(_candidate)
 
+# =============================================================================
+# Helper de depuración: extracción de fecha/hora de publicación por URL
+# =============================================================================
+
+def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Descarga `url`, intenta extraer fecha/hora de publicación por:
+    - <meta ... (article:published_time, datePublished, parsely-pub-date, etc.)>
+    - <script type="application/ld+json"> (datePublished / dateCreated / dateModified)
+    - <time datetime="...">
+    Si falla, intenta repetir en la página AMP (rel=amphtml) si existe.
+
+    Devuelve un dict con campos de diagnóstico:
+      {
+        'url','final_url','http_status','html_len','error',
+        'method','key','raw','parsed_date','parsed_time','source',
+        # si hay AMP:
+        'amp_url','amp_http_status','amp_error','amp_html_len'
+      }
+    """
+    import re, json, html, gzip
+    from typing import Tuple
+    from datetime import datetime
+
+    UA = ua or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    )
+
+    META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I | re.S)
+    ATTR_RE = re.compile(r'([^\s=/>]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I | re.S)
+    SCRIPT_LD_RE = re.compile(
+        r'<script\b[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        re.I | re.S
+    )
+    TIME_DT_RE = re.compile(r'<time\b[^>]*datetime\s*=\s*["\']([^"\']+)["\']', re.I | re.S)
+    AMP_LINK_RE = re.compile(r'<link\b[^>]*rel\s*=\s*["\']amphtml["\'][^>]*href\s*=\s*["\']([^"\']+)["\']', re.I | re.S)
+
+    KEYS_PRIORIDAD = (
+        "article:published_time","og:article:published_time","og:published_time",
+        "parsely-pub-date","sailthru.date","pubdate","publishdate",
+        "datepublished","dc.date","dc.date.issued","dc.date.published",
+        "date","prism.publishdate","fb:publication_time",
+    )
+    ITEMPROP_CANDIDATES = ("datepublished","datecreated","dateissued","datemodified")
+
+    def _try_parse_dt(s: str):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            from dateutil import parser as dp  # type: ignore
+            return dp.parse(s)
+        except Exception:
+            pass
+        s2 = s.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s2)
+        except Exception:
+            pass
+        m = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)", s)
+        if m:
+            try:
+                return datetime.fromisoformat(m.group(1) + "T" + m.group(2))
+            except Exception:
+                return None
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+        if m:
+            try:
+                return datetime.fromisoformat(m.group(1))
+            except Exception:
+                return None
+        return None
+
+    def _fetch(url0: str) -> Tuple[str, int, str, Optional[str]]:
+        # Devuelve (final_url, http_status, html_text, error)
+        headers = {
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        # 1) requests
+        try:
+            import requests  # type: ignore
+            r = requests.get(url0, headers=headers, timeout=timeout, allow_redirects=True)
+            status = getattr(r, "status_code", 0) or 0
+            final_url = getattr(r, "url", url0)
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                return final_url, status, r.text if getattr(r, "text", "") else "", f"HTTP error: {e}"
+            enc = r.encoding or "utf-8"
+            text = r.text if r.text else r.content.decode(enc, errors="ignore")
+            return final_url, status, text, None
+        except Exception as e_req:
+            err_req = f"requests failed: {e_req}"
+
+        # 2) urllib fallback
+        try:
+            from urllib.request import Request, urlopen
+            req = Request(url0, headers={"User-Agent": UA, "Accept-Encoding": "gzip, deflate"})
+            with urlopen(req, timeout=timeout) as resp2:
+                status = getattr(resp2, "status", 200) or 200
+                final_url = getattr(resp2, "url", url0)
+                data = resp2.read()
+                enc_hdr = (resp2.headers.get("Content-Encoding") or "").lower()
+                if "gzip" in enc_hdr:
+                    try:
+                        data = gzip.decompress(data)
+                    except Exception:
+                        pass
+                try:
+                    text = data.decode("utf-8")
+                except Exception:
+                    try:
+                        text = data.decode("latin-1", errors="ignore")
+                    except Exception:
+                        text = ""
+            return final_url, status, text, err_req
+        except Exception as e_ul:
+            return url0, 0, "", f"{err_req} | urllib failed: {e_ul}"
+
+    def _extract_meta(html_text: str) -> Optional[Dict[str, Any]]:
+        for tag in META_TAG_RE.findall(html_text or ""):
+            attrs = {m.group(1).lower(): (m.group(2) or m.group(3) or "") for m in ATTR_RE.finditer(tag)}
+            key = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").strip().lower()
+            val = html.unescape((attrs.get("content") or attrs.get("value") or "").strip())
+            if not key or not val:
+                continue
+            if key in KEYS_PRIORIDAD or key in ITEMPROP_CANDIDATES:
+                dt = _try_parse_dt(val)
+                if dt:
+                    return {
+                        "method": "meta",
+                        "key": key,
+                        "raw": val,
+                        "parsed_date": dt.date().isoformat(),
+                        "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
+                        "snippet": tag[:220].replace("\n"," "),
+                    }
+        return None
+
+    def _walk_json(o):
+        if isinstance(o, dict):
+            if "@type" in o and str(o["@type"]).lower() in ("newsarticle","article","report","blogposting"):
+                for key in ("datePublished","dateCreated","dateModified"):
+                    v = o.get(key)
+                    if isinstance(v, str):
+                        dt = _try_parse_dt(v)
+                        if dt:
+                            return ("ld+json", key, v, dt)
+            for k, v in o.items():
+                if isinstance(v, str) and k.lower() in ("datepublished","datecreated","datemodified"):
+                    dt = _try_parse_dt(v)
+                    if dt:
+                        return ("ld+json", k, v, dt)
+                if isinstance(v, (dict, list)):
+                    got = _walk_json(v)
+                    if got: return got
+        elif isinstance(o, list):
+            for it in o:
+                got = _walk_json(it)
+                if got: return got
+        return None
+
+    def _extract_ld(html_text: str) -> Optional[Dict[str, Any]]:
+        for block in SCRIPT_LD_RE.findall(html_text or ""):
+            raw = html.unescape(block)
+            try:
+                data = json.loads(raw)
+                got = _walk_json(data)
+                if got:
+                    _m, k, v, dt = got
+                    return {
+                        "method": "ld+json",
+                        "key": k,
+                        "raw": v,
+                        "parsed_date": dt.date().isoformat(),
+                        "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
+                        "snippet": (raw[:220].replace("\n"," ") + ("..." if len(raw) > 220 else "")),
+                    }
+            except Exception:
+                m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
+                if m:
+                    v = m.group(1)
+                    dt = _try_parse_dt(v)
+                    if dt:
+                        return {
+                            "method": "ld+json",
+                            "key": "datePublished(regex)",
+                            "raw": v,
+                            "parsed_date": dt.date().isoformat(),
+                            "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
+                            "snippet": (raw[:220].replace("\n"," ") + ("..." if len(raw) > 220 else "")),
+                        }
+        return None
+
+    def _extract_time(html_text: str) -> Optional[Dict[str, Any]]:
+        m = TIME_DT_RE.search(html_text or "")
+        if not m:
+            return None
+        v = html.unescape(m.group(1))
+        dt = _try_parse_dt(v)
+        if dt:
+            return {
+                "method": "time",
+                "key": "time[datetime]",
+                "raw": v,
+                "parsed_date": dt.date().isoformat(),
+                "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
+                "snippet": (html_text[max(0, m.start()-60):m.end()+60].replace("\n"," ")[:220]),
+            }
+        return None
+
+    def _try_all(html_text: str) -> Optional[Dict[str, Any]]:
+        return _extract_meta(html_text) or _extract_ld(html_text) or _extract_time(html_text)
+
+    # ---------- fetch principal
+    final_url, status, text, err = _fetch(url)
+    result: Dict[str, Any] = {
+        "url": url,
+        "final_url": final_url,
+        "http_status": status,
+        "html_len": len(text or ""),
+        "error": err,
+        "method": "none",
+        "key": "",
+        "raw": "",
+        "parsed_date": "",
+        "parsed_time": "",
+        "source": "main",
+    }
+
+    if status >= 200 and status < 400 and text:
+        got = _try_all(text)
+        if got:
+            result.update(got)
+            return result
+
+        # ¿hay amphtml?
+        m_amp = AMP_LINK_RE.search(text)
+        if m_amp:
+            amp_url = m_amp.group(1)
+            f_amp, s_amp, t_amp, e_amp = _fetch(amp_url)
+            result["amp_url"] = f_amp
+            result["amp_http_status"] = s_amp
+            result["amp_error"] = e_amp
+            result["amp_html_len"] = len(t_amp or "")
+            if s_amp >= 200 and s_amp < 400 and t_amp:
+                got_amp = _try_all(t_amp)
+                if got_amp:
+                    got_amp["method"] = got_amp["method"] + " (amp)"
+                    result.update(got_amp)
+                    result["source"] = "amp"
+                    return result
+
+    # sin match
+    return result
+
 __all__ = [
     "USING_EXT",
     "EXT_PACKAGE",
@@ -1345,4 +1610,5 @@ __all__ = [
     "run_ga4_audience_report",
     "run_discover_retention",         # <-- NUEVO
     "DiscoverRetentionParams",        # <-- NUEVO
+    "debug_extract_pubdate",          # <-- NUEVO (export helper)
 ]
