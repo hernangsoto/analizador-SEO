@@ -226,6 +226,26 @@ def maintenance_extra_ui():
         except Exception:
             pass
 
+        # 👇👇 INSERTAR ESTE BLOQUE AQUÍ 👇👇
+        with st.expander("seo_analisis_ext (diagnóstico)", expanded=True):
+            import importlib, sys
+            try:
+                import seo_analisis_ext as ext
+                st.write("seo_analisis_ext versión:", getattr(ext, "__version__", "?"))
+                st.write("archivo:", getattr(ext, "__file__", "?"))
+                st.write("¿exporta run_discover_retention?:", hasattr(ext, "run_discover_retention"))
+                # También probá si existe como submódulo:
+                try:
+                    mod = importlib.import_module("seo_analisis_ext.discover_retention")
+                    st.write("submódulo discover_retention OK:", hasattr(mod, "run_discover_retention"))
+                except Exception as e:
+                    st.write("submódulo discover_retention: NO cargó →", e)
+            except Exception as e:
+                st.write("seo_analisis_ext NO cargó →", e)
+                st.write("sys.path top:", sys.path[:5])
+        # 👆👆 HASTA AQUÍ 👆👆
+
+
 sidebar_user_info(user, maintenance_extra=maintenance_extra_ui)
 
 # === Acciones de query ===
