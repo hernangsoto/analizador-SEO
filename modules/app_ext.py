@@ -538,31 +538,26 @@ def _run_discover_retention_daily_compat(
     drive_service,
     gs_client,
     site_url: str,
-    params: Dict[str, Any],
+    params: dict,
     dest_folder_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Modo compatibilidad (sin HOUR/HOURLY_ALL):
       - Arma Sheets desde template
       - Completa Configuración
-      - Extrae serie diaria Discover por URL para el período/segmentos y calcula:
-          * Clics del período, Impresiones del período
-          * Sección (primer segmento del path)
-          * Fecha 1ra aparición (día), Fecha última aparición (día)
-          * Días de permanencia (last - first)
-          * Última visualización (día; hora vacía si no hay horas)
-          * Status
-      - NUEVO: Scraping concurrente de cada URL para extraer Fecha/Hora de publicación
-               desde <meta property="article:published_time"> y/o JSON-LD (datePublished).
+      - Serie diaria Discover por URL (GSC)
+      - Scraping concurrente para Fecha/Hora de publicación:
+          * <meta ... property|name|itemprop = (article:published_time | datePublished | parsely-pub-date | ... ) />
+          * JSON-LD (datePublished)
+          * <time datetime="...">
     """
     import pandas as pd  # type: ignore
     from datetime import date, datetime, timedelta
-    import re, json, html
+    import re, json, html, gzip, io
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    st = _dr_try_import_streamlit()
-
     # ---------------- Fechas del período ----------------
+    st = _dr_try_import_streamlit()
     start = params.get("start") or params.get("start_date")
     end   = params.get("end")   or params.get("end_date")
     if not start or not end:
@@ -575,19 +570,16 @@ def _run_discover_retention_daily_compat(
         if start_dt > end_dt:
             start_dt, end_dt = end_dt, start_dt
 
-    # ---- AVISO en la UI si caemos a compatibilidad diaria ----
+    # Aviso UI (caímos a diario)
     if st is not None:
         key = f"_dr_hourly_fallback::{_dr_domain(site_url)}::{_dr_iso(start_dt)}::{_dr_iso(end_dt)}"
         if not st.session_state.get(key):
             st.session_state[key] = True
             st.warning(
                 "⚠️ La propiedad de GSC aún no devuelve datos por **hora** para Discover vía API. "
-                "Se ejecuta en **modo Diario (compatibilidad)** para continuar el análisis."
+                "Se ejecuta en **modo Diario (compatibilidad)**."
             )
-            st.caption(
-                "Se crea el Sheets con el template indicado; las columnas de **hora** de ingreso a Discover quedarán vacías. "
-                "Cuando la API habilite horas para tu propiedad, el análisis volverá a usar granularidad horaria automáticamente."
-            )
+            st.caption("Las columnas de **hora** de ingreso a Discover quedarán vacías en este modo.")
 
     # ---------------- Filtros GSC ----------------
     path_filter = params.get("path") or params.get("section") or None
@@ -617,7 +609,6 @@ def _run_discover_retention_daily_compat(
     rows = resp.get("rows", []) or []
 
     if not rows:
-        # crear igual el sheets vacío para cumplir output
         return _dr_build_minimal_sheet(gs_client, drive_service, site_url, start_dt, end_dt, path_filter, country, dest_folder_id)
 
     df = pd.DataFrame([{
@@ -626,8 +617,8 @@ def _run_discover_retention_daily_compat(
         "clicks": r.get("clicks", 0),
         "impressions": r.get("impressions", 0),
     } for r in rows])
-
     df["date"] = pd.to_datetime(df["date"]).dt.date
+
     grp = df.groupby("url", as_index=False).agg(
         clicks=("clicks", "sum"),
         impressions=("impressions", "sum"),
@@ -637,97 +628,76 @@ def _run_discover_retention_daily_compat(
     grp["section"] = grp["url"].map(_dr_extract_section)
     grp["dias_perm"] = (grp["last_date"] - grp["first_date"]).dt.days
 
-    # ---------------------------------------------------------------------
-    #        NUEVO: Extracción de Fecha/Hora de publicación por URL
-    # ---------------------------------------------------------------------
-    # Estrategia:
-    # 1) Buscar <meta property="article:published_time" content="...">
-    # 2) Buscar variantes similares (name=..., og:article:published_time, pubdate, datePublished)
-    # 3) Parsear JSON-LD y extraer "datePublished"
-    # 4) Parseo flexible de fechas (dateutil si está, sino ISO/regex)
-    #
-    # Para performance: top-N URLs por clics (por defecto 300) con concurrencia.
-    TOP_N = int(params.get("max_pubdate_fetch", 300))
-    CONCURRENCY = int(params.get("pubdate_concurrency", 8))
-    TIMEOUT = float(params.get("pubdate_timeout", 6.0))
+    # =================== SCRAPING PUBLICACIÓN (MEJORADO) ===================
+
+    # a) Config
+    TOTAL = len(grp)
+    TOP_N = min(TOTAL, int(params.get("max_pubdate_fetch", 2000)))  # <— por defecto todas (hasta 2000)
+    CONCURRENCY = int(params.get("pubdate_concurrency", 10))
+    TIMEOUT = float(params.get("pubdate_timeout", 8.0))
+    UA = params.get("ua") or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    )
 
     urls_ranked = grp.sort_values("clicks", ascending=False)["url"].tolist()
     urls_fetch = urls_ranked[:TOP_N]
 
-    # --- HTTP GET con fallback a urllib ---
-    def _fetch_html(url: str) -> str:
-        # Primero, intentar con requests
-        try:
-            import requests  # type: ignore
-            headers = {
-                "User-Agent": params.get("ua") or "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            }
-            r = requests.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=True)
-            enc = r.encoding or "utf-8"
-            return r.text if r.text else r.content.decode(enc, errors="ignore")
-        except Exception:
-            # Fallback: urllib
-            try:
-                from urllib.request import Request, urlopen
-                req = Request(
-                    url,
-                    headers={
-                        "User-Agent": params.get("ua") or "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                    },
-                )
-                with urlopen(req, timeout=TIMEOUT) as resp2:
-                    data = resp2.read()
-                    try:
-                        return data.decode("utf-8")
-                    except Exception:
-                        return data.decode("latin-1", errors="ignore")
-            except Exception:
-                return ""
-
-    # --- Parseo de meta y JSON-LD ---
-    META_RE = re.compile(
-        r"""<meta\b[^>]*?(?:property|name)\s*=\s*["']([^"']+)["'][^>]*?
-                (?:content|value)\s*=\s*["']([^"']+)["'][^>]*?>""",
-        re.I | re.S | re.X,
+    # b) Helpers parsing HTML
+    META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I | re.S)
+    ATTR_RE = re.compile(r'([^\s=/>]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I | re.S)
+    SCRIPT_LD_RE = re.compile(
+        r'<script\b[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        re.I | re.S
     )
-    SCRIPTS_JSONLD_RE = re.compile(
-        r"""<script\b[^>]*?type\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script>""",
-        re.I | re.S,
-    )
+    TIME_DT_RE = re.compile(r'<time\b[^>]*datetime\s*=\s*["\']([^"\']+)["\']', re.I | re.S)
 
+    # claves candidatas (normalizadas a lower)
     KEYS_PRIORIDAD = (
         "article:published_time",
         "og:article:published_time",
-        "article:published",
-        "datepublished",
+        "og:published_time",
+        "parsely-pub-date",
+        "sailthru.date",
         "pubdate",
         "publishdate",
-        "dc.date", "dc.date.issued", "dc.date.published",
+        "datepublished",
+        "dc.date",
+        "dc.date.issued",
+        "dc.date.published",
         "date",
+        "prism.publishdate",
+        "fb:publication_time",
+    )
+    ITEMPROP_CANDIDATES = (
+        "datepublished",
+        "datecreated",
+        "dateissued",
+        "datemodified",   # fallback si no hay published
     )
 
-    def _try_parse_dt_str(s: str) -> Optional[datetime]:
-        # Preferir dateutil si está
+    def _try_parse_dt(s: str) -> Optional[datetime]:
+        s = (s or "").strip()
+        if not s:
+            return None
+        # dateutil si está
         try:
             from dateutil import parser as dp  # type: ignore
             return dp.parse(s)
         except Exception:
             pass
-        # ISO básico
-        s2 = s.strip().replace("Z", "+00:00")
+        # ISO estándar
+        s2 = s.replace("Z", "+00:00")
         try:
             return datetime.fromisoformat(s2)
         except Exception:
             pass
-        # yyyy-mm-dd hh:mm
-        m = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2})?", s)
+        # yyyy-mm-dd hh:mm[:ss]
+        m = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)", s)
         if m:
             try:
-                return datetime.fromisoformat(m.group(1) + "T" + m.group(2))
+                ss = m.group(1) + "T" + m.group(2)
+                return datetime.fromisoformat(ss)
             except Exception:
                 return None
         # yyyy-mm-dd
@@ -739,108 +709,167 @@ def _run_discover_retention_daily_compat(
                 return None
         return None
 
-    def _extract_pub_dt_from_html(html_text: str) -> Tuple[str, str]:
-        """Devuelve (fecha_str, hora_str) o ('','') si no encuentra."""
-        if not html_text:
-            return "", ""
-        # --- meta tags ---
-        metas = META_RE.findall(html_text)
-        # pick by prioridad de clave
-        cand_map = {}
-        for k, v in metas:
-            kk = (k or "").strip().lower()
-            vv = html.unescape((v or "").strip())
-            cand_map.setdefault(kk, []).append(vv)
-        # buscar por orden de prioridad
-        for key in KEYS_PRIORIDAD:
-            vals = cand_map.get(key, [])
-            for val in vals:
-                dt = _try_parse_dt_str(val)
+    def _extract_from_meta(html_text: str) -> Optional[datetime]:
+        for tag in META_TAG_RE.findall(html_text or ""):
+            attrs = {m.group(1).lower(): (m.group(2) or m.group(3) or "") for m in ATTR_RE.finditer(tag)}
+            key = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").strip().lower()
+            val = html.unescape((attrs.get("content") or attrs.get("value") or "").strip())
+            if not key or not val:
+                continue
+            # property/name candidatos
+            if key in KEYS_PRIORIDAD:
+                dt = _try_parse_dt(val)
                 if dt:
-                    d = dt.date().isoformat()
-                    h = dt.strftime("%H:%M")
-                    return d, h
+                    return dt
+            # itemprop candidatos
+            if key in ITEMPROP_CANDIDATES:
+                dt = _try_parse_dt(val)
+                if dt:
+                    return dt
+        return None
 
-        # --- JSON-LD ---
-        blocks = SCRIPTS_JSONLD_RE.findall(html_text) or []
-        def _walk(o):
-            if isinstance(o, dict):
-                for k, v in o.items():
-                    lk = str(k).lower()
-                    if lk == "datepublished" and isinstance(v, str):
-                        dt = _try_parse_dt_str(v)
+    def _walk_json(o) -> Optional[datetime]:
+        # Busca datePublished preferentemente
+        if isinstance(o, dict):
+            # priorizar NewsArticle/Article
+            if "@type" in o and str(o["@type"]).lower() in ("newsarticle", "article", "report", "blogposting"):
+                # preferencia datePublished
+                for key in ("datePublished", "dateCreated", "dateModified"):
+                    if key in o and isinstance(o[key], str):
+                        dt = _try_parse_dt(o[key])
                         if dt:
                             return dt
-                    # newsArticle a veces anida 'mainEntityOfPage' o 'article' con datePublished
-                    if isinstance(v, (dict, list)):
-                        got = _walk(v)
-                        if got:
-                            return got
-            elif isinstance(o, list):
-                for it in o:
-                    got = _walk(it)
+            # recorrer todos los items también
+            for k, v in o.items():
+                if isinstance(v, str) and k.lower() in ("datepublished", "datecreated", "datemodified"):
+                    dt = _try_parse_dt(v)
+                    if dt:
+                        return dt
+                if isinstance(v, (dict, list)):
+                    got = _walk_json(v)
                     if got:
                         return got
-            return None
+        elif isinstance(o, list):
+            for it in o:
+                got = _walk_json(it)
+                if got:
+                    return got
+        return None
 
-        for raw in blocks:
+    def _extract_from_ld(html_text: str) -> Optional[datetime]:
+        for block in SCRIPT_LD_RE.findall(html_text or ""):
+            raw = html.unescape(block)
+            # Algunos sitios concatenan varios objetos: intentar JSON por líneas/brackets
             try:
-                data = json.loads(html.unescape(raw))
+                data = json.loads(raw)
+                got = _walk_json(data)
+                if got:
+                    return got
             except Exception:
-                # a veces vienen varios JSON pegados; intentar heurística
+                # fallback rápido: regex directa a "datePublished"
+                m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
+                if m:
+                    dt = _try_parse_dt(m.group(1))
+                    if dt:
+                        return dt
+        return None
+
+    def _extract_from_time(html_text: str) -> Optional[datetime]:
+        m = TIME_DT_RE.search(html_text or "")
+        if not m:
+            return None
+        return _try_parse_dt(html.unescape(m.group(1)))
+
+    # c) Fetch HTML
+    def _fetch_html(url: str) -> str:
+        # try requests
+        try:
+            import requests  # type: ignore
+            headers = {
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            }
+            r = requests.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=True)
+            r.raise_for_status()
+            enc = r.encoding or "utf-8"
+            return r.text if r.text else r.content.decode(enc, errors="ignore")
+        except Exception:
+            pass
+        # fallback urllib
+        try:
+            from urllib.request import Request, urlopen
+            req = Request(
+                url,
+                headers={
+                    "User-Agent": UA,
+                    "Accept-Encoding": "gzip, deflate",
+                },
+            )
+            with urlopen(req, timeout=TIMEOUT) as resp2:
+                data = resp2.read()
+                enc_hdr = (resp2.headers.get("Content-Encoding") or "").lower()
+                if "gzip" in enc_hdr:
+                    try:
+                        data = gzip.decompress(data)
+                    except Exception:
+                        pass
                 try:
-                    # extraer "datePublished":"..."
-                    m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
-                    if m:
-                        dt = _try_parse_dt_str(m.group(1))
-                        if dt:
-                            return dt.date().isoformat(), dt.strftime("%H:%M")
+                    return data.decode("utf-8")
                 except Exception:
-                    pass
-                continue
-            dt = _walk(data)
-            if dt:
-                return dt.date().isoformat(), dt.strftime("%H:%M")
+                    try:
+                        return data.decode("latin-1", errors="ignore")
+                    except Exception:
+                        return ""
+        except Exception:
+            return ""
 
-        return "", ""
+    def _extract_pub_dt(html_text: str) -> Optional[datetime]:
+        return (
+            _extract_from_meta(html_text)
+            or _extract_from_ld(html_text)
+            or _extract_from_time(html_text)
+        )
 
-    def _fetch_and_extract(url: str) -> Tuple[str, str, str]:
+    def _fetch_and_extract(url: str) -> tuple[str, str, str]:
         try:
             html_text = _fetch_html(url)
-            d, h = _extract_pub_dt_from_html(html_text)
-            return url, d, h
+            dt = _extract_pub_dt(html_text)
+            if dt:
+                # mantenemos hora “tal cual”, no convertimos TZ
+                return url, dt.date().isoformat(), dt.strftime("%H:%M")
+            return url, "", ""
         except Exception:
             return url, "", ""
 
-    # Concurrencia controlada
-    pub_date_map: Dict[str, Tuple[str, str]] = {}
     if urls_fetch:
         if st is not None:
-            st.caption(f"⏳ Extrayendo fecha/hora de publicación desde meta/JSON-LD en {len(urls_fetch)} URLs (máx={TOP_N})…")
+            st.caption(f"⏳ Extrayendo fecha/hora de publicación en {len(urls_fetch)} URLs (máx={TOP_N})…")
+        pub_date_map: dict[str, tuple[str, str]] = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-            futs = [ex.submit(_fetch_and_extract, u) for u in urls_fetch]
+            futures = [ex.submit(_fetch_and_extract, u) for u in urls_fetch]
             ok = 0
-            for f in as_completed(futs):
+            for f in as_completed(futures):
                 u, d, h = f.result()
                 if d:
                     ok += 1
                 pub_date_map[u] = (d, h)
         if st is not None:
             st.caption(f"✅ Publicación detectada en {sum(1 for v in pub_date_map.values() if v[0])}/{len(urls_fetch)} URLs.")
+    else:
+        pub_date_map = {}
 
-    # Asignar a todas las URLs; las no pedidas/extraídas quedan en blanco
     grp["fecha_pub"] = grp["url"].map(lambda u: pub_date_map.get(u, ("", ""))[0])
     grp["hora_pub"]  = grp["url"].map(lambda u: pub_date_map.get(u, ("", ""))[1])
 
-    # Hora ingreso Discover (sin hora en compat)
-    grp["hora_ingreso"] = ""
-    # Última visualización (día; hora vacía)
+    # =================== Resto de columnas ===================
+    grp["hora_ingreso"] = ""  # no hay horas en modo compat
     grp["ultima_vis"] = grp["last_date"].astype(str)
 
-    # ---------------- Status (usa fecha_pub si existe) ----------------
-    s_start = start_dt
-    s_end   = end_dt
-
+    s_start, s_end = start_dt, end_dt
     def _status_row(first_d, last_d, fecha_pub_str: str):
         pub_d = None
         if fecha_pub_str:
@@ -859,19 +888,18 @@ def _run_discover_retention_daily_compat(
 
     grp["status"] = [ _status_row(fd, ld, fp) for fd, ld, fp in zip(grp["first_date"], grp["last_date"], grp["fecha_pub"]) ]
 
-    # ---------------- Reordenar columnas para la hoja "Análisis" ----------------
     out = grp[[
-        "url",               # A URL
-        "clicks",            # B Clics del período
-        "impressions",       # C Impresiones del período
-        "section",           # D Sección
-        "fecha_pub",         # E Fecha de publicación
-        "hora_pub",          # F Hora de publicación
-        "first_date",        # G Fecha de ingreso a Discover (día)
-        "hora_ingreso",      # H Hora de ingreso a Discover (vacío)
-        "dias_perm",         # I Días de permanencia
-        "ultima_vis",        # J Última visualización en Discover (día)
-        "status",            # K Status
+        "url",
+        "clicks",
+        "impressions",
+        "section",
+        "fecha_pub",
+        "hora_pub",
+        "first_date",
+        "hora_ingreso",
+        "dias_perm",
+        "ultima_vis",
+        "status",
     ]].rename(columns={
         "url": "URL",
         "clicks": "Clics del período",
@@ -886,7 +914,7 @@ def _run_discover_retention_daily_compat(
         "status": "Status",
     })
 
-    # ---------------- Crear Sheets desde template y volcar datos ----------------
+    # =================== Sheets desde template ===================
     template_id = params.get("template_id") or "1SB9wFHWyDfd5P-24VBP7-dE1f1t7YvVYjnsc2XjqU8M"
     site_name = _dr_domain(site_url)
     today_str = _dr_iso(date.today())
@@ -895,7 +923,6 @@ def _run_discover_retention_daily_compat(
     sid = _dr_drive_copy_from_template(drive_service, template_id, title, dest_folder_id)
     sh = gs_client.open_by_key(sid)
 
-    # Configuración
     ws_cfg = _dr_ws_ensure(sh, "Configuración")
     cfg_rows = [
         ["Configuración", "Valores"],
@@ -909,7 +936,6 @@ def _run_discover_retention_daily_compat(
         cfg_rows.append(["País", str(country).upper()])
     _dr_write_ws(ws_cfg, cfg_rows)
 
-    # Análisis
     ws_an = _dr_ws_ensure(sh, "Análisis")
     _dr_write_ws(ws_an, out)
 
