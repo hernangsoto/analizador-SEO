@@ -10,7 +10,8 @@ Exporta:
 - run_content_structure
 - run_sections_analysis
 - run_report_results
-- run_ga4_audience_report  <-- NUEVO
+- run_ga4_audience_report
+- run_discover_retention, DiscoverRetentionParams  <-- NUEVO
 
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
@@ -24,16 +25,19 @@ _ext = ensure_external_package()
 
 # =================== Preferimos funciones del paquete externo ===================
 
-run_core_update        = getattr(_ext, "run_core_update", None) if _ext else None
-run_evergreen          = getattr(_ext, "run_evergreen", None) if _ext else None
-run_traffic_audit      = getattr(_ext, "run_traffic_audit", None) if _ext else None
-run_names_analysis     = getattr(_ext, "run_names_analysis", None) if _ext else None
-run_discover_snoop     = getattr(_ext, "run_discover_snoop", None) if _ext else None
-run_content_analysis   = getattr(_ext, "run_content_analysis", None) if _ext else None
-run_content_structure  = getattr(_ext, "run_content_structure", None) if _ext else None
-run_sections_analysis  = getattr(_ext, "run_sections_analysis", None) if _ext else None
-run_report_results     = getattr(_ext, "run_report_results", None) if _ext else None
-run_ga4_audience_report = getattr(_ext, "run_ga4_audience_report", None) if _ext else None  # <-- NUEVO
+run_core_update         = getattr(_ext, "run_core_update", None) if _ext else None
+run_evergreen           = getattr(_ext, "run_evergreen", None) if _ext else None
+run_traffic_audit       = getattr(_ext, "run_traffic_audit", None) if _ext else None
+run_names_analysis      = getattr(_ext, "run_names_analysis", None) if _ext else None
+run_discover_snoop      = getattr(_ext, "run_discover_snoop", None) if _ext else None
+run_content_analysis    = getattr(_ext, "run_content_analysis", None) if _ext else None
+run_content_structure   = getattr(_ext, "run_content_structure", None) if _ext else None
+run_sections_analysis   = getattr(_ext, "run_sections_analysis", None) if _ext else None
+run_report_results      = getattr(_ext, "run_report_results", None) if _ext else None
+run_ga4_audience_report = getattr(_ext, "run_ga4_audience_report", None) if _ext else None
+# Nuevo análisis Discover Retention (preferir export desde __init__, si existe)
+run_discover_retention  = getattr(_ext, "run_discover_retention", None) if _ext else None
+DiscoverRetentionParams = getattr(_ext, "DiscoverRetentionParams", None) if _ext else None
 
 # ============================= Fallbacks ========================================
 
@@ -155,9 +159,9 @@ if run_report_results is None:
                 if "://" not in u:
                     u = "https://" + u
                 net = _urlsplit(u).netloc
-                return net or u.strip("/").replace("https://","").replace("http://","")
+                return net or u.strip("/").replace("https://", "").replace("http://", "")
             except Exception:
-                return site_url.replace("https://","").replace("http://","").strip("/")
+                return site_url.replace("https://", "").replace("http://", "").strip("/")
 
         def _rr__as_date(d):
             if isinstance(d, date):
@@ -214,17 +218,21 @@ if run_report_results is None:
                 df["Posición"] = df["position"].astype(float).round(2)
             # Map de columnas visibles
             keep = []
-            if metrics.get("clicks"): keep.append("Clics")
-            if metrics.get("impressions"): keep.append("Impresiones")
-            if metrics.get("ctr"): keep.append("CTR")
-            if metrics.get("position"): keep.append("Posición")
+            if metrics.get("clicks"):
+                keep.append("Clics")
+            if metrics.get("impressions"):
+                keep.append("Impresiones")
+            if metrics.get("ctr"):
+                keep.append("CTR")
+            if metrics.get("position"):
+                keep.append("Posición")
             # Asegurar alias
             if "clicks" in df.columns and "Clics" not in df.columns:
                 df["Clics"] = df["clicks"]
             if "impressions" in df.columns and "Impresiones" not in df.columns:
                 df["Impresiones"] = df["impressions"]
-            dims = [c for c in df.columns if c in ("date","page","country")]
-            ordered = dims + [c for c in ["Clics","Impresiones","CTR","Posición"] if c in keep]
+            dims = [c for c in df.columns if c in ("date", "page", "country")]
+            ordered = dims + [c for c in ["Clics", "Impresiones", "CTR", "Posición"] if c in keep]
             return df[ordered] if ordered else df
 
         def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)"):
@@ -245,10 +253,10 @@ if run_report_results is None:
             start = _rr__as_date(params.get("start"))
             end   = _rr__as_date(params.get("end"))
             origin = (params.get("origin") or "search").strip().lower()   # "search" | "discover" | "both"
-            origin_list = ["search","discover"] if origin == "both" else [origin]
+            origin_list = ["search", "discover"] if origin == "both" else [origin]
             path = params.get("path") or None  # p.ej. "/vida/"
             countries = list(params.get("countries") or [])  # ISO3 (ARG, ESP, USA, ...)
-            metrics = dict(params.get("metrics") or {"clicks":True, "impressions":True, "ctr":True, "position":origin!="discover"})
+            metrics = dict(params.get("metrics") or {"clicks": True, "impressions": True, "ctr": True, "position": origin != "discover"})
             top_n = int(params.get("top_n", 20))
             title_prefix = params.get("sheet_title_prefix") or "Reporte de resultados"
 
@@ -288,7 +296,7 @@ if run_report_results is None:
                     )
                     if not df_series.empty:
                         df_series = df_series.groupby(["date"], as_index=False).agg({
-                            "clicks":"sum", "impressions":"sum", "ctr":"mean", "position":"mean"
+                            "clicks": "sum", "impressions": "sum", "ctr": "mean", "position": "mean"
                         })
                         df_series = _rr__apply_metrics(df_series, metrics)
                 except Exception:
@@ -313,7 +321,7 @@ if run_report_results is None:
                         if top_n > 0:
                             df_top_global = df_top_global.head(top_n)
                         df_top_global = _rr__apply_metrics(df_top_global, metrics)
-                        df_top_global = df_top_global.rename(columns={"page":"URL"})
+                        df_top_global = df_top_global.rename(columns={"page": "URL"})
                 except Exception:
                     pass
                 _rr__write_ws(_ensure(f"Top Global ({label})"), df_top_global)
@@ -327,7 +335,7 @@ if run_report_results is None:
                     try:
                         df_top_ctry = _rr__gsc_query(
                             sc_service, site_url, start, end, src,
-                            dimensions=["page","country"],
+                            dimensions=["page", "country"],
                             filters=filters_iso,
                             row_limit=max(1000, top_n if top_n > 0 else 1000),
                             order_by=[{"field": "clicks", "descending": True}],
@@ -340,7 +348,7 @@ if run_report_results is None:
                             if top_n > 0:
                                 df_top_ctry = df_top_ctry.head(top_n)
                             df_top_ctry = _rr__apply_metrics(df_top_ctry, metrics)
-                            df_top_ctry = df_top_ctry.rename(columns={"page":"URL","country":"País"})
+                            df_top_ctry = df_top_ctry.rename(columns={"page": "URL", "country": "País"})
                     except Exception:
                         pass
                     _rr__write_ws(_ensure(f"Top {iso.upper()} ({label})"), df_top_ctry)
@@ -349,13 +357,13 @@ if run_report_results is None:
             try:
                 ws_meta = _ensure("Meta")
                 info = _pd.DataFrame({
-                    "campo": ["site_url","start","end","origin","path","countries","top_n","metrics"],
+                    "campo": ["site_url", "start", "end", "origin", "path", "countries", "top_n", "metrics"],
                     "valor": [
                         site_url, str(start), str(end),
                         origin, path or "(todo el sitio)",
                         ", ".join([c.upper() for c in countries]) if countries else "(Global)",
                         top_n,
-                        ", ".join([k for k,v in metrics.items() if v]) or "(ninguna)"
+                        ", ".join([k for k, v in metrics.items() if v]) or "(ninguna)"
                     ],
                 })
                 _rr__write_ws(ws_meta, info)
@@ -364,7 +372,7 @@ if run_report_results is None:
 
             return sid
 
-# GA4 Audiencia (ext → submódulo → local)  <-- NUEVO
+# GA4 Audiencia (ext → submódulo → local)
 if run_ga4_audience_report is None:
     _ga4aud = None
     # Intentar submódulo del paquete externo (aunque no esté exportado en __init__)
@@ -379,6 +387,41 @@ if run_ga4_audience_report is None:
         except Exception:
             _ga4aud = None
     run_ga4_audience_report = _ga4aud
+
+# Discover Retention (ext → submódulo → local opcional → stub)
+if (run_discover_retention is None) or (DiscoverRetentionParams is None):
+    _rdr = None
+    _Params = None
+    # Intentar submódulo del paquete externo (aunque no esté exportado en __init__)
+    try:
+        from seo_analisis_ext.discover_retention import (  # type: ignore
+            run_discover_retention as _rdr,
+            DiscoverRetentionParams as _Params,
+        )
+    except Exception:
+        # Fallback local opcional
+        try:
+            from modules.discover_retention import (  # type: ignore
+                run_discover_retention as _rdr,
+                DiscoverRetentionParams as _Params,
+            )
+        except Exception:
+            _rdr = None
+            _Params = None
+
+    run_discover_retention  = run_discover_retention  or _rdr
+    DiscoverRetentionParams = DiscoverRetentionParams or _Params
+
+    if run_discover_retention is None or DiscoverRetentionParams is None:
+        # Stub explícito para error claro si se intenta usar sin paquete externo ni fallback local
+        def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
+            raise RuntimeError(
+                "Falta seo_analisis_ext.run_discover_retention. "
+                "Instalá/actualizá el paquete externo o agrega el fallback local modules/discover_retention.py."
+            )
+
+        class DiscoverRetentionParams:  # type: ignore[no-redef]
+            """Stub: definí seo_analisis_ext.discover_retention.DiscoverRetentionParams o el fallback local."""
 
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
@@ -711,6 +754,7 @@ for _candidate in [
     "seo_analisis_ext.content_analysis",
     "seo_analisis_ext.analysis_content",
     "seo_analisis_ext.content_structure",
+    "seo_analisis_ext.discover_retention",  # añadido por si define _write_ws
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
@@ -727,5 +771,7 @@ __all__ = [
     "run_content_structure",
     "run_sections_analysis",
     "run_report_results",
-    "run_ga4_audience_report",  # <-- NUEVO
+    "run_ga4_audience_report",
+    "run_discover_retention",         # <-- NUEVO
+    "DiscoverRetentionParams",        # <-- NUEVO
 ]
