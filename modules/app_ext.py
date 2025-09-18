@@ -395,37 +395,62 @@ if run_ga4_audience_report is None:
             _ga4aud = None
     run_ga4_audience_report = _ga4aud
 
-# Discover Retention (ext → submódulo → local opcional → stub)
-if (run_discover_retention is None) or (DiscoverRetentionParams is None):
-    _rdr = None
-    _Params = None
-    try:
-        from seo_analisis_ext.discover_retention import (  # type: ignore
-            run_discover_retention as _rdr,
-            DiscoverRetentionParams as _Params,
-        )
-    except Exception:
+# Discover Retention (ext → submódulo → local opcional) con resolución perezosa
+def _resolve_discover_retention():
+    """Devuelve (fn, Params) intentando, en orden:
+       1) Atributos exportados por el paquete externo ya cargado (_ext)
+       2) Submódulo del paquete externo
+       3) Fallback local modules/discover_retention
+    """
+    fn = getattr(_ext, "run_discover_retention", None) if _ext else None
+    Params = getattr(_ext, "DiscoverRetentionParams", None) if _ext else None
+
+    if fn is None or Params is None:
+        try:
+            from seo_analisis_ext.discover_retention import (  # type: ignore
+                run_discover_retention as _fn2,
+                DiscoverRetentionParams as _Params2,
+            )
+            fn = fn or _fn2
+            Params = Params or _Params2
+        except Exception:
+            pass
+
+    if fn is None or Params is None:
         try:
             from modules.discover_retention import (  # type: ignore
-                run_discover_retention as _rdr,
-                DiscoverRetentionParams as _Params,
+                run_discover_retention as _fn3,
+                DiscoverRetentionParams as _Params3,
             )
+            fn = fn or _fn3
+            Params = Params or _Params3
         except Exception:
-            _rdr = None
-            _Params = None
+            pass
 
-    run_discover_retention  = run_discover_retention  or _rdr
-    DiscoverRetentionParams = DiscoverRetentionParams or _Params
+    return fn, Params
 
-    if run_discover_retention is None or DiscoverRetentionParams is None:
-        def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
-            raise RuntimeError(
-                "Falta seo_analisis_ext.run_discover_retention. "
-                "Instalá/actualizá el paquete externo o agrega el fallback local modules/discover_retention.py."
-            )
+# Intento de resolución al importar el módulo
+_fn, _Params = _resolve_discover_retention()
 
-        class DiscoverRetentionParams:  # type: ignore[no-redef]
-            """Stub: definí seo_analisis_ext.discover_retention.DiscoverRetentionParams o el fallback local."""
+if _fn and _Params:
+    run_discover_retention = _fn            # type: ignore[assignment]
+    DiscoverRetentionParams = _Params       # type: ignore[assignment]
+else:
+    # Stub perezoso: reintenta resolver en el momento de la llamada
+    def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
+        _fn2, _Params2 = _resolve_discover_retention()
+        if _fn2 and _Params2:
+            globals()["run_discover_retention"] = _fn2
+            globals()["DiscoverRetentionParams"] = _Params2
+            return _fn2(*args, **kwargs)
+        raise RuntimeError(
+            "Falta seo_analisis_ext.run_discover_retention. "
+            "Instalá/actualizá el paquete externo o agregá modules/discover_retention.py."
+        )
+
+    class DiscoverRetentionParams:  # type: ignore[no-redef]
+        """Stub: se reemplaza automáticamente si el paquete externo/fallback está disponible."""
+        pass
 
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
