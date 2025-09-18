@@ -357,7 +357,7 @@ def _merge_identity(user):
     elif email and email != "—":
         picture = f"https://unavatar.io/{email}"
     else:
-        # Gravatar identicon sin email no tiene sentido, quedará None
+        # Avatar neutro
         picture = None
 
     if not picture and email and email != "—":
@@ -462,3 +462,90 @@ def login_screen():
         if st.button("Continuar (modo pruebas)", key="btn_bypass_only"):
             st.session_state["_auth_bypass"] = True
             st.rerun()
+
+
+# =============================================================================
+# UI para "Análisis de incorporación y permanencia en Discover"  (NUEVO)
+# =============================================================================
+
+def render_discover_retention_panel(
+    credentials,
+    default_site: str = "sc-domain:example.com",
+    dest_folder_id: str | None = None
+) -> None:
+    """
+    Renderiza el formulario y ejecuta el análisis usando el paquete externo (app_ext).
+    Requiere que `credentials` esté listo (por ej. en st.session_state["credentials"]).
+
+    Cómo invocarlo desde tu app:
+        from modules import ui
+        ui.render_discover_retention_panel(
+            credentials=st.session_state["credentials"],
+            default_site=st.session_state.get("selected_property", "sc-domain:example.com"),
+            dest_folder_id=st.session_state.get("drive_folder_id")
+        )
+    """
+    from modules.app_ext import run_discover_retention, DiscoverRetentionParams  # import dinámico
+
+    st.subheader("Análisis de incorporación y permanencia en Discover", anchor=False)
+
+    with st.form("frm_discover_retention"):
+        site_url = st.text_input(
+            "Propiedad de Search Console",
+            default_site,
+            help="Ej: sc-domain:example.com o https://www.ejemplo.com/"
+        )
+        section = st.text_input(
+            "Filtrar por sección (opcional)",
+            value="",
+            help="Primer segmento del path después del dominio. Dejar vacío para no filtrar."
+        )
+        device = st.selectbox(
+            "Dispositivo",
+            ["", "DESKTOP", "MOBILE", "TABLET"],
+            index=0
+        )
+        country = st.text_input(
+            "País (ISO-3, opcional)",
+            value="",
+            help="Ej: ARG, MEX, ESP"
+        )
+        pubmode = st.radio(
+            "Modo de fecha de publicación",
+            ["auto", "xpath"],
+            horizontal=True
+        )
+        xpath = st.text_input(
+            "XPath/CSS (si elegiste 'xpath')",
+            value=""
+        )
+        submitted = st.form_submit_button("Ejecutar análisis", use_container_width=True)
+
+    if submitted:
+        try:
+            params = DiscoverRetentionParams(
+                site_url=site_url.strip(),
+                section=(section.strip() or None),
+                device=(device or None) if device else None,
+                country_iso3=(country.strip().upper() or None),
+                pubdate_mode=pubmode,
+                pubdate_xpath=(xpath.strip() or None),
+                dest_folder_id=dest_folder_id,
+            )
+        except Exception as e:
+            st.error(f"No pude crear los parámetros del análisis: {e}")
+            return
+
+        with st.spinner("Ejecutando…"):
+            try:
+                res = run_discover_retention(credentials, params)
+            except Exception as e:
+                st.error(f"❌ Error al ejecutar el análisis: {e}")
+                return
+
+        st.success(f"✅ Listo: {res['title']}  \nPeríodo: {res['start_date']} → {res['end_date']}")
+        st.link_button(
+            "Abrir Google Sheets",
+            f"https://docs.google.com/spreadsheets/d/{res['sheet_id']}/edit",
+            use_container_width=True
+        )
