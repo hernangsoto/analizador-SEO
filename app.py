@@ -48,7 +48,10 @@ from modules.app_ext import (
     run_names_analysis,
     run_discover_snoop,
     run_content_analysis,
+    run_content_structure,  # <- NUEVO
+    run_discover_retention,  # NUEVO
 )
+
 from modules.app_utils import get_qp, clear_qp, has_gsc_scope, norm, has_ga4_scope
 
 def has_docs_scope(scopes: set[str] | list[str] | tuple[str, ...] | None) -> bool:
@@ -347,6 +350,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
         opciones.append("9. Análisis de contenido (repo externo)")
     opciones.append("10. Análisis de estructura de contenidos")
     opciones.append("11. Reporte de audiencia (GA4)")  # <-- NUEVO
+    opciones.append("12. Incorp. y permanencia en Discover (10 días horarios)")  # <-- NUEVO
 
     key = st.radio("Tipos disponibles:", opciones, index=1, key="analysis_choice")
     if key.startswith("2."): return "2"
@@ -359,6 +363,7 @@ def pick_analysis(include_auditoria: bool, include_names: bool = True, include_d
     if key.startswith("9."): return "9"
     if key.startswith("10."): return "10"
     if key.startswith("11."): return "11"   # <-- NUEVO
+    if key.startswith("12."): return "12"   # <-- NUEVO
     return "0"
 
 analisis = pick_analysis(include_auditoria, include_names=True, include_discover=True, include_content=True)
@@ -382,10 +387,14 @@ def _defaults_for_analysis(a: str) -> tuple[bool, bool, bool]:
         return False, False, True
     if a == "8":   # Discover Snoop → normalmente sin datos (opcional SC)
         return False, False, True
+    if a == "9":   # Análisis de contenido (runner externo)
+        return True, False, False  # SC por defecto
     if a == "10":  # Estructura de contenidos → suele usar SC
         return True, False, False
     if a == "11":  # Reporte de audiencia (GA4)
         return False, True, False
+    if a == "12":  # Incorp. y permanencia Discover
+        return True, False, False
     # Futuro/otros
     return False, False, True
 
@@ -2164,13 +2173,156 @@ elif analisis == "11":
         except Exception as e:
             st.error(f"Falló la generación del reporte de audiencia: {e}")
 
+elif analisis == "12":
+    # ===== NUEVO: Incorp. y permanencia en Discover (10 días horarios) =====
+    _require_sc_or_stop()
+    if run_discover_retention is None:
+        st.warning("Este despliegue no incluye `run_discover_retention` (agregalo en el repo externo).")
+        st.stop()
+
+    st.subheader("Incorporación y permanencia en Google Discover (10 días horarios)")
+    st.caption("Analiza datos horarios (UTC) de los últimos 10 días, con detección de fecha de publicación por cascada o XPath, y filtros por sección/país/dispositivo.")
+
+    # --- Ventana: últimos 10 días con lag
+    lag = st.number_input("Lag de días (evitar datos incompletos)", 0, 5, 3, 1, key="disc_ret_lag")
+    anchor = date.today() - timedelta(days=int(lag))
+    start_date = anchor - timedelta(days=9)
+    end_date = anchor
+    st.info(f"Período analizado (UTC): **{start_date} → {end_date}**")
+
+    # --- Detección de fecha de publicación
+    mode = st.radio("Detección de fecha de publicación", ["Automática (cascada)", "XPath personalizado"],
+                    index=0, horizontal=True, key="disc_ret_mode")
+    xp_pub = ""
+    if mode.startswith("XPath"):
+        xp_pub = st.text_input(
+            "XPath de fecha/hora de publicación (UTC)",
+           value="", key="disc_ret_xpath",
+            help="Ej.: //meta[@property='article:published_time']/@content  o  //time/@datetime"
+        )
+
+   # --- Filtros
+    with st.expander("Filtros", expanded=False):
+        section = st.text_input("Sección (path comienza con, ej: /deportes/)", value="", key="disc_ret_section")
+        device = st.selectbox("Dispositivo", ["(Todos)","DESKTOP","MOBILE","TABLET"], index=0, key="disc_ret_device")
+        country = st.text_input("País (ISO-3, ej: ARG/ESP/USA)", value="", key="disc_ret_country").strip().upper()
+
+    # --- Ejecutar
+   if st.button("📊 Ejecutar análisis de Discover (incorporación/permanencia)", type="primary", key="disc_ret_run"):
+        params = {
+            "window": {
+                "mode": "last_10_days",
+               "lag_days": int(lag),
+                "start": start_date,
+                "end": end_date,
+                "timezone": "UTC",
+               "hourly": True,
+            },
+            "publication_time": {
+                "mode": "auto" if mode.startswith("Automática") else "xpath",
+                "xpath": xp_pub or "",
+                "cascade": True,
+               "timezone": "UTC",
+            },
+            "filters": {
+                "section": section or None,
+               "device": None if device == "(Todos)" else device,
+                "country": country or None,  # ISO-3
+            },
+           "template_sheet_id": "1SB9wFHWyDfd5P-24VBP7-dE1f1t7YvVYjnsc2XjqU8M",
+            "sheet_title_prefix": "Incorp. y permanencia Discover",
+        }
+        if len(site_urls) <= 1:
+            sid = run_with_indicator(
+                "Procesando Discover (incorp./permanencia)",
+                run_discover_retention,
+                sc_service, drive_service, gs_client, site_url, params,
+                st.session_state.get("dest_folder_id")
+            )
+            if sid:
+                maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                st.success("¡Listo! Tu documento está creado.")
+                st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                with st.expander("Compartir acceso al documento (opcional)"):
+                    share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                st.session_state.update(last_file_id=sid, last_file_kind="discover_retention", post_actions_visible=True)
+        else:
+            results = run_for_sites(
+                "Procesando Discover (incorp./permanencia)",
+                run_discover_retention,
+                sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id")
+            )
+            st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+            for s, sid in results:
+                st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+            if results:
+                st.session_state.update(last_file_id=results[-1][1], last_file_kind="discover_retention", post_actions_visible=True)
+
 elif analisis == "9":
-    # ===== NUEVO: Análisis de contenido (repo externo) =====
+    # ===== Análisis de contenido (runner externo, con shim de normalización) =====
     if (run_content_analysis is None) or (params_for_content is None):
         st.warning("Este despliegue no incluye `run_content_analysis` y/o `params_for_content` (repo externo). "
                    "Actualizá el paquete `seo_analisis_ext` para habilitarlo.")
     else:
-        st.info("Este modo utiliza el runner externo. Si preferís algo más simple/rápido, usá **Análisis de estructura de contenidos** (opción 10).")
+        _require_sc_or_stop()  # requiere SC
+        st.subheader("Análisis de contenido (externo)")
+        st.caption("Analiza rendimiento por contenido con filtros por país/dispositivo/sección y periodo; genera Sheets con tablas y series. (Usa runner externo).")
+
+        # Parámetros UI (reutiliza tu módulo de params)
+        p = params_for_content()
+
+        # Botón de ejecución (soporta multi-sitio)
+        if st.button("🧩 Ejecutar Análisis de contenido (externo)", type="primary", key="btn_content_ext"):
+            try:
+                if len(site_urls) <= 1:
+                    sid = run_with_indicator(
+                        "Procesando Análisis de contenido (externo)",
+                        run_content_analysis,  # shim envuelve y normaliza params
+                        sc_service, drive_service, gs_client, site_url, p,
+                        st.session_state.get("dest_folder_id")
+                    )
+                    if sid:
+                        maybe_prefix_sheet_name_with_medio(drive_service, sid, site_url)
+                        st.success("¡Listo! Tu documento está creado.")
+                        st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
+                        with st.expander("Compartir acceso al documento (opcional)"):
+                            share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
+                        activity_log_append(
+                            drive_service, gs_client,
+                            user_email=( _me or {}).get("emailAddress") or "",
+                            event="analysis", site_url=site_url,
+                            analysis_kind="Análisis de contenido",
+                            sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                            gsc_account=st.session_state.get("src_account_label") or "",
+                            notes=f"params={p!r}"
+                        )
+                        st.session_state["last_file_id"] = sid
+                        st.session_state["last_file_kind"] = "content_analysis"
+                        st.session_state["post_actions_visible"] = True
+                else:
+                    results = run_for_sites(
+                        "Procesando Análisis de contenido (externo)",
+                        run_content_analysis, sc_service, drive_service, gs_client, site_urls, p,
+                        st.session_state.get("dest_folder_id")
+                    )
+                    st.success(f"¡Listo! Se generaron {len(results)} documentos.")
+                    for s, sid in results:
+                        st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
+                        activity_log_append(
+                            drive_service, gs_client,
+                            user_email=( _me or {}).get("emailAddress") or "",
+                            event="analysis", site_url=s,
+                            analysis_kind="Análisis de contenido",
+                            sheet_id=sid, sheet_name="", sheet_url=f"https://docs.google.com/spreadsheets/d/{sid}",
+                            gsc_account=st.session_state.get("src_account_label") or "",
+                            notes=f"params={p!r}"
+                        )
+                    if results:
+                        st.session_state["last_file_id"] = results[-1][1]
+                        st.session_state["last_file_kind"] = "content_analysis"
+                        st.session_state["post_actions_visible"] = True
+            except Exception as e:
+                st.error(f"Falló el análisis de contenido: {e}")
 
 elif analisis == "10":
     _require_sc_or_stop()
