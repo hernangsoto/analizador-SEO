@@ -21,6 +21,7 @@ Incluye:
     * Usa el paquete externo si está disponible.
     * Si la API rechaza HOUR/HOURLY_ALL (HTTP 400 INVALID_ARGUMENT), cae a modo Diario.
     * En modo Diario muestra un aviso en la UI (Streamlit) y arma el Sheets con el template.
+    * (NUEVO) En modo Diario: genera hoja "Debug Publicación" con diagnóstico de extracción.
 - Parche de serialización segura al escribir DataFrames a Google Sheets
 - Helper de depuración para extraer fecha/hora de publicación de URLs
 """
@@ -502,7 +503,6 @@ def _dr_is_invalid_argument(err: Exception) -> bool:
     if "hour" in txt or "hourly_all" in txt:
         return True
     try:
-        # googleapiclient.errors.HttpError?
         from googleapiclient.errors import HttpError  # type: ignore
         if isinstance(err, HttpError) and getattr(err, "status_code", 400) == 400:
             return True
@@ -520,15 +520,13 @@ def _normalize_params_for_ext(params: Dict[str, Any]) -> Dict[str, Any]:
     if start: p["start"] = _dr_iso(start)
     if end:   p["end"]   = _dr_iso(end)
     if "window" in p:
-        p.pop("window", None)  # algunos Param dataclass no lo aceptan
-    # alias básicos
+        p.pop("window", None)
     if "origin" not in p and "source" in p:
         p["origin"] = p["source"]
     if "source" not in p and "origin" in p:
         p["source"] = p["origin"]
     if not p.get("origin"):
         p["origin"] = "discover"
-    # template opcional
     if "template_id" not in p and "templateId" in p:
         p["template_id"] = p["templateId"]
     return p
@@ -548,14 +546,10 @@ def _run_discover_retention_daily_compat(
       - Arma Sheets desde template
       - Completa Configuración
       - Serie diaria Discover por URL (GSC)
-      - Scraping concurrente para Fecha/Hora de publicación:
-          * <meta ... property|name|itemprop = (article:published_time | datePublished | parsely-pub-date | ... ) />
-          * JSON-LD (datePublished)
-          * <time datetime="...">
+      - Scraping concurrente para Fecha/Hora de publicación con debug integrado
     """
     import pandas as pd  # type: ignore
-    from datetime import date, datetime, timedelta
-    import re, json, html, gzip, io
+    from datetime import date, timedelta
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # ---------------- Fechas del período ----------------
@@ -630,237 +624,67 @@ def _run_discover_retention_daily_compat(
     grp["section"] = grp["url"].map(_dr_extract_section)
     grp["dias_perm"] = (grp["last_date"] - grp["first_date"]).dt.days
 
-    # =================== SCRAPING PUBLICACIÓN (MEJORADO) ===================
-
-    # a) Config
+    # =================== SCRAPING PUBLICACIÓN + DEBUG ===================
     TOTAL = len(grp)
-    TOP_N = min(TOTAL, int(params.get("max_pubdate_fetch", 2000)))  # <— por defecto todas (hasta 2000)
+    TOP_N = min(TOTAL, int(params.get("max_pubdate_fetch", 2000)))
     CONCURRENCY = int(params.get("pubdate_concurrency", 10))
     TIMEOUT = float(params.get("pubdate_timeout", 8.0))
     UA = params.get("ua") or (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     )
+    DEBUG_ENABLED = bool(params.get("debug_pubdate", params.get("debug", True)))
+    DEBUG_SAMPLE = int(params.get("debug_sample", 100))
 
     urls_ranked = grp.sort_values("clicks", ascending=False)["url"].tolist()
     urls_fetch = urls_ranked[:TOP_N]
 
-    # b) Helpers parsing HTML
-    META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I | re.S)
-    ATTR_RE = re.compile(r'([^\s=/>]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I | re.S)
-    SCRIPT_LD_RE = re.compile(
-        r'<script\b[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        re.I | re.S
-    )
-    TIME_DT_RE = re.compile(r'<time\b[^>]*datetime\s*=\s*["\']([^"\']+)["\']', re.I | re.S)
+    debug_rows: List[Dict[str, Any]] = []
 
-    # claves candidatas (normalizadas a lower)
-    KEYS_PRIORIDAD = (
-        "article:published_time",
-        "og:article:published_time",
-        "og:published_time",
-        "parsely-pub-date",
-        "sailthru.date",
-        "pubdate",
-        "publishdate",
-        "datepublished",
-        "dc.date",
-        "dc.date.issued",
-        "dc.date.published",
-        "date",
-        "prism.publishdate",
-        "fb:publication_time",
-    )
-    ITEMPROP_CANDIDATES = (
-        "datepublished",
-        "datecreated",
-        "dateissued",
-        "datemodified",   # fallback si no hay published
-    )
+    def _fetch_and_extract(u: str):
+        # Usamos el helper de depuración para obtener todo y, de paso, la fecha/hora
+        res = debug_extract_pubdate(u, timeout=TIMEOUT, ua=UA)
+        d = res.get("parsed_date", "") or ""
+        h = res.get("parsed_time", "") or ""
+        if DEBUG_ENABLED and (len(debug_rows) < max(1, DEBUG_SAMPLE)):
+            # guardamos primeras N para la hoja de debug
+            debug_rows.append({
+                "URL": u,
+                "final_url": res.get("final_url", ""),
+                "http_status": res.get("http_status", ""),
+                "method": res.get("method", ""),
+                "key": res.get("key", ""),
+                "raw": res.get("raw", "")[:240],
+                "parsed_date": d,
+                "parsed_time": h,
+                "source": res.get("source", "main"),
+                "error": res.get("error", ""),
+                "html_len": res.get("html_len", ""),
+                "amp_url": res.get("amp_url", ""),
+                "amp_http_status": res.get("amp_http_status", ""),
+                "amp_html_len": res.get("amp_html_len", ""),
+                "amp_error": res.get("amp_error", ""),
+            })
+        return u, d, h
 
-    def _try_parse_dt(s: str) -> Optional[datetime]:
-        s = (s or "").strip()
-        if not s:
-            return None
-        # dateutil si está
-        try:
-            from dateutil import parser as dp  # type: ignore
-            return dp.parse(s)
-        except Exception:
-            pass
-        # ISO estándar
-        s2 = s.replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(s2)
-        except Exception:
-            pass
-        # yyyy-mm-dd hh:mm[:ss]
-        m = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)", s)
-        if m:
-            try:
-                ss = m.group(1) + "T" + m.group(2)
-                return datetime.fromisoformat(ss)
-            except Exception:
-                return None
-        # yyyy-mm-dd
-        m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
-        if m:
-            try:
-                return datetime.fromisoformat(m.group(1))
-            except Exception:
-                return None
-        return None
-
-    def _extract_from_meta(html_text: str) -> Optional[datetime]:
-        for tag in META_TAG_RE.findall(html_text or ""):
-            attrs = {m.group(1).lower(): (m.group(2) or m.group(3) or "") for m in ATTR_RE.finditer(tag)}
-            key = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").strip().lower()
-            val = html.unescape((attrs.get("content") or attrs.get("value") or "").strip())
-            if not key or not val:
-                continue
-            # property/name candidatos
-            if key in KEYS_PRIORIDAD:
-                dt = _try_parse_dt(val)
-                if dt:
-                    return dt
-            # itemprop candidatos
-            if key in ITEMPROP_CANDIDATES:
-                dt = _try_parse_dt(val)
-                if dt:
-                    return dt
-        return None
-
-    def _walk_json(o) -> Optional[datetime]:
-        # Busca datePublished preferentemente
-        if isinstance(o, dict):
-            # priorizar NewsArticle/Article
-            if "@type" in o and str(o["@type"]).lower() in ("newsarticle", "article", "report", "blogposting"):
-                # preferencia datePublished
-                for key in ("datePublished", "dateCreated", "dateModified"):
-                    if key in o and isinstance(o[key], str):
-                        dt = _try_parse_dt(o[key])
-                        if dt:
-                            return dt
-            # recorrer todos los items también
-            for k, v in o.items():
-                if isinstance(v, str) and k.lower() in ("datepublished", "datecreated", "datemodified"):
-                    dt = _try_parse_dt(v)
-                    if dt:
-                        return dt
-                if isinstance(v, (dict, list)):
-                    got = _walk_json(v)
-                    if got:
-                        return got
-        elif isinstance(o, list):
-            for it in o:
-                got = _walk_json(it)
-                if got:
-                    return got
-        return None
-
-    def _extract_from_ld(html_text: str) -> Optional[datetime]:
-        for block in SCRIPT_LD_RE.findall(html_text or ""):
-            raw = html.unescape(block)
-            # Algunos sitios concatenan varios objetos: intentar JSON por líneas/brackets
-            try:
-                data = json.loads(raw)
-                got = _walk_json(data)
-                if got:
-                    return got
-            except Exception:
-                # fallback rápido: regex directa a "datePublished"
-                m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
-                if m:
-                    dt = _try_parse_dt(m.group(1))
-                    if dt:
-                        return dt
-        return None
-
-    def _extract_from_time(html_text: str) -> Optional[datetime]:
-        m = TIME_DT_RE.search(html_text or "")
-        if not m:
-            return None
-        return _try_parse_dt(html.unescape(m.group(1)))
-
-    # c) Fetch HTML
-    def _fetch_html(url: str) -> str:
-        # try requests
-        try:
-            import requests  # type: ignore
-            headers = {
-                "User-Agent": UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
-                "Accept-Encoding": "gzip, deflate",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            }
-            r = requests.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=True)
-            r.raise_for_status()
-            enc = r.encoding or "utf-8"
-            return r.text if r.text else r.content.decode(enc, errors="ignore")
-        except Exception:
-            pass
-        # fallback urllib
-        try:
-            from urllib.request import Request, urlopen
-            req = Request(
-                url,
-                headers={
-                    "User-Agent": UA,
-                    "Accept-Encoding": "gzip, deflate",
-                },
-            )
-            with urlopen(req, timeout=TIMEOUT) as resp2:
-                data = resp2.read()
-                enc_hdr = (resp2.headers.get("Content-Encoding") or "").lower()
-                if "gzip" in enc_hdr:
-                    try:
-                        data = gzip.decompress(data)
-                    except Exception:
-                        pass
-                try:
-                    return data.decode("utf-8")
-                except Exception:
-                    try:
-                        return data.decode("latin-1", errors="ignore")
-                    except Exception:
-                        return ""
-        except Exception:
-            return ""
-
-    def _extract_pub_dt(html_text: str) -> Optional[datetime]:
-        return (
-            _extract_from_meta(html_text)
-            or _extract_from_ld(html_text)
-            or _extract_from_time(html_text)
-        )
-
-    def _fetch_and_extract(url: str) -> tuple[str, str, str]:
-        try:
-            html_text = _fetch_html(url)
-            dt = _extract_pub_dt(html_text)
-            if dt:
-                # mantenemos hora “tal cual”, no convertimos TZ
-                return url, dt.date().isoformat(), dt.strftime("%H:%M")
-            return url, "", ""
-        except Exception:
-            return url, "", ""
+    pub_date_map: dict[str, tuple[str, str]] = {}
 
     if urls_fetch:
         if st is not None:
             st.caption(f"⏳ Extrayendo fecha/hora de publicación en {len(urls_fetch)} URLs (máx={TOP_N})…")
-        pub_date_map: dict[str, tuple[str, str]] = {}
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
             futures = [ex.submit(_fetch_and_extract, u) for u in urls_fetch]
-            ok = 0
             for f in as_completed(futures):
                 u, d, h = f.result()
-                if d:
-                    ok += 1
                 pub_date_map[u] = (d, h)
         if st is not None:
-            st.caption(f"✅ Publicación detectada en {sum(1 for v in pub_date_map.values() if v[0])}/{len(urls_fetch)} URLs.")
+            found = sum(1 for v in pub_date_map.values() if v[0])
+            st.caption(f"✅ Publicación detectada en {found}/{len(urls_fetch)} URLs.")
+            if DEBUG_ENABLED and debug_rows:
+                import pandas as pd  # type: ignore
+                st.write("**Muestra de Debug de publicación (primeras N)**")
+                st.dataframe(pd.DataFrame(debug_rows))
     else:
         pub_date_map = {}
 
@@ -906,7 +730,6 @@ def _run_discover_retention_daily_compat(
         "url": "URL",
         "clicks": "Clics del período",
         "impressions": "Impresiones del período",
-        "Sección": "Sección",
         "section": "Sección",
         "fecha_pub": "Fecha de publicación",
         "hora_pub": "Hora de publicación",
@@ -918,9 +741,10 @@ def _run_discover_retention_daily_compat(
     })
 
     # =================== Sheets desde template ===================
+    from datetime import date as _date
     template_id = params.get("template_id") or "1SB9wFHWyDfd5P-24VBP7-dE1f1t7YvVYjnsc2XjqU8M"
     site_name = _dr_domain(site_url)
-    today_str = _dr_iso(date.today())
+    today_str = _dr_iso(_date.today())
     title = f"{site_name} - Discover Retention - {today_str}"
 
     sid = _dr_drive_copy_from_template(drive_service, template_id, title, dest_folder_id)
@@ -941,6 +765,13 @@ def _run_discover_retention_daily_compat(
 
     ws_an = _dr_ws_ensure(sh, "Análisis")
     _dr_write_ws(ws_an, out)
+
+    # ---- NUEVO: hoja de Debug con muestra ----
+    if DEBUG_ENABLED and debug_rows:
+        import pandas as pd  # type: ignore
+        ws_dbg = _dr_ws_ensure(sh, "Debug Publicación")
+        df_dbg = pd.DataFrame(debug_rows)
+        _dr_write_ws(ws_dbg, df_dbg)
 
     return sid
 
@@ -978,10 +809,8 @@ _fn, _Params = _resolve_discover_retention()
 
 def _wrap_run_discover_retention(ext_fn, ParamsCls):
     def _runner(sc_service, drive_service, gs_client, site_url: str, params: Any, dest_folder_id: Optional[str] = None):
-        # Normalizar params para no romper __init__ de ParamsCls
         p_dict = params if isinstance(params, dict) else getattr(params, "__dict__", {}) or {}
         p_norm = _normalize_params_for_ext(p_dict)
-        # Intentar con el runner externo
         try:
             if ParamsCls and not isinstance(params, ParamsCls):
                 try:
@@ -993,11 +822,9 @@ def _wrap_run_discover_retention(ext_fn, ParamsCls):
             return ext_fn(sc_service, drive_service, gs_client, site_url, params_ext, dest_folder_id)
         except Exception as e:
             if _dr_is_invalid_argument(e):
-                # Fallback diario con aviso
                 return _run_discover_retention_daily_compat(
                     sc_service, drive_service, gs_client, site_url, p_norm, dest_folder_id
                 )
-            # Otro error → re-lanzar
             raise
     return _runner
 
@@ -1005,7 +832,6 @@ if _fn and _Params:
     run_discover_retention = _wrap_run_discover_retention(_fn, _Params)   # type: ignore[assignment]
     DiscoverRetentionParams = _Params                                     # type: ignore[assignment]
 else:
-    # Stub perezoso: reintenta resolver en el momento de la llamada
     def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
         _fn2, _Params2 = _resolve_discover_retention()
         if _fn2 and _Params2:
@@ -1032,7 +858,6 @@ def _rca_normalize_params(p: dict) -> dict:
     if not isinstance(p, dict):
         return p
 
-    # tipo
     raw_tipo = str(p.get("tipo", "")).strip().lower()
     if raw_tipo in ("ambos", "both", "search+discover", "search + discover", "search y discover"):
         tipo = "both"
@@ -1046,7 +871,6 @@ def _rca_normalize_params(p: dict) -> dict:
     p.setdefault("source", tipo)
     p.setdefault("origen", "Search + Discover" if tipo == "both" else tipo.title())
 
-    # ventana
     lag = int(p.get("lag_days", 3))
     win = dict(p.get("window") or {})
     per = dict(p.get("period") or {})
@@ -1089,7 +913,6 @@ def _rca_normalize_params(p: dict) -> dict:
 
     p["period_label"] = f"{start} a {end}"
 
-    # filtros
     filters = dict(p.get("filters") or {})
     country = filters.get("country")
     if country in ("Todos", "", None):
@@ -1112,7 +935,6 @@ def _rca_normalize_params(p: dict) -> dict:
         filters.setdefault("sections", sec_payload)
     p["filters"] = filters
 
-    # orden y límites
     order_by = str(p.get("order_by", "clicks")).strip().lower()
     if order_by not in ("clicks", "impressions", "ctr", "position"):
         order_by = "clicks"
@@ -1328,7 +1150,7 @@ for _candidate in [
     "seo_analisis_ext.content_analysis",
     "seo_analisis_ext.analysis_content",
     "seo_analisis_ext.content_structure",
-    "seo_analisis_ext.discover_retention",  # añadido por si define _write_ws
+    "seo_analisis_ext.discover_retention",
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
@@ -1349,7 +1171,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
       {
         'url','final_url','http_status','html_len','error',
         'method','key','raw','parsed_date','parsed_time','source',
-        # si hay AMP:
         'amp_url','amp_http_status','amp_error','amp_html_len'
       }
     """
@@ -1376,6 +1197,8 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
         "parsely-pub-date","sailthru.date","pubdate","publishdate",
         "datepublished","dc.date","dc.date.issued","dc.date.published",
         "date","prism.publishdate","fb:publication_time",
+        # También aceptamos modificadas como fallback de diagnóstico:
+        "article:modified_time","og:updated_time","updated_time"
     )
     ITEMPROP_CANDIDATES = ("datepublished","datecreated","dateissued","datemodified")
 
@@ -1408,7 +1231,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
         return None
 
     def _fetch(url0: str) -> Tuple[str, int, str, Optional[str]]:
-        # Devuelve (final_url, http_status, html_text, error)
         headers = {
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1417,7 +1239,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
         }
-        # 1) requests
         try:
             import requests  # type: ignore
             r = requests.get(url0, headers=headers, timeout=timeout, allow_redirects=True)
@@ -1433,7 +1254,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
         except Exception as e_req:
             err_req = f"requests failed: {e_req}"
 
-        # 2) urllib fallback
         try:
             from urllib.request import Request, urlopen
             req = Request(url0, headers={"User-Agent": UA, "Accept-Encoding": "gzip, deflate"})
@@ -1473,8 +1293,7 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
                         "key": key,
                         "raw": val,
                         "parsed_date": dt.date().isoformat(),
-                        "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
-                        "snippet": tag[:220].replace("\n"," "),
+                        "parsed_time": dt.strftime("%H:%M") if dt and (dt.hour + dt.minute + dt.second > 0) else "",
                     }
         return None
 
@@ -1514,8 +1333,7 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
                         "key": k,
                         "raw": v,
                         "parsed_date": dt.date().isoformat(),
-                        "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
-                        "snippet": (raw[:220].replace("\n"," ") + ("..." if len(raw) > 220 else "")),
+                        "parsed_time": dt.strftime("%H:%M") if dt and (dt.hour + dt.minute + dt.second > 0) else "",
                     }
             except Exception:
                 m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
@@ -1528,8 +1346,7 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
                             "key": "datePublished(regex)",
                             "raw": v,
                             "parsed_date": dt.date().isoformat(),
-                            "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
-                            "snippet": (raw[:220].replace("\n"," ") + ("..." if len(raw) > 220 else "")),
+                            "parsed_time": dt.strftime("%H:%M") if dt and (dt.hour + dt.minute + dt.second > 0) else "",
                         }
         return None
 
@@ -1545,15 +1362,13 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
                 "key": "time[datetime]",
                 "raw": v,
                 "parsed_date": dt.date().isoformat(),
-                "parsed_time": dt.strftime("%H:%M") if dt and dt.hour + dt.minute + dt.second > 0 else "",
-                "snippet": (html_text[max(0, m.start()-60):m.end()+60].replace("\n"," ")[:220]),
+                "parsed_time": dt.strftime("%H:%M") if dt and (dt.hour + dt.minute + dt.second > 0) else "",
             }
         return None
 
     def _try_all(html_text: str) -> Optional[Dict[str, Any]]:
         return _extract_meta(html_text) or _extract_ld(html_text) or _extract_time(html_text)
 
-    # ---------- fetch principal
     final_url, status, text, err = _fetch(url)
     result: Dict[str, Any] = {
         "url": url,
@@ -1575,7 +1390,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
             result.update(got)
             return result
 
-        # ¿hay amphtml?
         m_amp = AMP_LINK_RE.search(text)
         if m_amp:
             amp_url = m_amp.group(1)
@@ -1592,7 +1406,6 @@ def debug_extract_pubdate(url: str, *, timeout: float = 8.0, ua: Optional[str] =
                     result["source"] = "amp"
                     return result
 
-    # sin match
     return result
 
 __all__ = [
