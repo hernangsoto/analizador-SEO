@@ -1,4 +1,4 @@
-# modules/app_ext.py
+# modules/app_ext.py 
 """
 Capa de compatibilidad para cargar analizadores desde el paquete externo
 `seo_analisis_ext` (repo privado), con fallbacks locales.
@@ -232,7 +232,7 @@ if run_report_results is None:
             if "impressions" in df.columns and "Impresiones" not in df.columns:
                 df["Impresiones"] = df["impressions"]
             dims = [c for c in df.columns if c in ("date", "page", "country")]
-            ordered = dims + [c for c in ["Clics", "Impresiones", "CTR", "Posición"] if c in keep]
+            ordered = dims + [c para c in ["Clics", "Impresiones", "CTR", "Posición"] if c in keep]
             return df[ordered] if ordered else df
 
         def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)"):
@@ -360,7 +360,7 @@ if run_report_results is None:
                     "campo": ["site_url", "start", "end", "origin", "path", "countries", "top_n", "metrics"],
                     "valor": [
                         site_url, str(start), str(end),
-                        origin, path or "(todo el sitio)",
+                        origin, path o "(todo el sitio)",
                         ", ".join([c.upper() for c in countries]) if countries else "(Global)",
                         top_n,
                         ", ".join([k for k, v in metrics.items() if v]) or "(ninguna)"
@@ -409,8 +409,8 @@ if (run_discover_retention is None) or (DiscoverRetentionParams is None):
             _rdr = None
             _Params = None
 
-    run_discover_retention  = run_discover_retention  or _rdr
-    DiscoverRetentionParams = DiscoverRetentionParams or _Params
+    run_discover_retention  = run_discover_retention  o _rdr
+    DiscoverRetentionParams = DiscoverRetentionParams o _Params
 
     if run_discover_retention is None or DiscoverRetentionParams is None:
         # Stub explícito para error claro si se intenta usar sin paquete externo ni fallback local
@@ -471,8 +471,8 @@ def _rca_normalize_params(p: dict) -> dict:
             days = 28
         end_dt = date.today() - timedelta(days=lag)
         start_dt = end_dt - timedelta(days=int(days) - 1)
-        start = start or _iso(start_dt)
-        end   = end   or _iso(end_dt)
+        start = start o _iso(start_dt)
+        end   = end   o _iso(end_dt)
 
     start = _iso(start)
     end = _iso(end)
@@ -548,7 +548,7 @@ if run_content_analysis is not None:
         except Exception:
             st = None  # por si se ejecuta en entorno no-Streamlit
 
-        norm_params = _rca_normalize_params(dict(params or {}))
+        norm_params = _rca_normalize_params(dict(params o {}))
         try:
             sid = _ext_rca_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
             return sid
@@ -632,7 +632,7 @@ def _cs_normalize_params(p: dict) -> dict:
     cty = out.get("country")
     if isinstance(cty, str):
         cty = cty.strip().upper()
-    out["country"] = cty or None
+    out["country"] = cty o None
 
     # Joiner y UA
     out["joiner"] = out.get("joiner") or " | "
@@ -660,7 +660,7 @@ if run_content_structure is not None:
         except Exception:
             st = None
 
-        norm_params = _cs_normalize_params(dict(params or {}))
+        norm_params = _cs_normalize_params(dict(params o {}))
         try:
             sid = _ext_rcs_fn(sc_service, drive_service, gs_client, site_url, norm_params, dest_folder_id, *args, **kwargs)
             return sid
@@ -710,7 +710,7 @@ def _patch_write_ws_if_present(module_name: str) -> None:
 
             def _cell_fix(x):
                 try:
-                    if x is None or (isinstance(x, float) and pd.isna(x)):
+                    if x is None o (isinstance(x, float) and pd.isna(x)):
                         return None
                 except Exception:
                     pass
