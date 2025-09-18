@@ -16,6 +16,7 @@ Exporta:
 Incluye:
 - Shim robusto para run_content_analysis (normaliza fechas, tipo, filtros y alias)
 - Shim de normalización para run_content_structure (fechas, source, filtros, scraping)
+- Normalizador + wrapper de run_discover_retention (quita `window`, fechas ISO, ints)
 - Parche de serialización segura al escribir DataFrames a Google Sheets
 """
 
@@ -23,7 +24,7 @@ Incluye:
 # 1) Carga "suave" del paquete externo (sin depender de modules.utils)        #
 # ============================================================================ #
 try:
-    import importlib  # lo usamos más abajo para parches opcionales
+    import importlib  # usado para parches opcionales
 except Exception:
     importlib = None  # type: ignore
 
@@ -32,8 +33,10 @@ try:
 except Exception:
     _ext = None  # type: ignore
 
+
 def _get_ext_attr(name: str, default=None):
     return getattr(_ext, name, default) if _ext is not None else default
+
 
 # =================== Preferimos funciones del paquete externo ===================
 
@@ -50,6 +53,7 @@ run_ga4_audience_report = _get_ext_attr("run_ga4_audience_report")
 # Nuevo análisis Discover Retention (preferir export desde __init__, si existe)
 run_discover_retention  = _get_ext_attr("run_discover_retention")
 DiscoverRetentionParams = _get_ext_attr("DiscoverRetentionParams")
+
 
 # ============================= Fallbacks ========================================
 
@@ -243,7 +247,7 @@ if run_report_results is None:
             ordered = dims + [c for c in ["Clics", "Impresiones", "CTR", "Posición"] if c in keep]
             return df[ordered] if ordered else df
 
-        def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)"):
+        def _rr__write_ws(ws, df: _pd.DataFrame, empty_note="(sin datos)") -> None:
             if df is None or df.empty:
                 ws.clear()
                 ws.update([[empty_note]])
@@ -381,6 +385,7 @@ if run_report_results is None:
 
             return sid
 
+
 # GA4 Audiencia (ext → submódulo → local)
 if run_ga4_audience_report is None:
     _ga4aud = None
@@ -395,61 +400,10 @@ if run_ga4_audience_report is None:
             _ga4aud = None
     run_ga4_audience_report = _ga4aud
 
+
 # =============================================================================
-# Discover Retention con normalización de params y resolución perezosa
+# Discover Retention: resolución + normalizador + wrapper con debug
 # =============================================================================
-def _dr_normalize_params(p: dict) -> dict:
-    """Ajusta el payload del UI al constructor DiscoverRetentionParams del paquete externo.
-       - Aplana window.start/end -> start/end (YYYY-MM-DD)
-       - Settea defaults si faltan fechas (últimos 10 días con lag)
-       - Fuerza tipos correctos (ints)
-       - Elimina claves no soportadas
-    """
-    from datetime import date, datetime, timedelta
-
-    q = dict(p or {})
-    win = dict(q.pop("window", {}) or {})
-
-    start = q.get("start") or win.get("start") or win.get("start_date")
-    end   = q.get("end")   or win.get("end")   or win.get("end_date")
-    lag   = int(q.get("lag_days", 2) or 0)
-    lookback_days = int(q.get("days", 10) or 10)
-
-    def _as_iso10(x):
-        if x in (None, "", "None"):
-            return None
-        if isinstance(x, (date, datetime)):
-            return x.isoformat()[:10]
-        s = str(x).strip()
-        # Acepta "YYYY-MM-DD" o "YYYY-MM-DDTHH:MM:SS"
-        return s[:10] if len(s) >= 10 else s
-
-    end_iso = _as_iso10(end)
-    if not end_iso:
-        end_iso = (date.today() - timedelta(days=lag)).isoformat()
-
-    # si no viene start, toma ventana de 'lookback_days'
-    start_iso = _as_iso10(start)
-    if not start_iso:
-        start_iso = (date.fromisoformat(end_iso) - timedelta(days=lookback_days - 1)).isoformat()
-
-    # Si por error vienen invertidas, las ordenamos
-    if start_iso > end_iso:
-        start_iso, end_iso = end_iso, start_iso
-
-    clean = {
-        "start": start_iso,                     # YYYY-MM-DD
-        "end": end_iso,                         # YYYY-MM-DD
-        "lag_days": lag,                        # int
-        "min_clicks": int(q.get("min_clicks", 0) or 0),
-        "min_impressions": int(q.get("min_impressions", 0) or 0),
-        "sheet_title_prefix": q.get("sheet_title_prefix")
-                              or q.get("sheet_title_pref")
-                              or "Incorp. y permanencia Discover",
-        # No incluimos claves desconocidas para el dataclass
-    }
-    return clean
-
 def _resolve_discover_retention():
     """Devuelve (fn, Params) intentando, en orden:
        1) Atributos exportados por el paquete externo ya cargado (_ext)
@@ -483,7 +437,57 @@ def _resolve_discover_retention():
 
     return fn, Params
 
-# --- reemplaza toda la función _wrap_dr por esta (y su uso permanece igual) ---
+
+def _dr_normalize_params(p: dict) -> dict:
+    """Ajusta el payload del UI al constructor DiscoverRetentionParams del paquete externo.
+       - Aplana window.start/end -> start/end (YYYY-MM-DD)
+       - Settea defaults si faltan fechas (últimos 10 días con lag)
+       - Fuerza tipos correctos (ints)
+       - Elimina claves no soportadas (p.ej. 'window')
+    """
+    from datetime import date, datetime, timedelta
+
+    q = dict(p or {})
+    win = dict(q.pop("window", {}) or {})
+
+    start = q.get("start") or win.get("start") or win.get("start_date")
+    end   = q.get("end")   or win.get("end")   or win.get("end_date")
+    lag   = int(q.get("lag_days", 2) or 0)
+    lookback_days = int(q.get("days", 10) or 10)
+
+    def _as_iso10(x):
+        if x in (None, "", "None"):
+            return None
+        if isinstance(x, (date, datetime)):
+            return x.isoformat()[:10]
+        s = str(x).strip()
+        return s[:10] if len(s) >= 10 else s
+
+    end_iso = _as_iso10(end)
+    if not end_iso:
+        end_iso = (date.today() - timedelta(days=lag)).isoformat()
+
+    start_iso = _as_iso10(start)
+    if not start_iso:
+        start_iso = (date.fromisoformat(end_iso) - timedelta(days=lookback_days - 1)).isoformat()
+
+    if start_iso > end_iso:
+        start_iso, end_iso = end_iso, start_iso
+
+    clean = {
+        "start": start_iso,                     # YYYY-MM-DD
+        "end": end_iso,                         # YYYY-MM-DD
+        "lag_days": lag,                        # int
+        "min_clicks": int(q.get("min_clicks", 0) or 0),
+        "min_impressions": int(q.get("min_impressions", 0) or 0),
+        "sheet_title_prefix": q.get("sheet_title_prefix")
+                              or q.get("sheet_title_pref")
+                              or "Incorp. y permanencia Discover",
+        # No incluimos claves desconocidas para el dataclass
+    }
+    return clean
+
+
 def _wrap_dr(fn):
     """Envoltura que limpia el payload y muestra debug en Streamlit si falla."""
     def _inner(sc_service, drive_service, gs_client, site_url, params, dest_folder_id=None, *args, **kwargs):
@@ -502,29 +506,30 @@ def _wrap_dr(fn):
         try:
             return fn(sc_service, drive_service, gs_client, site_url, params_clean, dest_folder_id, *args, **kwargs)
         except Exception as e:
-            # Modo debug visible sin tocar app.py
             if st is not None:
                 st.session_state["_dr_norm_params"] = params_clean
                 st.session_state["_dr_error"] = str(e)
                 st.error(f"❌ Discover Retention falló: {e}")
                 st.caption("Payload normalizado enviado al runner:")
                 st.code(_json.dumps(params_clean, ensure_ascii=False, indent=2))
-            # No re-lanzamos: devolvemos None para que el UI siga vivo
             return None
     return _inner
-# Intento de resolución al importar el módulo
+
+
+# Intento de resolución al importar el módulo → SI ENCONTRAMOS, EXPORTAMOS WRAPPER
 _fn, _Params = _resolve_discover_retention()
 if _fn and _Params:
-    run_discover_retention = _wrap_dr(_fn)     # type: ignore[assignment]
-    DiscoverRetentionParams = _Params          # type: ignore[assignment]
+    run_discover_retention = _wrap_dr(_fn)     # <-- siempre envuelto con normalizador
+    DiscoverRetentionParams = _Params
 else:
-    # Stub perezoso: reintenta resolver y envuelve en el momento de la llamada
+    # Stub perezoso: reintenta resolver en el momento de la llamada
     def run_discover_retention(*args, **kwargs):  # type: ignore[no-redef]
         _fn2, _Params2 = _resolve_discover_retention()
         if _fn2 and _Params2:
-            globals()["run_discover_retention"] = _wrap_dr(_fn2)
             globals()["DiscoverRetentionParams"] = _Params2
-            return globals()["run_discover_retention"](*args, **kwargs)
+            wrapped = _wrap_dr(_fn2)
+            globals()["run_discover_retention"] = wrapped
+            return wrapped(*args, **kwargs)
         raise RuntimeError(
             "Falta seo_analisis_ext.run_discover_retention. "
             "Instalá/actualizá el paquete externo o agregá modules/discover_retention.py."
@@ -534,8 +539,10 @@ else:
         """Stub: se reemplaza automáticamente si el paquete externo/fallback está disponible."""
         pass
 
+
 USING_EXT = bool(_ext)
 EXT_PACKAGE = _ext
+
 
 # =============================================================================
 # Shim de normalización para run_content_analysis
@@ -638,6 +645,7 @@ def _rca_normalize_params(p: dict) -> dict:
 
     return p
 
+
 if run_content_analysis is not None:
     _ext_rca_fn = run_content_analysis
 
@@ -660,6 +668,7 @@ if run_content_analysis is not None:
             return None
 
     run_content_analysis = _rca_wrapper
+
 
 # =============================================================================
 # Shim de normalización para run_content_structure
@@ -735,6 +744,7 @@ def _cs_normalize_params(p: dict) -> dict:
     out["sheet_title_prefix"] = out.get("sheet_title_prefix") or "Estructura contenidos"
     return out
 
+
 if run_content_structure is not None:
     _ext_rcs_fn = run_content_structure
 
@@ -758,6 +768,7 @@ if run_content_structure is not None:
 
     run_content_structure = _rcs_wrapper
 
+
 # =============================================================================
 # Parche de serialización segura al escribir a Sheets desde módulos externos
 # =============================================================================
@@ -773,6 +784,7 @@ try:
     import datetime as _dt
 except Exception:
     _dt = None  # type: ignore
+
 
 def _patch_write_ws_if_present(module_name: str) -> None:
     """Si el módulo define _write_ws(...), lo parcheamos para serializar DataFrames de forma segura."""
@@ -836,6 +848,7 @@ def _patch_write_ws_if_present(module_name: str) -> None:
     except Exception:
         pass
 
+
 for _candidate in [
     "seo_analisis_ext.discover_snoop",
     "seo_analisis_ext.content_analysis",
@@ -845,6 +858,7 @@ for _candidate in [
     "seo_analisis_ext.utils_gsheets",
 ]:
     _patch_write_ws_if_present(_candidate)
+
 
 __all__ = [
     "USING_EXT",
