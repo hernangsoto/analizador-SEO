@@ -218,6 +218,10 @@ def maintenance_extra_ui():
     else:
         st.caption("🧩 Usando análisis embebidos en este repo.")
     st.checkbox("🔧 Modo debug (Drive/GSC)", key="DEBUG")
+    # Debug de fecha de publicación (Discover Retention) + forzar compat
+    st.checkbox("🐞 Debug publicación (Discover)", key="debug_pubdate", value=True)
+    st.checkbox("🧰 Forzar modo compat (Discover)", key="force_daily_compat", value=False)
+
     # Pequeño panel de diagnóstico opcional
     if st.session_state.get("DEBUG"):
         try:
@@ -2263,30 +2267,7 @@ elif analisis == "12":
 
     # --- Ejecutar
     if st.button("📊 Ejecutar análisis de Discover (incorporación/permanencia)", type="primary", key="disc_ret_run"):
-        params = {
-            "window": {
-                "mode": "last_10_days",
-               "lag_days": int(lag),
-                "start": start_date,
-                "end": end_date,
-                "timezone": "UTC",
-               "hourly": True,
-            },
-            "publication_time": {
-                "mode": "auto" if mode.startswith("Automática") else "xpath",
-                "xpath": xp_pub or "",
-                "cascade": True,
-               "timezone": "UTC",
-            },
-            "filters": {
-                "section": section or None,
-               "device": None if device == "(Todos)" else device,
-                "country": country or None,  # ISO-3
-            },
-           "template_sheet_id": "1SB9wFHWyDfd5P-24VBP7-dE1f1t7YvVYjnsc2XjqU8M",
-            "sheet_title_prefix": "Incorp. y permanencia Discover",
-        }
-        if len(site_urls) <= 1:
+        lif analisis == "12":        if len(site_urls) <= 1:
             sid = run_with_indicator(
                 "Procesando Discover (incorp./permanencia)",
                 run_discover_retention,
