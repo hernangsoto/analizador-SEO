@@ -2249,29 +2249,50 @@ elif analisis == "12":
     st.info(f"Período analizado (UTC): **{start_date} → {end_date}**")
 
     # --- Detección de fecha de publicación
-    mode = st.radio("Detección de fecha de publicación", ["Automática (cascada)", "XPath personalizado"],
-                    index=0, horizontal=True, key="disc_ret_mode")
+    mode = st.radio(
+        "Detección de fecha de publicación",
+        ["Automática (cascada)", "XPath personalizado"],
+        index=0, horizontal=True, key="disc_ret_mode"
+    )
     xp_pub = ""
     if mode.startswith("XPath"):
         xp_pub = st.text_input(
             "XPath de fecha/hora de publicación (UTC)",
-           value="", key="disc_ret_xpath",
+            value="", key="disc_ret_xpath",
             help="Ej.: //meta[@property='article:published_time']/@content  o  //time/@datetime"
         )
 
-   # --- Filtros
+    # --- Filtros
     with st.expander("Filtros", expanded=False):
-        section = st.text_input("Sección (path comienza con, ej: /deportes/)", value="", key="disc_ret_section")
+        section = st.text_input("Sección (path comienza con, ej: /deportes/)", value="", key="disc_ret_section").strip()
         device = st.selectbox("Dispositivo", ["(Todos)","DESKTOP","MOBILE","TABLET"], index=0, key="disc_ret_device")
         country = st.text_input("País (ISO-3, ej: ARG/ESP/USA)", value="", key="disc_ret_country").strip().upper()
 
+    # --- Armar parámetros para el runner
+    params = {
+        "start": start_date,
+        "end": end_date,
+        "pubdate": {"mode": "xpath", "xpath": xp_pub} if mode.startswith("XPath") else {"mode": "auto"},
+        "filters": {
+            "section_startswith": section or None,
+            "device": None if device == "(Todos)" else device,  # valores esperados: DESKTOP/MOBILE/TABLET
+            "country_iso3": country or None,
+        },
+        # flags de diagnóstico/compat del sidebar (si los usás en el runner)
+        "debug_pubdate": bool(st.session_state.get("debug_pubdate")),
+        "force_daily_compat": bool(st.session_state.get("force_daily_compat")),
+        # opcional: prefijo de título (mantener consistencia con otros runners)
+        "sheet_title_prefix": "Discover Incorp./Permanencia",
+    }
+
     # --- Ejecutar
     if st.button("📊 Ejecutar análisis de Discover (incorporación/permanencia)", type="primary", key="disc_ret_run"):
-        lif analisis == "12":        if len(site_urls) <= 1:
+        if len(site_urls) <= 1:
             sid = run_with_indicator(
                 "Procesando Discover (incorp./permanencia)",
                 run_discover_retention,
-                sc_service, drive_service, gs_client, site_url, params,
+                sc_service, drive_service, gs_client,
+                site_url, params,
                 st.session_state.get("dest_folder_id")
             )
             if sid:
@@ -2280,19 +2301,28 @@ elif analisis == "12":
                 st.markdown(f"➡️ **Abrir Google Sheets**: https://docs.google.com/spreadsheets/d/{sid}")
                 with st.expander("Compartir acceso al documento (opcional)"):
                     share_controls(drive_service, sid, default_email=_me.get("emailAddress") if _me else None)
-                st.session_state.update(last_file_id=sid, last_file_kind="discover_retention", post_actions_visible=True)
+                st.session_state.update(
+                    last_file_id=sid,
+                    last_file_kind="discover_retention",
+                    post_actions_visible=True
+                )
         else:
             results = run_for_sites(
                 "Procesando Discover (incorp./permanencia)",
                 run_discover_retention,
-                sc_service, drive_service, gs_client, site_urls, params, st.session_state.get("dest_folder_id")
+                sc_service, drive_service, gs_client,
+                site_urls, params,
+                st.session_state.get("dest_folder_id")
             )
             st.success(f"¡Listo! Se generaron {len(results)} documentos.")
             for s, sid in results:
                 st.markdown(f"• **{s}** → https://docs.google.com/spreadsheets/d/{sid}")
             if results:
-                st.session_state.update(last_file_id=results[-1][1], last_file_kind="discover_retention", post_actions_visible=True)
-
+                st.session_state.update(
+                    last_file_id=results[-1][1],
+                    last_file_kind="discover_retention",
+                    post_actions_visible=True
+                )
 elif analisis == "9":
     # ===== Análisis de contenido (runner externo, con shim de normalización) =====
     if (run_content_analysis is None) or (params_for_content is None):
