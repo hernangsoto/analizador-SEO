@@ -1053,17 +1053,66 @@ _fn, _Params = _resolve_discover_retention()
 
 def _wrap_run_discover_retention(ext_fn, ParamsCls):
     def _runner(sc_service, drive_service, gs_client, site_url: str, params: Any, dest_folder_id: Optional[str] = None):
-        # Normalizar params para no romper __init__ de ParamsCls
+        # Normalizar params → dict, aunque sea un dataclass externo
         p_dict = params if isinstance(params, dict) else getattr(params, "__dict__", {}) or {}
-        p_norm = _normalize_params_for_ext(p_dict)
+        p_norm = dict(p_dict)  # copia
 
-        # Forzar compat si nos lo piden
-        if bool(p_norm.get("force_daily_compat", False)):
+        # ===== Unificación de flags =====
+        # Aceptar múltiples nombres para el modo compat y el debug, y leer Streamlit si está.
+        st = _dr_try_import_streamlit()
+        ss = getattr(st, "session_state", {}) if st is not None else {}
+
+        def _truthy(*keys):
+            for k in keys:
+                v = p_norm.get(k)
+                if isinstance(v, str):
+                    if v.strip().lower() in ("1","true","yes","sí","si","on"):
+                        return True
+                if v:
+                    return True
+                # session_state como respaldo
+                if ss and k in ss and bool(ss[k]):
+                    return True
+            return False
+
+        # Aliases para compat
+        force_compat = _truthy(
+            "force_daily_compat", "force_compat", "compat", "daily_mode",
+            "modo_compat", "forzar_compat"
+        )
+        # Aliases para debug
+        debug_pub = _truthy(
+            "debug_pubdate", "debug_pub", "debug_publication", "debug",
+            "discover_debug", "dr_debug_pubdate"
+        )
+
+        # Variables de entorno también (útil en Cloud)
+        try:
+            import os
+            if not force_compat and os.environ.get("SEO_DR_FORCE_COMPAT","").strip() == "1":
+                force_compat = True
+            if not debug_pub and os.environ.get("SEO_DR_DEBUG","").strip() == "1":
+                debug_pub = True
+        except Exception:
+            pass
+
+        # Si piden debug, forzamos compat para garantizar la pestaña “Debug Publicación”
+        if debug_pub:
+            force_compat = True
+        # Propagar flags al diccionario normalizado que usa el compat
+        p_norm["force_daily_compat"] = bool(force_compat)
+        p_norm["debug_pubdate"] = bool(debug_pub)
+
+        # Alias de fechas/origen por si vienen con otros nombres (robusto)
+        p_norm = _normalize_params_for_ext(p_norm)
+
+        # Ruta compat explícita
+        if force_compat:
             return _run_discover_retention_daily_compat(
                 sc_service, drive_service, gs_client, site_url, p_norm, dest_folder_id
             )
 
-        # Intentar con el runner externo
+        # Intentar runner externo y caer a compat si la API rechaza horas
         try:
             if ParamsCls and not isinstance(params, ParamsCls):
                 try:
@@ -1075,11 +1124,9 @@ def _wrap_run_discover_retention(ext_fn, ParamsCls):
             return ext_fn(sc_service, drive_service, gs_client, site_url, params_ext, dest_folder_id)
         except Exception as e:
             if _dr_is_invalid_argument(e):
-                # Fallback diario con aviso
                 return _run_discover_retention_daily_compat(
                     sc_service, drive_service, gs_client, site_url, p_norm, dest_folder_id
                 )
-            # Otro error → re-lanzar
             raise
     return _runner
 
