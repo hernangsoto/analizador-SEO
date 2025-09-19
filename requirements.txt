@@ -1,4 +1,4 @@
-streamlit>=1.36
+streamlit>=1.36 
 pandas>=2.0
 requests>=2.31
 streamlit-lottie==0.0.5
@@ -13,9 +13,11 @@ google-auth-httplib2>=0.2
 google-analytics-data>=0.18.0
 google-analytics-admin
 
-
 gspread>=6.0
 gspread-dataframe>=3.3
 
 # Opcional, pero útil en despliegues
 protobuf>=4.25
+
+# ✅ Agregá esta línea al final para el paquete local
+-e ./seo_analisis_ext
